@@ -1,6 +1,9 @@
 #include <stdint.h>
 #include "quantum.h"
 #include "defaults.h"
+#include QMK_KEYBOARD_H
+
+keyboard_config_t keyboard_config;
 
 bool process_record_defaults(uint16_t keycode, keyrecord_t *record) {
     switch (keycode) {
