@@ -1,3 +1,6 @@
+// Copyright 2024 ZSA Technology Labs, Inc <@zsa>
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
 #include "quantum.h"
 // List of ZSA specific keycodes, appended to the end of the keycode list.
 enum zsa_keycodes {
