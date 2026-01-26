@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include QMK_KEYBOARD_H
-#include "active_layer_indicator.h"
+#include "klayi.h"
 #include "raw_hid.h"
 
 ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 1);
@@ -21,8 +21,8 @@ static void send_layer_event(uint8_t layer) {
     raw_hid_send(buffer, RAW_EPSIZE);
 }
 
-layer_state_t layer_state_set_active_layer_indicator(layer_state_t state) {
-    state = layer_state_set_active_layer_indicator_kb(state);
+layer_state_t layer_state_set_klayi(layer_state_t state) {
+    state = layer_state_set_klayi_kb(state);
 
     uint8_t layer = get_highest_layer(state | default_layer_state);
     if (current_layer != layer) {
@@ -33,7 +33,7 @@ layer_state_t layer_state_set_active_layer_indicator(layer_state_t state) {
     return state;
 }
 
-layer_state_t default_layer_state_set_active_layer_indicator(layer_state_t state) {
-    layer_state_set_active_layer_indicator(state | layer_state);
-    return default_layer_state_set_active_layer_indicator_kb(state);
+layer_state_t default_layer_state_set_klayi(layer_state_t state) {
+    layer_state_set_klayi(state | layer_state);
+    return default_layer_state_set_klayi_kb(state);
 }
