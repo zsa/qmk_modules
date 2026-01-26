@@ -1,0 +1,7 @@
+{
+    "maintainer": "Nomisolutions",
+    "module_name": "klayi",
+    "features": {
+        "raw": true
+    }
+}
