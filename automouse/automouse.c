@@ -11,6 +11,9 @@ static struct {
     uint16_t last_activity;
     bool     is_active;
     bool     is_enabled;
+#ifdef AUTOMOUSE_ONESHOT
+    bool oneshot_triggered;
+#endif
 } state = {
     .is_enabled = true,
 };
@@ -33,6 +36,9 @@ static void automouse_activate(void) {
         layer_on(AUTOMOUSE_LAYER);
     }
     state.last_activity = timer_read();
+#ifdef AUTOMOUSE_ONESHOT
+    state.oneshot_triggered = false;
+#endif
 }
 
 static void automouse_deactivate(void) {
@@ -87,7 +93,11 @@ report_mouse_t pointing_device_task_automouse(report_mouse_t mouse_report) {
         automouse_activate();
     }
 
+#ifdef AUTOMOUSE_ONESHOT
+    if (state.is_active && state.oneshot_triggered && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
+#else
     if (state.is_active && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
+#endif
         automouse_deactivate();
     }
 
@@ -102,27 +112,21 @@ bool process_record_automouse(uint16_t keycode, keyrecord_t *record) {
         return false;
     }
 
-    if (!state.is_enabled || !state.is_active || !record->event.pressed) {
+    if (!state.is_enabled || !state.is_active) {
         return true;
     }
 
-#ifndef AUTOMOUSE_ONESHOT
-    state.last_activity = timer_read();
+#ifdef AUTOMOUSE_ONESHOT
+    // Start timeout on key up so the full tap completes on the mouse layer
+    if (!record->event.pressed && !state.oneshot_triggered) {
+        state.oneshot_triggered = true;
+        state.last_activity = timer_read();
+    }
+#else
+    if (record->event.pressed) {
+        state.last_activity = timer_read();
+    }
 #endif
 
     return true;
 }
-
-#ifdef AUTOMOUSE_ONESHOT
-void post_process_record_automouse(uint16_t keycode, keyrecord_t *record) {
-    if (!state.is_enabled || !state.is_active || !record->event.pressed) {
-        return;
-    }
-
-    if (keycode == KC_AUTOMOUSE_TOGGLE) {
-        return;
-    }
-
-    automouse_deactivate();
-}
-#endif
