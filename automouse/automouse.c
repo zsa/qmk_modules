@@ -9,6 +9,10 @@ ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 0);
 
 static struct {
     uint16_t last_activity;
+    int16_t  accumulated_x;
+    int16_t  accumulated_y;
+    int16_t  accumulated_h;
+    int16_t  accumulated_v;
     bool     is_active;
     bool     is_enabled;
 #ifdef AUTOMOUSE_ONESHOT
@@ -84,12 +88,22 @@ report_mouse_t pointing_device_task_automouse(report_mouse_t mouse_report) {
         return mouse_report;
     }
 
-    bool threshold_exceeded = abs(mouse_report.x) > AUTOMOUSE_THRESHOLD ||
-                              abs(mouse_report.y) > AUTOMOUSE_THRESHOLD ||
-                              abs(mouse_report.h) > AUTOMOUSE_SCROLL_THRESHOLD ||
-                              abs(mouse_report.v) > AUTOMOUSE_SCROLL_THRESHOLD;
+    state.accumulated_x += mouse_report.x;
+    state.accumulated_y += mouse_report.y;
+    state.accumulated_h += mouse_report.h;
+    state.accumulated_v += mouse_report.v;
+
+    bool threshold_exceeded = abs(state.accumulated_x) > AUTOMOUSE_THRESHOLD ||
+                              abs(state.accumulated_y) > AUTOMOUSE_THRESHOLD ||
+                              abs(state.accumulated_h) > AUTOMOUSE_SCROLL_THRESHOLD ||
+                              abs(state.accumulated_v) > AUTOMOUSE_SCROLL_THRESHOLD ||
+                              (mouse_report.buttons && state.is_active);
 
     if (threshold_exceeded) {
+        state.accumulated_x = 0;
+        state.accumulated_y = 0;
+        state.accumulated_h = 0;
+        state.accumulated_v = 0;
         automouse_activate();
     }
 
