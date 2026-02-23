@@ -37,6 +37,9 @@ static void automouse_activate(void) {
             return;
         }
         state.is_active = true;
+    }
+    // Ensure layer is on — it may have been turned off externally (e.g. TO(), TG())
+    if (!layer_state_is(AUTOMOUSE_LAYER)) {
         layer_on(AUTOMOUSE_LAYER);
     }
     state.last_activity = timer_read();
