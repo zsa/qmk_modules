@@ -29,6 +29,14 @@
 #include "quantum.h"
 #include "navigator.h"
 
+#if _NAVIGATOR_ROTATION != 0 && _NAVIGATOR_ROTATION != 90 && \
+    _NAVIGATOR_ROTATION != 180 && _NAVIGATOR_ROTATION != 270
+#define _NT_ROT_RAD (_NAVIGATOR_ROTATION * 3.14159265358979f / 180.0f)
+// Evaluate cosine and sine at compile time to avoid runtime trig functions / math library calls
+static const float rotation_cos = __builtin_cosf(_NT_ROT_RAD);
+static const float rotation_sin = __builtin_sinf(_NT_ROT_RAD);
+#endif
+
 float scroll_accumulated_h = 0;
 float scroll_accumulated_v = 0;
 
@@ -37,6 +45,24 @@ bool navigator_turbo = false;
 bool navigator_aim = false;
 
 report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_report) {
+    // Apply rotation transform to match physical trackball orientation
+#if _NAVIGATOR_ROTATION == 90
+    mouse_xy_report_t tmp_x = mouse_report.x;
+    mouse_report.x = mouse_report.y;
+    mouse_report.y = -tmp_x;
+#elif _NAVIGATOR_ROTATION == 180
+    mouse_report.x = -mouse_report.x;
+    mouse_report.y = -mouse_report.y;
+#elif _NAVIGATOR_ROTATION == 270
+    mouse_xy_report_t tmp_x = mouse_report.x;
+    mouse_report.x = -mouse_report.y;
+    mouse_report.y = tmp_x;
+#elif _NAVIGATOR_ROTATION != 0
+    mouse_xy_report_t tmp_x = mouse_report.x;
+    mouse_report.x = (mouse_xy_report_t)(tmp_x * rotation_cos - mouse_report.y * rotation_sin);
+    mouse_report.y = (mouse_xy_report_t)(tmp_x * rotation_sin + mouse_report.y * rotation_cos);
+#endif
+
     // Turbo mode is used to increase the speed of the mouse cursor
     // by multiplying the x and y values by a factor.
     if (navigator_turbo) {
