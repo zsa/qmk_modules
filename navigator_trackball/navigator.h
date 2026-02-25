@@ -34,6 +34,14 @@
     #define NAVIGATOR_AIM_DIVIDER 3
 #endif
 
+#ifdef NAVIGATOR_AIM_LAYERS
+    #define _NAVIGATOR_AIM_HAS_LAYERS
+#endif
+
+#ifdef NAVIGATOR_TURBO_LAYERS
+    #define _NAVIGATOR_TURBO_HAS_LAYERS
+#endif
+
 extern bool set_scrolling;
 extern bool navigator_turbo;
 extern bool navigator_aim;

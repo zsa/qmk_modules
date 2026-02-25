@@ -44,6 +44,30 @@ bool set_scrolling = false;
 bool navigator_turbo = false;
 bool navigator_aim = false;
 
+#ifdef _NAVIGATOR_AIM_HAS_LAYERS
+static const uint8_t navigator_aim_layers[] = NAVIGATOR_AIM_LAYERS;
+#define _NAVIGATOR_AIM_LAYER_COUNT (sizeof(navigator_aim_layers) / sizeof(navigator_aim_layers[0]))
+
+static bool navigator_aim_layer_active(void) {
+    for (uint8_t i = 0; i < _NAVIGATOR_AIM_LAYER_COUNT; i++) {
+        if (layer_state_is(navigator_aim_layers[i])) return true;
+    }
+    return false;
+}
+#endif
+
+#ifdef _NAVIGATOR_TURBO_HAS_LAYERS
+static const uint8_t navigator_turbo_layers[] = NAVIGATOR_TURBO_LAYERS;
+#define _NAVIGATOR_TURBO_LAYER_COUNT (sizeof(navigator_turbo_layers) / sizeof(navigator_turbo_layers[0]))
+
+static bool navigator_turbo_layer_active(void) {
+    for (uint8_t i = 0; i < _NAVIGATOR_TURBO_LAYER_COUNT; i++) {
+        if (layer_state_is(navigator_turbo_layers[i])) return true;
+    }
+    return false;
+}
+#endif
+
 report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_report) {
     // Apply rotation transform to match physical trackball orientation
 #if _NAVIGATOR_ROTATION == 90
@@ -65,13 +89,21 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
 
     // Turbo mode is used to increase the speed of the mouse cursor
     // by multiplying the x and y values by a factor.
-    if (navigator_turbo) {
+    bool turbo_active = navigator_turbo;
+#ifdef _NAVIGATOR_TURBO_HAS_LAYERS
+    turbo_active = turbo_active || navigator_turbo_layer_active();
+#endif
+    if (turbo_active) {
         mouse_report.x *= NAVIGATOR_TURBO_MULTIPLIER;
         mouse_report.y *= NAVIGATOR_TURBO_MULTIPLIER;
     }
     // Aim mode is used to slow down the mouse cursor
     // by dividing the x and y values by a factor.
-    if (navigator_aim) {
+    bool aim_active = navigator_aim;
+#ifdef _NAVIGATOR_AIM_HAS_LAYERS
+    aim_active = aim_active || navigator_aim_layer_active();
+#endif
+    if (aim_active) {
         mouse_report.x /= NAVIGATOR_AIM_DIVIDER;
         mouse_report.y /= NAVIGATOR_AIM_DIVIDER;
     }
