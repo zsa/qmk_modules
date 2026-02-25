@@ -26,8 +26,13 @@
 // Normalize so 360 == 0, 450 == 90, etc.
 #define _NAVIGATOR_ROTATION (NAVIGATOR_TRACKBALL_ROTATION % 360)
 
-#define NAVIGATOR_TURBO_MULTIPLIER 3
-#define NAVIGATOR_AIM_DIVIDER 3
+#ifndef NAVIGATOR_TURBO_MULTIPLIER
+    #define NAVIGATOR_TURBO_MULTIPLIER 3
+#endif
+
+#ifndef NAVIGATOR_AIM_DIVIDER
+    #define NAVIGATOR_AIM_DIVIDER 3
+#endif
 
 extern bool set_scrolling;
 extern bool navigator_turbo;
