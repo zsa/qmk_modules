@@ -72,15 +72,15 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
     // Apply rotation transform to match physical trackball orientation
 #if _NAVIGATOR_ROTATION == 90
     mouse_xy_report_t tmp_x = mouse_report.x;
-    mouse_report.x = mouse_report.y;
-    mouse_report.y = -tmp_x;
+    mouse_report.x = -mouse_report.y;
+    mouse_report.y = tmp_x;
 #elif _NAVIGATOR_ROTATION == 180
     mouse_report.x = -mouse_report.x;
     mouse_report.y = -mouse_report.y;
 #elif _NAVIGATOR_ROTATION == 270
     mouse_xy_report_t tmp_x = mouse_report.x;
-    mouse_report.x = -mouse_report.y;
-    mouse_report.y = tmp_x;
+    mouse_report.x = mouse_report.y;
+    mouse_report.y = -tmp_x;
 #elif _NAVIGATOR_ROTATION != 0
     mouse_xy_report_t tmp_x = mouse_report.x;
     mouse_report.x = (mouse_xy_report_t)(tmp_x * rotation_cos - mouse_report.y * rotation_sin);
