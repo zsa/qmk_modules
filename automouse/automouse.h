@@ -22,6 +22,14 @@
 #    define AUTOMOUSE_SCROLL_THRESHOLD AUTOMOUSE_THRESHOLD
 #endif
 
+#ifndef AUTOMOUSE_DEBOUNCE
+#    define AUTOMOUSE_DEBOUNCE 25
+#endif
+
+#ifndef AUTOMOUSE_DELAY
+#    define AUTOMOUSE_DELAY GET_TAPPING_TERM(QK_MOUSE_BUTTON_1, &(keyrecord_t){})
+#endif
+
 void automouse_enable(void);
 void automouse_disable(void);
 void automouse_toggle(void);

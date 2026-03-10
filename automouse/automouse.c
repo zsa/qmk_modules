@@ -9,6 +9,8 @@ ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 0);
 
 static struct {
     uint16_t last_activity;
+    uint16_t last_keypress;
+    uint16_t last_activation;
     int16_t  accumulated_x;
     int16_t  accumulated_y;
     int16_t  accumulated_h;
@@ -91,6 +93,20 @@ report_mouse_t pointing_device_task_automouse(report_mouse_t mouse_report) {
         return mouse_report;
     }
 
+#ifdef AUTOMOUSE_ONESHOT
+    if (state.is_active && state.oneshot_triggered && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
+#else
+    if (state.is_active && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
+#endif
+        automouse_deactivate();
+    }
+
+    // Skip activation checks during debounce or post-keypress delay
+    if (timer_elapsed(state.last_activation) <= AUTOMOUSE_DEBOUNCE ||
+        timer_elapsed(state.last_keypress) <= AUTOMOUSE_DELAY) {
+        return mouse_report;
+    }
+
     state.accumulated_x += mouse_report.x;
     state.accumulated_y += mouse_report.y;
     state.accumulated_h += mouse_report.h;
@@ -107,15 +123,8 @@ report_mouse_t pointing_device_task_automouse(report_mouse_t mouse_report) {
         state.accumulated_y = 0;
         state.accumulated_h = 0;
         state.accumulated_v = 0;
+        state.last_activation = timer_read();
         automouse_activate();
-    }
-
-#ifdef AUTOMOUSE_ONESHOT
-    if (state.is_active && state.oneshot_triggered && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
-#else
-    if (state.is_active && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
-#endif
-        automouse_deactivate();
     }
 
     return mouse_report;
@@ -127,6 +136,11 @@ bool process_record_automouse(uint16_t keycode, keyrecord_t *record) {
             automouse_toggle();
         }
         return false;
+    }
+
+    // Track keypresses for the post-keypress delay
+    if (record->event.pressed) {
+        state.last_keypress = timer_read();
     }
 
     if (!state.is_enabled || !state.is_active) {
