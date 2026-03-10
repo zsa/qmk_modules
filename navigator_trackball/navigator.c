@@ -195,16 +195,16 @@ bool process_record_navigator_trackball(uint16_t keycode, keyrecord_t *record) {
             return false;
         case NAVIGATOR_TURBO:
             navigator_turbo = record->event.pressed;
-            return false;
+            break;
         case NAVIGATOR_AIM:
             navigator_aim = record->event.pressed;
-            return false;
+            break;
         case DRAG_SCROLL:
             set_scrolling = record->event.pressed;
-            return false;
+            break;
         case TOGGLE_SCROLL:
             if (record->event.pressed) set_scrolling = !set_scrolling;
-            return false;
+            break;
     }
     return true;
 }

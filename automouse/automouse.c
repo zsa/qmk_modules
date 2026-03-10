@@ -15,6 +15,7 @@ static struct {
     int16_t  accumulated_y;
     int16_t  accumulated_h;
     int16_t  accumulated_v;
+    int8_t   held_keys;
     bool     is_active;
     bool     is_enabled;
 #ifdef AUTOMOUSE_ONESHOT
@@ -39,6 +40,7 @@ static void automouse_activate(void) {
             return;
         }
         state.is_active = true;
+        state.held_keys = 0;
     }
     // Ensure layer is on — it may have been turned off externally (e.g. TO(), TG())
     if (!layer_state_is(AUTOMOUSE_LAYER)) {
@@ -53,6 +55,7 @@ static void automouse_activate(void) {
 static void automouse_deactivate(void) {
     if (state.is_active) {
         state.is_active = false;
+        state.held_keys = 0;
         if (!layer_held_externally()) {
             layer_off(AUTOMOUSE_LAYER);
         }
@@ -91,6 +94,11 @@ bool automouse_is_active(void) {
 report_mouse_t pointing_device_task_automouse(report_mouse_t mouse_report) {
     if (!state.is_enabled) {
         return mouse_report;
+    }
+
+    // Keep layer alive while keys are held on it
+    if (state.is_active && state.held_keys > 0) {
+        state.last_activity = timer_read();
     }
 
 #ifdef AUTOMOUSE_ONESHOT
@@ -138,13 +146,19 @@ bool process_record_automouse(uint16_t keycode, keyrecord_t *record) {
         return false;
     }
 
-    // Track keypresses for the post-keypress delay
-    if (record->event.pressed) {
-        state.last_keypress = timer_read();
+    if (!state.is_enabled || !state.is_active) {
+        // Track keypresses for the post-keypress delay only when layer is inactive
+        if (record->event.pressed) {
+            state.last_keypress = timer_read();
+        }
+        return true;
     }
 
-    if (!state.is_enabled || !state.is_active) {
-        return true;
+    // Track held keys while automouse layer is active
+    if (record->event.pressed) {
+        state.held_keys++;
+    } else if (state.held_keys > 0) {
+        state.held_keys--;
     }
 
 #ifdef AUTOMOUSE_ONESHOT
