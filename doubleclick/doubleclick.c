@@ -18,7 +18,6 @@ bool process_record_doubleclick(uint16_t keycode, keyrecord_t *record) {
                 double_click_timer = timer_read();
                 tap_code(KC_MS_BTN1);
             }
-            return false;
     }
 
     return true;
