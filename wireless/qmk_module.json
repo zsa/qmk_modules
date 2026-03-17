@@ -1,0 +1,8 @@
+{
+    "module_name": "ZSA Wireless",
+    "maintainer": "ZSA",
+    "license": "GPL-2.0-or-later",
+    "features": {
+        "bluetooth": true
+    }
+}
