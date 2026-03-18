@@ -12,6 +12,13 @@
 #include "report.h"
 #include "uart.h"
 #include "usb_util.h"
+#include "keyboard.h"
+#include "timer.h"
+#include "wait.h"
+#include "connection.h"
+#ifdef RGB_MATRIX_ENABLE
+#    include "rgb_matrix.h"
+#endif
 
 /* ---- Cached nRF state ---- */
 
@@ -101,6 +108,94 @@ void zsa_wireless_cmd_pair(void) {
     send_command(ZSA_MSG_CMD_PAIR);
 }
 
+/* ---- Idle power management ---- */
+
+static enum zsa_idle_step idle_step    = ZSA_IDLE_ACTIVE;
+static uint8_t            saved_rgb_val = 255;
+
+enum zsa_idle_step zsa_wireless_idle_step(void) {
+    return idle_step;
+}
+
+static void send_idle_state(enum zsa_idle_step step) {
+    struct zsa_idle_state payload = { .step = (uint8_t)step };
+    send_frame(ZSA_MSG_CMD_IDLE_STATE, (const uint8_t *)&payload, sizeof(payload));
+}
+
+static void idle_power_enter_step(enum zsa_idle_step step) {
+#ifdef RGB_MATRIX_ENABLE
+    if (step >= ZSA_IDLE_DIM && idle_step < ZSA_IDLE_DIM) {
+        saved_rgb_val = rgb_matrix_get_val();
+        rgb_matrix_sethsv_noeeprom(rgb_matrix_get_hue(), rgb_matrix_get_sat(), ZSA_IDLE_DIM_BRIGHTNESS);
+    }
+    if (step >= ZSA_IDLE_LEDS_OFF && idle_step < ZSA_IDLE_LEDS_OFF) {
+        rgb_matrix_disable_noeeprom();
+    }
+#endif
+    idle_step = step;
+    send_idle_state(step);
+}
+
+static void idle_power_wake(void) {
+#ifdef RGB_MATRIX_ENABLE
+    if (idle_step >= ZSA_IDLE_LEDS_OFF) {
+        rgb_matrix_enable_noeeprom();
+    }
+    if (idle_step >= ZSA_IDLE_DIM) {
+        rgb_matrix_sethsv_noeeprom(rgb_matrix_get_hue(), rgb_matrix_get_sat(), saved_rgb_val);
+    }
+#endif
+    idle_step = ZSA_IDLE_ACTIVE;
+    send_idle_state(ZSA_IDLE_ACTIVE);
+}
+
+static void idle_power_task(void) {
+    static bool     was_bluetooth  = false;
+    static uint32_t bt_switch_time = 0;
+
+    /* Only manage idle power when running wirelessly */
+    if (connection_get_host() != CONNECTION_HOST_BLUETOOTH) {
+        was_bluetooth = false;
+        if (idle_step != ZSA_IDLE_ACTIVE) {
+            idle_power_wake();
+        }
+        return;
+    }
+
+    /* Just switched to bluetooth — reset idle baseline */
+    if (!was_bluetooth) {
+        was_bluetooth  = true;
+        bt_switch_time = timer_read32();
+        if (idle_step != ZSA_IDLE_ACTIVE) {
+            idle_power_wake();
+        }
+        return;
+    }
+
+    /* Use the later of last input activity or bluetooth switch time */
+    uint32_t since_input  = last_input_activity_elapsed();
+    uint32_t since_switch = timer_elapsed32(bt_switch_time);
+    uint32_t idle_ms      = (since_input < since_switch) ? since_input : since_switch;
+
+    enum zsa_idle_step target = ZSA_IDLE_ACTIVE;
+    if      (idle_ms > ZSA_IDLE_DEEP_MS)      target = ZSA_IDLE_DEEP;
+    else if (idle_ms > ZSA_IDLE_SLOW_SCAN_MS) target = ZSA_IDLE_SLOW_SCAN;
+    else if (idle_ms > ZSA_IDLE_LEDS_OFF_MS)  target = ZSA_IDLE_LEDS_OFF;
+    else if (idle_ms > ZSA_IDLE_DIM_MS)        target = ZSA_IDLE_DIM;
+
+    if (target != idle_step) {
+        if (target > idle_step) {
+            idle_power_enter_step(target);
+        } else {
+            idle_power_wake();
+        }
+    }
+
+    if (idle_step >= ZSA_IDLE_SLOW_SCAN) {
+        wait_ms(ZSA_IDLE_SCAN_DELAY_MS);
+    }
+}
+
 /* ---- bluetooth.h weak function implementations ---- */
 
 void bluetooth_init(void) {
@@ -118,6 +213,8 @@ void bluetooth_task(void) {
             handle_rx_frame(&rx_parser.frame);
         }
     }
+
+    idle_power_task();
 }
 
 bool bluetooth_is_connected(void) {

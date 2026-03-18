@@ -38,6 +38,7 @@ enum zsa_msg_type {
     /* STM32 -> nRF: commands (0x20-0x2F) */
     ZSA_MSG_CMD_HIBERNATE    = 0x20,
     ZSA_MSG_CMD_PAIR         = 0x21,
+    ZSA_MSG_CMD_IDLE_STATE   = 0x22,
 
     /* nRF -> STM32: events / query responses (0x80-0x8F) */
     ZSA_MSG_EVT_BLE_STATUS   = 0x80,
@@ -92,6 +93,11 @@ enum zsa_pair_state_val {
 /* ZSA_MSG_EVT_LED_STATE (1 byte) */
 struct __attribute__((packed)) zsa_led_state {
     uint8_t leds; /* USB HID LED bits: bit0=num, bit1=caps, bit2=scroll */
+};
+
+/* ZSA_MSG_CMD_IDLE_STATE (1 byte) */
+struct __attribute__((packed)) zsa_idle_state {
+    uint8_t step; /* 0=active, 1=dim, 2=leds_off, 3=slow_scan, 4=deep */
 };
 
 /* ---- Parser ---- */
