@@ -4,10 +4,16 @@
  * Shared between STM32 (QMK) and nRF54 (Zephyr).
  * No dependencies on either framework.
  *
- * Wire format:
- *   SYNC(0xAA) | TYPE(1B) | LEN(1B) | PAYLOAD(0-64B) | CRC8(1B)
+ * Wire format (with byte-stuffing):
+ *   SYNC(0xAA) | escaped(TYPE | LEN | PAYLOAD | CRC8)
  *
- * CRC-8/CCITT (polynomial 0x07) computed over TYPE + LEN + PAYLOAD.
+ * Byte-stuffing: after SYNC, any occurrence of 0xAA or 0x55 in the
+ * remaining bytes (TYPE, LEN, PAYLOAD, CRC) is escaped:
+ *   0xAA -> 0x55 0x01
+ *   0x55 -> 0x55 0x02
+ * This guarantees 0xAA only ever appears as a frame sync marker.
+ *
+ * CRC-8/CCITT (polynomial 0x07) computed over unescaped TYPE + LEN + PAYLOAD.
  */
 
 #ifndef ZSA_UART_PROTO_H
@@ -18,9 +24,12 @@
 /* ---- Wire format constants ---- */
 
 #define ZSA_SYNC_BYTE      0xAA
+#define ZSA_ESC_BYTE       0x55
+#define ZSA_ESC_SYNC       0x01  /* 0x55 0x01 -> 0xAA */
+#define ZSA_ESC_ESC        0x02  /* 0x55 0x02 -> 0x55 */
 #define ZSA_MAX_PAYLOAD    64
 #define ZSA_HEADER_SIZE    3   /* SYNC + TYPE + LEN */
-#define ZSA_FRAME_OVERHEAD 4   /* SYNC + TYPE + LEN + CRC */
+#define ZSA_FRAME_OVERHEAD 4   /* SYNC + TYPE + LEN + CRC (before escaping) */
 
 /* ---- Message types ---- */
 
@@ -120,6 +129,7 @@ struct zsa_parser {
     enum zsa_parse_state state;
     struct zsa_frame     frame;
     uint8_t              idx;
+    uint8_t              esc;   /* 1 = previous byte was ESC */
 };
 
 /* ---- CRC-8/CCITT (polynomial 0x07) ---- */
@@ -137,26 +147,58 @@ static inline uint8_t zsa_crc8(const uint8_t *data, uint8_t len) {
 
 /* ---- Frame encoding ---- */
 
+/* Emit one byte with escaping. Returns number of bytes written (1 or 2). */
+static inline uint8_t zsa_emit_escaped(uint8_t *buf, uint8_t byte) {
+    if (byte == ZSA_SYNC_BYTE) {
+        buf[0] = ZSA_ESC_BYTE;
+        buf[1] = ZSA_ESC_SYNC;
+        return 2;
+    }
+    if (byte == ZSA_ESC_BYTE) {
+        buf[0] = ZSA_ESC_BYTE;
+        buf[1] = ZSA_ESC_ESC;
+        return 2;
+    }
+    buf[0] = byte;
+    return 1;
+}
+
 /*
- * Encode a frame into buf. Returns total frame size.
- * buf must be at least len + ZSA_FRAME_OVERHEAD bytes.
+ * Encode a frame into buf. Returns total frame size (including escaping).
+ * buf must be at least (len + ZSA_FRAME_OVERHEAD) * 2 bytes to handle
+ * worst-case escaping.
  */
 static inline uint8_t zsa_frame_encode(uint8_t *buf, uint8_t type, const uint8_t *payload, uint8_t len) {
-    buf[0] = ZSA_SYNC_BYTE;
-    buf[1] = type;
-    buf[2] = len;
+    uint8_t pos = 0;
+
+    /* SYNC byte is never escaped */
+    buf[pos++] = ZSA_SYNC_BYTE;
+
+    /* Compute CRC over unescaped TYPE + LEN + PAYLOAD */
+    uint8_t crc_data[2 + ZSA_MAX_PAYLOAD];
+    crc_data[0] = type;
+    crc_data[1] = len;
     for (uint8_t i = 0; i < len; i++) {
-        buf[3 + i] = payload[i];
+        crc_data[2 + i] = payload[i];
     }
-    /* CRC over TYPE + LEN + PAYLOAD */
-    buf[3 + len] = zsa_crc8(&buf[1], (uint8_t)(2 + len));
-    return (uint8_t)(ZSA_FRAME_OVERHEAD + len);
+    uint8_t crc = zsa_crc8(crc_data, (uint8_t)(2 + len));
+
+    /* Emit TYPE, LEN, PAYLOAD, CRC — all escaped */
+    pos += zsa_emit_escaped(&buf[pos], type);
+    pos += zsa_emit_escaped(&buf[pos], len);
+    for (uint8_t i = 0; i < len; i++) {
+        pos += zsa_emit_escaped(&buf[pos], payload[i]);
+    }
+    pos += zsa_emit_escaped(&buf[pos], crc);
+
+    return pos;
 }
 
 /* ---- Frame parsing ---- */
 
 static inline void zsa_parser_init(struct zsa_parser *p) {
     p->state = ZSA_PARSE_HUNT;
+    p->esc   = 0;
 }
 
 /*
@@ -164,13 +206,41 @@ static inline void zsa_parser_init(struct zsa_parser *p) {
  * Returns 1 when a complete valid frame is ready in p->frame, 0 otherwise.
  */
 static inline int zsa_parser_feed(struct zsa_parser *p, uint8_t byte) {
-    switch (p->state) {
-        case ZSA_PARSE_HUNT:
-            if (byte == ZSA_SYNC_BYTE) {
-                p->state = ZSA_PARSE_TYPE;
-            }
-            return 0;
+    /* In HUNT state, only look for SYNC */
+    if (p->state == ZSA_PARSE_HUNT) {
+        if (byte == ZSA_SYNC_BYTE) {
+            p->state = ZSA_PARSE_TYPE;
+            p->esc   = 0;
+        }
+        return 0;
+    }
 
+    /* Outside HUNT: a raw SYNC means a new frame is starting (abort current) */
+    if (byte == ZSA_SYNC_BYTE) {
+        p->state = ZSA_PARSE_TYPE;
+        p->esc   = 0;
+        return 0;
+    }
+
+    /* Handle escape sequences */
+    if (p->esc) {
+        p->esc = 0;
+        if (byte == ZSA_ESC_SYNC) {
+            byte = ZSA_SYNC_BYTE;
+        } else if (byte == ZSA_ESC_ESC) {
+            byte = ZSA_ESC_BYTE;
+        } else {
+            /* Invalid escape sequence — abort frame */
+            p->state = ZSA_PARSE_HUNT;
+            return 0;
+        }
+    } else if (byte == ZSA_ESC_BYTE) {
+        p->esc = 1;
+        return 0;
+    }
+
+    /* Process the (unescaped) byte through the state machine */
+    switch (p->state) {
         case ZSA_PARSE_TYPE:
             p->frame.type = byte;
             p->state      = ZSA_PARSE_LEN;
@@ -210,10 +280,11 @@ static inline int zsa_parser_feed(struct zsa_parser *p, uint8_t byte) {
             p->state = ZSA_PARSE_HUNT;
             return (byte == expected) ? 1 : 0;
         }
-    }
 
-    p->state = ZSA_PARSE_HUNT;
-    return 0;
+        default:
+            p->state = ZSA_PARSE_HUNT;
+            return 0;
+    }
 }
 
 #endif /* ZSA_UART_PROTO_H */

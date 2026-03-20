@@ -35,7 +35,7 @@ static struct zsa_parser rx_parser;
 /* ---- Helpers ---- */
 
 static void send_frame(uint8_t type, const uint8_t *payload, uint8_t len) {
-    uint8_t buf[ZSA_FRAME_OVERHEAD + ZSA_MAX_PAYLOAD];
+    uint8_t buf[1 + (ZSA_FRAME_OVERHEAD - 1 + ZSA_MAX_PAYLOAD) * 2];
     uint8_t frame_len = zsa_frame_encode(buf, type, payload, len);
     uart_transmit(buf, frame_len);
 }
