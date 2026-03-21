@@ -10,6 +10,8 @@
         { "key": "NAVIGATOR_DEC_CPI", "aliases": ["NV_CPID"] },
         { "key": "NAVIGATOR_TURBO",   "aliases": ["NV_TRBO"] },
         { "key": "NAVIGATOR_AIM",     "aliases": ["NV_AIM"] },
+        { "key": "TOGGLE_TURBO",      "aliases": ["NV_TTRB"] },
+        { "key": "TOGGLE_AIM",        "aliases": ["NV_TAIM"] },
         { "key": "DRAG_SCROLL",       "aliases": ["NV_DSCR"] },
         { "key": "TOGGLE_SCROLL",     "aliases": ["NV_TSCR"] }
     ]
