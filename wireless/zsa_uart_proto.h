@@ -77,6 +77,9 @@ enum zsa_msg_type {
 
     /* STM32 -> nRF: DFU announcement (0xA0) */
     ZSA_MSG_DFU_READY        = 0xA0,  /* 0 B: bootloader is in DFU mode */
+
+    /* Shared (bidirectional): log line (0xB0) */
+    ZSA_MSG_LOG_LINE         = 0xB0,  /* src(1)+lvl(1)+ts_ms(4 LE)+text(<=120) */
 };
 
 /* ---- Payload structures ---- */
@@ -163,6 +166,42 @@ enum zsa_dfu_error {
     ZSA_DFU_ERR_VERIFY     = 0x04,
     ZSA_DFU_ERR_UNKNOWN    = 0xFF,
 };
+
+/* ZSA_MSG_LOG_LINE source tag */
+enum zsa_log_src {
+    ZSA_LOG_SRC_NRF  = 0,
+    ZSA_LOG_SRC_STM  = 1,
+    ZSA_LOG_SRC_BOOT = 2,
+};
+
+/* ZSA_MSG_LOG_LINE level (matches Zephyr log levels 1..4; 0 reserved) */
+enum zsa_log_level {
+    ZSA_LOG_LVL_NONE = 0,
+    ZSA_LOG_LVL_ERR  = 1,
+    ZSA_LOG_LVL_WRN  = 2,
+    ZSA_LOG_LVL_INF  = 3,
+    ZSA_LOG_LVL_DBG  = 4,
+};
+
+#define ZSA_LOG_MAX_TEXT   120u
+#define ZSA_LOG_HDR_LEN    6u   /* src(1)+lvl(1)+ts_ms(4) */
+#define ZSA_LOG_MAX_PAYLOAD (ZSA_LOG_HDR_LEN + ZSA_LOG_MAX_TEXT)
+
+/* ZSA_MSG_LOG_LINE payload header (little-endian on the wire) */
+struct __attribute__((packed)) zsa_log_hdr {
+    uint8_t  src;       /* enum zsa_log_src */
+    uint8_t  lvl;       /* enum zsa_log_level */
+    uint32_t ts_ms;     /* left-nRF uptime (ms); 0 from STM/boot → nRF stamps */
+    /* text[N] follows, N = frame.len - ZSA_LOG_HDR_LEN */
+};
+
+/* Fill *hdr_out with a log header (text is written separately by caller). */
+static inline void zsa_log_hdr_pack(struct zsa_log_hdr *hdr_out,
+                                    uint8_t src, uint8_t lvl, uint32_t ts_ms) {
+    hdr_out->src   = src;
+    hdr_out->lvl   = lvl;
+    hdr_out->ts_ms = ts_ms;
+}
 
 /* ---- Parser ---- */
 
