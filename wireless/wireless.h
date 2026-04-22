@@ -24,3 +24,6 @@ void zsa_wireless_cmd_pair(void);
 
 /* Idle power management */
 enum zsa_idle_step zsa_wireless_idle_step(void);
+
+/* Low-level UART frame sender. Used by optional sub-modules like log_tap. */
+void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len);

@@ -20,6 +20,9 @@
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
 #endif
+#ifdef ZSA_BLE_LOG
+#    include "log_tap.h"
+#endif
 
 /* keyboard.c — not in keyboard.h but we need it to reset the idle timer */
 void last_matrix_activity_trigger(void);
@@ -50,7 +53,7 @@ static bool               nrf_ship_mode  = false;
 
 /* ---- Helpers ---- */
 
-static void send_frame(uint8_t type, const uint8_t *payload, uint16_t len) {
+void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len) {
     /* HID payloads are small — 64 bytes is plenty for worst-case escaping */
     uint8_t buf[128];
     uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
@@ -58,7 +61,7 @@ static void send_frame(uint8_t type, const uint8_t *payload, uint16_t len) {
 }
 
 static void send_command(uint8_t type) {
-    send_frame(type, NULL, 0);
+    zsa_wireless_send_frame(type, NULL, 0);
 }
 
 static void idle_power_wake(void);
@@ -175,12 +178,12 @@ enum zsa_idle_step zsa_wireless_idle_step(void) {
 
 static void send_idle_state(enum zsa_idle_step step) {
     struct zsa_idle_state payload = { .step = (uint8_t)step };
-    send_frame(ZSA_MSG_CMD_IDLE_STATE, (const uint8_t *)&payload, sizeof(payload));
+    zsa_wireless_send_frame(ZSA_MSG_CMD_IDLE_STATE, (const uint8_t *)&payload, sizeof(payload));
 }
 
 static void send_usb_state(bool connected) {
     struct zsa_usb_state payload = { .connected = connected ? 1 : 0 };
-    send_frame(ZSA_MSG_CMD_USB_STATE, (const uint8_t *)&payload, sizeof(payload));
+    zsa_wireless_send_frame(ZSA_MSG_CMD_USB_STATE, (const uint8_t *)&payload, sizeof(payload));
 }
 
 static void idle_power_enter_step(enum zsa_idle_step step) {
@@ -314,6 +317,9 @@ void bluetooth_init(void) {
     zsa_parser_init(&rx_parser);
     link_ready = false;
     last_link_up_ms = timer_read32();
+#ifdef ZSA_BLE_LOG
+    zsa_log_tap_init();
+#endif
 }
 
 void bluetooth_task(void) {
@@ -353,7 +359,7 @@ void bluetooth_send_keyboard(report_keyboard_t *report) {
     for (uint8_t i = 0; i < KEYBOARD_REPORT_KEYS; i++) {
         payload[2 + i] = report->keys[i];
     }
-    send_frame(ZSA_MSG_HID_KEYBOARD, payload, sizeof(payload));
+    zsa_wireless_send_frame(ZSA_MSG_HID_KEYBOARD, payload, sizeof(payload));
 }
 
 void bluetooth_send_nkro(report_nkro_t *report) {
@@ -376,7 +382,7 @@ void bluetooth_send_mouse(report_mouse_t *report) {
     len -= 1;
 #endif
 
-    send_frame(ZSA_MSG_HID_MOUSE, start, len);
+    zsa_wireless_send_frame(ZSA_MSG_HID_MOUSE, start, len);
 }
 
 void bluetooth_send_consumer(uint16_t usage) {
@@ -384,7 +390,7 @@ void bluetooth_send_consumer(uint16_t usage) {
     payload[0] = REPORT_ID_CONSUMER;
     payload[1] = (uint8_t)(usage & 0xFF);
     payload[2] = (uint8_t)(usage >> 8);
-    send_frame(ZSA_MSG_HID_SYSTEM, payload, sizeof(payload));
+    zsa_wireless_send_frame(ZSA_MSG_HID_SYSTEM, payload, sizeof(payload));
 }
 
 void bluetooth_send_system(uint16_t usage) {
@@ -392,7 +398,7 @@ void bluetooth_send_system(uint16_t usage) {
     payload[0] = REPORT_ID_SYSTEM;
     payload[1] = (uint8_t)(usage & 0xFF);
     payload[2] = (uint8_t)(usage >> 8);
-    send_frame(ZSA_MSG_HID_SYSTEM, payload, sizeof(payload));
+    zsa_wireless_send_frame(ZSA_MSG_HID_SYSTEM, payload, sizeof(payload));
 }
 
 void bluetooth_send_raw_hid(uint8_t *data, uint8_t length) {
