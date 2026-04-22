@@ -17,12 +17,11 @@
 #include "wait.h"
 #include "connection.h"
 #include "matrix.h"
-#include "print.h"
+#ifdef ZSA_BLE_LOG
+#include "log_tap.h"
+#endif
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
-#endif
-#ifdef ZSA_BLE_LOG
-#    include "log_tap.h"
 #endif
 
 /* keyboard.c — not in keyboard.h but we need it to reset the idle timer */
@@ -199,7 +198,7 @@ static void idle_power_enter_step(enum zsa_idle_step step) {
         rgb_matrix_driver.flush();
     }
 #endif
-    uprintf("idle: step %u -> %u\n", (unsigned)idle_step, (unsigned)step);
+    zsa_log("idle: step %u -> %u", (unsigned)idle_step, (unsigned)step);
     idle_step = step;
     if (step == ZSA_IDLE_DEEP) {
         nrf_ship_mode = true;
@@ -211,7 +210,7 @@ static void idle_power_wake(void) {
     /* Note: when waking from LEDS_OFF, the LED driver (IS31FL3731)
      * is reprogrammed via rgb_matrix_init() when the nRF sends
      * EVT_LED_RAIL after re-enabling BUCK1. */
-    uprintf("idle: wake from step %u\n", (unsigned)idle_step);
+    zsa_log("idle: wake from step %u", (unsigned)idle_step);
     idle_step = ZSA_IDLE_ACTIVE;
     send_idle_state(ZSA_IDLE_ACTIVE);
 
@@ -324,7 +323,7 @@ void bluetooth_init(void) {
     last_link_up_ms = timer_read32();
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();
-    uprintf("zsa_wireless: init (ZSA_BLE_LOG=on)\n");
+    zsa_log("zsa_wireless: init (ZSA_BLE_LOG=on)");
 #endif
 }
 

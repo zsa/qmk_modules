@@ -1,5 +1,6 @@
 #ifdef ZSA_BLE_LOG
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -66,6 +67,23 @@ int8_t sendchar(uint8_t c) {
 void zsa_log_tap_init(void) {
     line_len = 0;
     dropped_lines = 0;
+}
+
+/* Direct printf-style logger. Bypasses QMK's uprintf/sendchar chain so it
+ * works regardless of CONSOLE_ENABLE (which otherwise gates NO_PRINT and
+ * nukes uprintf at the preprocessor level). */
+void zsa_log(const char *fmt, ...) {
+    char buf[ZSA_LOG_MAX_TEXT];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if (n > (int)sizeof(buf)) n = sizeof(buf);
+    /* Strip a single trailing newline if present. */
+    if (buf[n - 1] == '\n') n--;
+    if (n <= 0) return;
+    emit_line(ZSA_LOG_LVL_INF, buf, (uint16_t)n);
 }
 
 #endif /* ZSA_BLE_LOG */
