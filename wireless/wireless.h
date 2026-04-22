@@ -7,9 +7,8 @@
 enum zsa_idle_step {
     ZSA_IDLE_ACTIVE    = 0,
     ZSA_IDLE_DIM       = 1,
-    ZSA_IDLE_LEDS_OFF  = 2,
-    ZSA_IDLE_SLOW_SCAN = 3,
-    ZSA_IDLE_DEEP      = 4,
+    ZSA_IDLE_LEDS_OFF  = 2,  /* LEDs off + slow matrix scan */
+    ZSA_IDLE_DEEP      = 3,
 };
 
 /* Cached nRF state, updated via UART events */

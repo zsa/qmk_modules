@@ -16,9 +16,19 @@
 #include "timer.h"
 #include "wait.h"
 #include "connection.h"
+#include "matrix.h"
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
 #endif
+
+/* keyboard.c — not in keyboard.h but we need it to reset the idle timer */
+void last_matrix_activity_trigger(void);
+
+/* ---- Link state ---- */
+
+static bool     link_ready = false;
+static uint32_t last_link_up_ms = 0;
+#define LINK_UP_INTERVAL_MS 100
 
 /* ---- Cached nRF state ---- */
 
@@ -32,11 +42,18 @@ static uint8_t nrf_led_state;
 
 static struct zsa_parser rx_parser;
 
+/* ---- Idle state (declared early for use in handle_rx_frame) ---- */
+
+static enum zsa_idle_step idle_step       = ZSA_IDLE_ACTIVE;
+static uint32_t           nrf_wake_time  = 0;
+static bool               nrf_ship_mode  = false;
+
 /* ---- Helpers ---- */
 
-static void send_frame(uint8_t type, const uint8_t *payload, uint8_t len) {
-    uint8_t buf[1 + (ZSA_FRAME_OVERHEAD - 1 + ZSA_MAX_PAYLOAD) * 2];
-    uint8_t frame_len = zsa_frame_encode(buf, type, payload, len);
+static void send_frame(uint8_t type, const uint8_t *payload, uint16_t len) {
+    /* HID payloads are small — 64 bytes is plenty for worst-case escaping */
+    uint8_t buf[128];
+    uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
     uart_transmit(buf, frame_len);
 }
 
@@ -44,13 +61,40 @@ static void send_command(uint8_t type) {
     send_frame(type, NULL, 0);
 }
 
+static void idle_power_wake(void);
+static void send_usb_state(bool connected);
+static void send_idle_state(enum zsa_idle_step step);
+
+/* Send all current STM32 state to nRF — called on link establishment */
+static void send_full_state(void) {
+    send_usb_state(usb_connected_state());
+    send_idle_state(idle_step);
+}
+
 static void handle_rx_frame(const struct zsa_frame *frame) {
     switch (frame->type) {
+        case ZSA_MSG_LINK_UP:
+            link_ready = true;
+            /* nRF rebooted (e.g. after ship mode) — clear ship flag */
+            if (nrf_ship_mode) {
+                nrf_ship_mode = false;
+                nrf_wake_time = timer_read32();
+                idle_power_wake();
+            }
+            send_full_state();
+            break;
+
         case ZSA_MSG_EVT_BLE_STATUS:
             if (frame->len >= sizeof(struct zsa_ble_status)) {
                 const struct zsa_ble_status *s = (const struct zsa_ble_status *)frame->payload;
                 nrf_ble_connected  = s->connected != 0;
                 nrf_ble_device_idx = s->device_idx;
+                /* nRF is back from ship mode */
+                nrf_ship_mode = false;
+                nrf_wake_time = timer_read32();
+                if (idle_step != ZSA_IDLE_ACTIVE) {
+                    idle_power_wake();
+                }
             }
             break;
 
@@ -71,6 +115,21 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 const struct zsa_led_state *l = (const struct zsa_led_state *)frame->payload;
                 nrf_led_state = l->leds;
             }
+            break;
+
+        case ZSA_MSG_EVT_LED_RAIL:
+            if (frame->len >= sizeof(struct zsa_led_rail_state)) {
+                const struct zsa_led_rail_state *r = (const struct zsa_led_rail_state *)frame->payload;
+#ifdef RGB_MATRIX_ENABLE
+                if ((r->rails & ZSA_LED_RAIL_LEFT) && idle_step < ZSA_IDLE_LEDS_OFF) {
+                    rgb_matrix_init();
+                }
+#endif
+            }
+            break;
+
+        case ZSA_MSG_QUERY_USB_STATE:
+            send_usb_state(usb_connected_state());
             break;
 
         default:
@@ -110,9 +169,6 @@ void zsa_wireless_cmd_pair(void) {
 
 /* ---- Idle power management ---- */
 
-static enum zsa_idle_step idle_step    = ZSA_IDLE_ACTIVE;
-static uint8_t            saved_rgb_val = 255;
-
 enum zsa_idle_step zsa_wireless_idle_step(void) {
     return idle_step;
 }
@@ -122,31 +178,40 @@ static void send_idle_state(enum zsa_idle_step step) {
     send_frame(ZSA_MSG_CMD_IDLE_STATE, (const uint8_t *)&payload, sizeof(payload));
 }
 
+static void send_usb_state(bool connected) {
+    struct zsa_usb_state payload = { .connected = connected ? 1 : 0 };
+    send_frame(ZSA_MSG_CMD_USB_STATE, (const uint8_t *)&payload, sizeof(payload));
+}
+
 static void idle_power_enter_step(enum zsa_idle_step step) {
 #ifdef RGB_MATRIX_ENABLE
-    if (step >= ZSA_IDLE_DIM && idle_step < ZSA_IDLE_DIM) {
-        saved_rgb_val = rgb_matrix_get_val();
-        rgb_matrix_sethsv_noeeprom(rgb_matrix_get_hue(), rgb_matrix_get_sat(), ZSA_IDLE_DIM_BRIGHTNESS);
-    }
     if (step >= ZSA_IDLE_LEDS_OFF && idle_step < ZSA_IDLE_LEDS_OFF) {
         rgb_matrix_disable_noeeprom();
+        /* Force LEDs off immediately — rgb_matrix_task() won't run
+         * inside the slow-scan loop to pick up the disable flag. */
+        rgb_matrix_set_color_all(0, 0, 0);
+        rgb_matrix_driver.flush();
     }
 #endif
     idle_step = step;
+    if (step == ZSA_IDLE_DEEP) {
+        nrf_ship_mode = true;
+    }
     send_idle_state(step);
 }
 
 static void idle_power_wake(void) {
-#ifdef RGB_MATRIX_ENABLE
-    if (idle_step >= ZSA_IDLE_LEDS_OFF) {
-        rgb_matrix_enable_noeeprom();
-    }
-    if (idle_step >= ZSA_IDLE_DIM) {
-        rgb_matrix_sethsv_noeeprom(rgb_matrix_get_hue(), rgb_matrix_get_sat(), saved_rgb_val);
-    }
-#endif
+    /* Note: when waking from LEDS_OFF, the LED driver (IS31FL3731)
+     * is reprogrammed via rgb_matrix_init() when the nRF sends
+     * EVT_LED_RAIL after re-enabling BUCK1. */
     idle_step = ZSA_IDLE_ACTIVE;
     send_idle_state(ZSA_IDLE_ACTIVE);
+
+    /* Reset the activity timer so idle_power_task() doesn't
+     * immediately re-enter the idle state.  The slow-scan loop
+     * calls matrix_scan() directly, which consumes the key-change
+     * before matrix_task() can see it. */
+    last_matrix_activity_trigger();
 }
 
 static void idle_power_task(void) {
@@ -154,8 +219,12 @@ static void idle_power_task(void) {
     static uint32_t bt_switch_time = 0;
 
     /* Only manage idle power when running wirelessly */
-    if (connection_get_host() != CONNECTION_HOST_BLUETOOTH) {
-        was_bluetooth = false;
+    if (usb_connected_state()) {
+        if (was_bluetooth) {
+            was_bluetooth = false;
+            send_usb_state(true);
+        }
+        nrf_ship_mode = false;
         if (idle_step != ZSA_IDLE_ACTIVE) {
             idle_power_wake();
         }
@@ -166,22 +235,31 @@ static void idle_power_task(void) {
     if (!was_bluetooth) {
         was_bluetooth  = true;
         bt_switch_time = timer_read32();
+        send_usb_state(false);
         if (idle_step != ZSA_IDLE_ACTIVE) {
             idle_power_wake();
         }
         return;
     }
 
-    /* Use the later of last input activity or bluetooth switch time */
+    /* nRF is in ship mode — stay in DEEP, don't wake on keypresses.
+     * Wake only happens via EVT_BLE_STATUS from nRF (handle_rx_frame). */
+    if (nrf_ship_mode) {
+        return;
+    }
+
+    /* Use the most recent of: last input, bluetooth switch, or nRF wake */
     uint32_t since_input  = last_input_activity_elapsed();
     uint32_t since_switch = timer_elapsed32(bt_switch_time);
-    uint32_t idle_ms      = (since_input < since_switch) ? since_input : since_switch;
+    uint32_t since_nrf    = timer_elapsed32(nrf_wake_time);
+    uint32_t idle_ms      = since_input;
+    if (since_switch < idle_ms) idle_ms = since_switch;
+    if (since_nrf    < idle_ms) idle_ms = since_nrf;
 
     enum zsa_idle_step target = ZSA_IDLE_ACTIVE;
-    if      (idle_ms > ZSA_IDLE_DEEP_MS)      target = ZSA_IDLE_DEEP;
-    else if (idle_ms > ZSA_IDLE_SLOW_SCAN_MS) target = ZSA_IDLE_SLOW_SCAN;
-    else if (idle_ms > ZSA_IDLE_LEDS_OFF_MS)  target = ZSA_IDLE_LEDS_OFF;
-    else if (idle_ms > ZSA_IDLE_DIM_MS)        target = ZSA_IDLE_DIM;
+    if      (idle_ms > ZSA_IDLE_DEEP_MS)     target = ZSA_IDLE_DEEP;
+    else if (idle_ms > ZSA_IDLE_LEDS_OFF_MS) target = ZSA_IDLE_LEDS_OFF;
+    else if (idle_ms > ZSA_IDLE_DIM_MS)      target = ZSA_IDLE_DIM;
 
     if (target != idle_step) {
         if (target > idle_step) {
@@ -191,8 +269,41 @@ static void idle_power_task(void) {
         }
     }
 
-    if (idle_step >= ZSA_IDLE_SLOW_SCAN) {
+    /* Slow-scan loop: skip the full QMK task pipeline and only
+     * scan the matrix + service UART until activity is detected.
+     * matrix_task() keeps its own matrix_previous[], so the
+     * keystroke that wakes us will be processed on the next
+     * keyboard_task() iteration after we return. */
+    while (idle_step >= ZSA_IDLE_LEDS_OFF) {
         wait_ms(ZSA_IDLE_SCAN_DELAY_MS);
+
+        /* Service UART so nRF events (e.g. BLE wake) can reach us */
+        while (uart_available()) {
+            uint8_t byte = uart_read();
+            if (zsa_parser_feed(&rx_parser, byte)) {
+                handle_rx_frame(&rx_parser.frame);
+            }
+        }
+
+        /* handle_rx_frame may have woken us (e.g. EVT_BLE_STATUS) */
+        if (idle_step < ZSA_IDLE_LEDS_OFF) {
+            break;
+        }
+
+        /* Transition to DEEP if enough time has passed */
+        if (idle_step < ZSA_IDLE_DEEP &&
+            last_input_activity_elapsed() > ZSA_IDLE_DEEP_MS) {
+            idle_power_enter_step(ZSA_IDLE_DEEP);
+            /* nrf_ship_mode is now true — stop scanning */
+            break;
+        }
+
+        /* Scan matrix — if a key changed, wake and let the
+         * normal QMK loop process the keypress. */
+        if (matrix_scan()) {
+            idle_power_wake();
+            break;
+        }
     }
 }
 
@@ -201,17 +312,23 @@ static void idle_power_task(void) {
 void bluetooth_init(void) {
     uart_init(ZSA_WIRELESS_BAUD_RATE);
     zsa_parser_init(&rx_parser);
-
-    /* Query initial BLE state so we don't start in an unknown state */
-    zsa_wireless_query_ble_status();
+    link_ready = false;
+    last_link_up_ms = timer_read32();
 }
 
 void bluetooth_task(void) {
+    /* Process incoming frames */
     while (uart_available()) {
         uint8_t byte = uart_read();
         if (zsa_parser_feed(&rx_parser, byte)) {
             handle_rx_frame(&rx_parser.frame);
         }
+    }
+
+    /* Periodically send LINK_UP until nRF responds */
+    if (!link_ready && timer_elapsed32(last_link_up_ms) >= LINK_UP_INTERVAL_MS) {
+        send_command(ZSA_MSG_LINK_UP);
+        last_link_up_ms = timer_read32();
     }
 
     idle_power_task();

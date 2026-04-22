@@ -27,13 +27,16 @@
 #define ZSA_ESC_BYTE       0x55
 #define ZSA_ESC_SYNC       0x01  /* 0x55 0x01 -> 0xAA */
 #define ZSA_ESC_ESC        0x02  /* 0x55 0x02 -> 0x55 */
-#define ZSA_MAX_PAYLOAD    64
-#define ZSA_HEADER_SIZE    3   /* SYNC + TYPE + LEN */
-#define ZSA_FRAME_OVERHEAD 4   /* SYNC + TYPE + LEN + CRC (before escaping) */
+#define ZSA_MAX_PAYLOAD    2048
+#define ZSA_HEADER_SIZE    4   /* SYNC + TYPE + LEN_LO + LEN_HI */
+#define ZSA_FRAME_OVERHEAD 5   /* SYNC + TYPE + LEN(2) + CRC (before escaping) */
 
 /* ---- Message types ---- */
 
 enum zsa_msg_type {
+    /* Bidirectional: link management (0x00) */
+    ZSA_MSG_LINK_UP          = 0x00,  /* 0 B: "I'm alive and ready" */
+
     /* STM32 -> nRF: HID reports (0x01-0x0F) */
     ZSA_MSG_HID_KEYBOARD     = 0x01,
     ZSA_MSG_HID_MOUSE        = 0x02,
@@ -48,12 +51,32 @@ enum zsa_msg_type {
     ZSA_MSG_CMD_HIBERNATE    = 0x20,
     ZSA_MSG_CMD_PAIR         = 0x21,
     ZSA_MSG_CMD_IDLE_STATE   = 0x22,
+    ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=disconnected, 1=connected */
+
+    /* nRF -> STM32: DFU commands (0x30-0x3F) */
+    ZSA_MSG_DFU_ERASE        = 0x30,  /* 4 B: addr LE32 */
+    ZSA_MSG_DFU_SETADDR      = 0x31,  /* 4 B: addr LE32 */
+    ZSA_MSG_DFU_DATA         = 0x32,  /* <=64 B: firmware chunk */
+    ZSA_MSG_DFU_MANIFEST     = 0x33,  /* 0 B: finalize + reset */
+    ZSA_MSG_DFU_ABORT        = 0x34,  /* 0 B: abort transfer */
+    ZSA_MSG_DFU_MASS_ERASE   = 0x35,  /* 4 B: end addr LE32 (0 = full app region) */
+    ZSA_MSG_DFU_QUERY        = 0x36,  /* 0 B: nRF asks if STM32 is in DFU mode */
+
+    /* nRF -> STM32: queries (0x70-0x7F) */
+    ZSA_MSG_QUERY_USB_STATE  = 0x70,  /* 0 B: nRF asks STM32 for USB state */
 
     /* nRF -> STM32: events / query responses (0x80-0x8F) */
     ZSA_MSG_EVT_BLE_STATUS   = 0x80,
     ZSA_MSG_EVT_BATTERY      = 0x81,
     ZSA_MSG_EVT_PAIR_STATE   = 0x82,
     ZSA_MSG_EVT_LED_STATE    = 0x83,
+    ZSA_MSG_EVT_LED_RAIL     = 0x84,  /* 1 B: bitmask of active LED rails */
+
+    /* STM32 -> nRF: DFU responses (0x90-0x9F) */
+    ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
+
+    /* STM32 -> nRF: DFU announcement (0xA0) */
+    ZSA_MSG_DFU_READY        = 0xA0,  /* 0 B: bootloader is in DFU mode */
 };
 
 /* ---- Payload structures ---- */
@@ -104,9 +127,41 @@ struct __attribute__((packed)) zsa_led_state {
     uint8_t leds; /* USB HID LED bits: bit0=num, bit1=caps, bit2=scroll */
 };
 
+/* ZSA_MSG_EVT_LED_RAIL (1 byte) — bitmask of active LED voltage rails */
+#define ZSA_LED_RAIL_LEFT   (1u << 0)
+#define ZSA_LED_RAIL_RIGHT  (1u << 1)
+struct __attribute__((packed)) zsa_led_rail_state {
+    uint8_t rails;
+};
+
 /* ZSA_MSG_CMD_IDLE_STATE (1 byte) */
 struct __attribute__((packed)) zsa_idle_state {
-    uint8_t step; /* 0=active, 1=dim, 2=leds_off, 3=slow_scan, 4=deep */
+    uint8_t step; /* 0=active, 1=dim, 2=leds_off, 3=deep */
+};
+
+/* ZSA_MSG_CMD_USB_STATE (1 byte) */
+struct __attribute__((packed)) zsa_usb_state {
+    uint8_t connected; /* 0 = disconnected, 1 = connected */
+};
+
+/* ---- DFU state / error codes ---- */
+
+/* DFU state values (ZSA_MSG_DFU_STATUS payload[0]) */
+enum zsa_dfu_state {
+    ZSA_DFU_STATE_IDLE     = 0,
+    ZSA_DFU_STATE_BUSY     = 1,
+    ZSA_DFU_STATE_DONE     = 2,
+    ZSA_DFU_STATE_ERROR    = 3,
+};
+
+/* DFU error codes (ZSA_MSG_DFU_STATUS payload[1]) */
+enum zsa_dfu_error {
+    ZSA_DFU_ERR_NONE       = 0x00,
+    ZSA_DFU_ERR_ADDRESS    = 0x01,
+    ZSA_DFU_ERR_ERASE      = 0x02,
+    ZSA_DFU_ERR_WRITE      = 0x03,
+    ZSA_DFU_ERR_VERIFY     = 0x04,
+    ZSA_DFU_ERR_UNKNOWN    = 0xFF,
 };
 
 /* ---- Parser ---- */
@@ -114,29 +169,30 @@ struct __attribute__((packed)) zsa_idle_state {
 enum zsa_parse_state {
     ZSA_PARSE_HUNT,
     ZSA_PARSE_TYPE,
-    ZSA_PARSE_LEN,
+    ZSA_PARSE_LEN_LO,
+    ZSA_PARSE_LEN_HI,
     ZSA_PARSE_PAYLOAD,
     ZSA_PARSE_CRC,
 };
 
 struct zsa_frame {
-    uint8_t type;
-    uint8_t len;
-    uint8_t payload[ZSA_MAX_PAYLOAD];
+    uint8_t  type;
+    uint16_t len;
+    uint8_t  payload[ZSA_MAX_PAYLOAD];
 };
 
 struct zsa_parser {
     enum zsa_parse_state state;
     struct zsa_frame     frame;
-    uint8_t              idx;
+    uint16_t             idx;
     uint8_t              esc;   /* 1 = previous byte was ESC */
 };
 
 /* ---- CRC-8/CCITT (polynomial 0x07) ---- */
 
-static inline uint8_t zsa_crc8(const uint8_t *data, uint8_t len) {
+static inline uint8_t zsa_crc8(const uint8_t *data, uint16_t len) {
     uint8_t crc = 0x00;
-    for (uint8_t i = 0; i < len; i++) {
+    for (uint16_t i = 0; i < len; i++) {
         crc ^= data[i];
         for (uint8_t bit = 0; bit < 8; bit++) {
             crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
@@ -168,25 +224,34 @@ static inline uint8_t zsa_emit_escaped(uint8_t *buf, uint8_t byte) {
  * buf must be at least (len + ZSA_FRAME_OVERHEAD) * 2 bytes to handle
  * worst-case escaping.
  */
-static inline uint8_t zsa_frame_encode(uint8_t *buf, uint8_t type, const uint8_t *payload, uint8_t len) {
-    uint8_t pos = 0;
+static inline uint16_t zsa_frame_encode(uint8_t *buf, uint8_t type, const uint8_t *payload, uint16_t len) {
+    uint16_t pos = 0;
 
     /* SYNC byte is never escaped */
     buf[pos++] = ZSA_SYNC_BYTE;
 
-    /* Compute CRC over unescaped TYPE + LEN + PAYLOAD */
-    uint8_t crc_data[2 + ZSA_MAX_PAYLOAD];
-    crc_data[0] = type;
-    crc_data[1] = len;
-    for (uint8_t i = 0; i < len; i++) {
-        crc_data[2 + i] = payload[i];
-    }
-    uint8_t crc = zsa_crc8(crc_data, (uint8_t)(2 + len));
+    /* Compute CRC over unescaped TYPE + LEN(2) + PAYLOAD */
+    uint8_t len_lo = (uint8_t)(len & 0xFF);
+    uint8_t len_hi = (uint8_t)(len >> 8);
 
-    /* Emit TYPE, LEN, PAYLOAD, CRC — all escaped */
+    uint8_t crc = 0x00;
+    /* Feed TYPE + LEN_LO + LEN_HI into CRC */
+    uint8_t hdr[3] = { type, len_lo, len_hi };
+    crc = zsa_crc8(hdr, 3);
+    /* Continue CRC over payload */
+    for (uint16_t i = 0; i < len; i++) {
+        uint8_t b = payload[i];
+        crc ^= b;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+        }
+    }
+
+    /* Emit TYPE, LEN_LO, LEN_HI, PAYLOAD, CRC — all escaped */
     pos += zsa_emit_escaped(&buf[pos], type);
-    pos += zsa_emit_escaped(&buf[pos], len);
-    for (uint8_t i = 0; i < len; i++) {
+    pos += zsa_emit_escaped(&buf[pos], len_lo);
+    pos += zsa_emit_escaped(&buf[pos], len_hi);
+    for (uint16_t i = 0; i < len; i++) {
         pos += zsa_emit_escaped(&buf[pos], payload[i]);
     }
     pos += zsa_emit_escaped(&buf[pos], crc);
@@ -243,16 +308,21 @@ static inline int zsa_parser_feed(struct zsa_parser *p, uint8_t byte) {
     switch (p->state) {
         case ZSA_PARSE_TYPE:
             p->frame.type = byte;
-            p->state      = ZSA_PARSE_LEN;
+            p->state      = ZSA_PARSE_LEN_LO;
             return 0;
 
-        case ZSA_PARSE_LEN:
+        case ZSA_PARSE_LEN_LO:
             p->frame.len = byte;
-            if (byte > ZSA_MAX_PAYLOAD) {
+            p->state     = ZSA_PARSE_LEN_HI;
+            return 0;
+
+        case ZSA_PARSE_LEN_HI:
+            p->frame.len |= ((uint16_t)byte << 8);
+            if (p->frame.len > ZSA_MAX_PAYLOAD) {
                 p->state = ZSA_PARSE_HUNT;
                 return 0;
             }
-            if (byte == 0) {
+            if (p->frame.len == 0) {
                 p->state = ZSA_PARSE_CRC;
             } else {
                 p->idx   = 0;
@@ -268,14 +338,22 @@ static inline int zsa_parser_feed(struct zsa_parser *p, uint8_t byte) {
             return 0;
 
         case ZSA_PARSE_CRC: {
-            /* Compute CRC over TYPE + LEN + PAYLOAD */
-            uint8_t tmp[2 + ZSA_MAX_PAYLOAD];
-            tmp[0] = p->frame.type;
-            tmp[1] = p->frame.len;
-            for (uint8_t i = 0; i < p->frame.len; i++) {
-                tmp[2 + i] = p->frame.payload[i];
+            /* Compute CRC over TYPE + LEN_LO + LEN_HI + PAYLOAD */
+            uint8_t hdr[3] = {
+                p->frame.type,
+                (uint8_t)(p->frame.len & 0xFF),
+                (uint8_t)(p->frame.len >> 8)
+            };
+            uint8_t expected = zsa_crc8(hdr, 3);
+            /* Continue CRC over payload */
+            for (uint16_t i = 0; i < p->frame.len; i++) {
+                expected ^= p->frame.payload[i];
+                for (uint8_t bit = 0; bit < 8; bit++) {
+                    expected = (expected & 0x80)
+                        ? (uint8_t)((expected << 1) ^ 0x07)
+                        : (uint8_t)(expected << 1);
+                }
             }
-            uint8_t expected = zsa_crc8(tmp, (uint8_t)(2 + p->frame.len));
 
             p->state = ZSA_PARSE_HUNT;
             return (byte == expected) ? 1 : 0;

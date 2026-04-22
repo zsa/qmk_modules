@@ -11,9 +11,6 @@
 #ifndef ZSA_IDLE_LEDS_OFF_MS
 #    define ZSA_IDLE_LEDS_OFF_MS 20000
 #endif
-#ifndef ZSA_IDLE_SLOW_SCAN_MS
-#    define ZSA_IDLE_SLOW_SCAN_MS 30000
-#endif
 #ifndef ZSA_IDLE_DEEP_MS
 #    define ZSA_IDLE_DEEP_MS 60000
 #endif
