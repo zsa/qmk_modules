@@ -324,6 +324,7 @@ void bluetooth_init(void) {
     last_link_up_ms = timer_read32();
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();
+    uprintf("zsa_wireless: init (ZSA_BLE_LOG=on)\n");
 #endif
 }
 
