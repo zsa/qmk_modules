@@ -9,6 +9,10 @@
 
 static char     line_buf[ZSA_LOG_MAX_TEXT];
 static uint8_t  line_len;
+/* Reserved for a future non-blocking TX path. `uart_transmit` is currently
+ * blocking (ChibiOS chnWrite), so log spew backs up the UART queue rather
+ * than drops. The flush-side marker emission is wired so that if/when a
+ * producer bumps this counter, the user sees "log: dropped N lines". */
 static uint32_t dropped_lines;
 
 static void emit_line(uint8_t lvl, const char *text, uint16_t text_len) {

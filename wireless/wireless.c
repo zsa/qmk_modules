@@ -54,8 +54,10 @@ static bool               nrf_ship_mode  = false;
 /* ---- Helpers ---- */
 
 void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len) {
-    /* HID payloads are small — 64 bytes is plenty for worst-case escaping */
-    uint8_t buf[128];
+    /* Sized for the worst case: (ZSA_LOG_MAX_PAYLOAD + ZSA_FRAME_OVERHEAD) * 2 + 1
+     * (every payload byte escapes). static is safe because QMK runs one cooperative
+     * task for the keymap/uart path — no reentrancy. */
+    static uint8_t buf[(ZSA_LOG_MAX_PAYLOAD + ZSA_FRAME_OVERHEAD) * 2 + 1];
     uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
     uart_transmit(buf, frame_len);
 }
