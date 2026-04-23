@@ -43,6 +43,7 @@ float scroll_accumulated_v = 0;
 bool set_scrolling = false;
 bool navigator_turbo = false;
 bool navigator_aim = false;
+static bool navigator_speed_suppressed = false;
 
 #ifdef _NAVIGATOR_AIM_HAS_LAYERS
 static const uint8_t navigator_aim_layers[] = NAVIGATOR_AIM_LAYERS;
@@ -91,7 +92,7 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
     // by multiplying the x and y values by a factor.
     bool turbo_active = navigator_turbo;
 #ifdef _NAVIGATOR_TURBO_HAS_LAYERS
-    turbo_active = turbo_active || navigator_turbo_layer_active();
+    turbo_active = turbo_active || (!navigator_speed_suppressed && navigator_turbo_layer_active());
 #endif
     if (turbo_active) {
         mouse_report.x *= NAVIGATOR_TURBO_MULTIPLIER;
@@ -101,7 +102,7 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
     // by dividing the x and y values by a factor.
     bool aim_active = navigator_aim;
 #ifdef _NAVIGATOR_AIM_HAS_LAYERS
-    aim_active = aim_active || navigator_aim_layer_active();
+    aim_active = aim_active || (!navigator_speed_suppressed && navigator_aim_layer_active());
 #endif
     if (aim_active) {
         mouse_report.x /= NAVIGATOR_AIM_DIVIDER;
@@ -217,6 +218,18 @@ bool process_record_navigator_trackball(uint16_t keycode, keyrecord_t *record) {
         case TOGGLE_SCROLL:
             if (record->event.pressed) set_scrolling = !set_scrolling;
             break;
+        case NAVIGATOR_CLEAR_SPEED:
+            if (record->event.pressed) {
+                navigator_turbo = false;
+                navigator_aim = false;
+                navigator_speed_suppressed = true;
+            }
+            break;
     }
     return true;
+}
+
+layer_state_t layer_state_set_navigator_trackball(layer_state_t state) {
+    navigator_speed_suppressed = false;
+    return state;
 }
