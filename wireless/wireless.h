@@ -27,3 +27,17 @@ enum zsa_idle_step zsa_wireless_idle_step(void);
 
 /* Low-level UART frame sender. Used by optional sub-modules like log_tap. */
 void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len);
+
+/* True once the LINK_UP handshake with the nRF has completed at least once.
+ * Sub-modules (e.g. navigator_wireless) should gate any control sends on this
+ * — frames sent before the nRF's UART rx is ready get dropped at the hardware
+ * level with no diagnostic. Same gate that send_full_state already uses. */
+bool zsa_wireless_link_ready(void);
+
+/* Navigator event hooks. The wireless module accumulates motion deltas and
+ * tracks the currently-detected device type from EVT_NAV_PRESENT events.
+ *
+ * navigator_wireless (the pointing_device driver) consumes these — call
+ * consume_motion every pointing_device_task to drain the accumulator. */
+uint8_t zsa_wireless_nav_device_type(void);  /* enum zsa_nav_device_type, 0 if none */
+void    zsa_wireless_nav_consume_motion(int16_t *dx, int16_t *dy);

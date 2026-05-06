@@ -52,6 +52,8 @@ enum zsa_msg_type {
     ZSA_MSG_CMD_PAIR         = 0x21,
     ZSA_MSG_CMD_IDLE_STATE   = 0x22,
     ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=disconnected, 1=connected */
+    ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: 0=disable sensor polling, 1=enable */
+    ZSA_MSG_CMD_NAV_CPI      = 0x25,  /* 1 B: 0-255 normalized; sensor driver maps to native units */
 
     /* nRF -> STM32: DFU commands (0x30-0x3F) */
     ZSA_MSG_DFU_ERASE        = 0x30,  /* 4 B: addr LE32 */
@@ -71,6 +73,12 @@ enum zsa_msg_type {
     ZSA_MSG_EVT_PAIR_STATE   = 0x82,
     ZSA_MSG_EVT_LED_STATE    = 0x83,
     ZSA_MSG_EVT_LED_RAIL     = 0x84,  /* 1 B: bitmask of active LED rails */
+    ZSA_MSG_EVT_NAV_PRESENT  = 0x85,  /* 1 B: device type — 0=none, 1=trackball, 2=touchpad */
+    ZSA_MSG_EVT_NAV_MOTION   = 0x86,  /* 4 B: int16 dx, int16 dy (LE) */
+    /* Reserved for touchpad future:
+     *   ZSA_MSG_EVT_NAV_SCROLL  = 0x87  (4 B: int16 dh, int16 dv — native scroll)
+     *   ZSA_MSG_EVT_NAV_GESTURE = 0x88  (TLV: gesture id + params)
+     */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -145,6 +153,37 @@ struct __attribute__((packed)) zsa_idle_state {
 /* ZSA_MSG_CMD_USB_STATE (1 byte) */
 struct __attribute__((packed)) zsa_usb_state {
     uint8_t connected; /* 0 = disconnected, 1 = connected */
+};
+
+/* ZSA_MSG_CMD_NAV_ENABLE (1 byte) */
+struct __attribute__((packed)) zsa_nav_enable {
+    uint8_t enabled; /* 0 = disable sensor polling, 1 = enable */
+};
+
+/* ZSA_MSG_CMD_NAV_CPI (1 byte). Normalized 0-255 abstraction; the sensor driver
+ * on the nRF side maps it to its own native units (e.g. paw3805ek register 0x8D).
+ * Out-of-range values are clamped silently. */
+struct __attribute__((packed)) zsa_nav_cpi {
+    uint8_t cpi;
+};
+
+/* ZSA_MSG_EVT_NAV_PRESENT (1 byte) */
+enum zsa_nav_device_type {
+    ZSA_NAV_DEVICE_NONE      = 0,
+    ZSA_NAV_DEVICE_TRACKBALL = 1,
+    ZSA_NAV_DEVICE_TOUCHPAD  = 2,
+};
+
+struct __attribute__((packed)) zsa_nav_present {
+    uint8_t device_type; /* enum zsa_nav_device_type */
+};
+
+/* ZSA_MSG_EVT_NAV_MOTION (4 bytes). Sensor-agnostic relative motion deltas.
+ * Sent by the nRF whenever non-zero motion has accumulated. Receiver should
+ * accumulate dx/dy until the QMK pointing-device task consumes them. */
+struct __attribute__((packed)) zsa_nav_motion {
+    int16_t dx;
+    int16_t dy;
 };
 
 /* ---- DFU state / error codes ---- */
