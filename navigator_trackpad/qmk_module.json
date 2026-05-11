@@ -1,0 +1,12 @@
+{
+    "module_name": "Navigator Trackpad",
+    "maintainer": "ZSA",
+    "license": "GPL-2.0-or-later",
+    "features": {
+        "digitizer": true
+    },
+    "keycodes": [
+        { "key": "TRACKPAD_INC_CPI", "aliases": ["TP_CPIU"] },
+        { "key": "TRACKPAD_DEC_CPI", "aliases": ["TP_CPID"] }
+    ]
+}
