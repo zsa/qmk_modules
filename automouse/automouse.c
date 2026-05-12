@@ -56,6 +56,10 @@ static void automouse_deactivate(void) {
     if (state.is_active) {
         state.is_active = false;
         state.held_keys = 0;
+        state.accumulated_x = 0;
+        state.accumulated_y = 0;
+        state.accumulated_h = 0;
+        state.accumulated_v = 0;
         if (!layer_held_externally()) {
             layer_off(AUTOMOUSE_LAYER);
         }
