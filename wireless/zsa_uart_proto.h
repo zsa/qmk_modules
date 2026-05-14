@@ -75,8 +75,10 @@ enum zsa_msg_type {
     ZSA_MSG_EVT_LED_RAIL     = 0x84,  /* 1 B: bitmask of active LED rails */
     ZSA_MSG_EVT_NAV_PRESENT  = 0x85,  /* 1 B: device type — 0=none, 1=trackball, 2=touchpad */
     ZSA_MSG_EVT_NAV_MOTION   = 0x86,  /* 4 B: int16 dx, int16 dy (LE) */
+    ZSA_MSG_EVT_NAV_REPORT_RAW = 0x87, /* 17 B: raw Cirque Gen6 PTP packet bytes
+                                        * (CGEN6_MAX_PACKET_SIZE on the QMK decode side).
+                                        * Decoded in QMK; nRF is a dumb pipe. */
     /* Reserved for touchpad future:
-     *   ZSA_MSG_EVT_NAV_SCROLL  = 0x87  (4 B: int16 dh, int16 dv — native scroll)
      *   ZSA_MSG_EVT_NAV_GESTURE = 0x88  (TLV: gesture id + params)
      */
 
@@ -184,6 +186,14 @@ struct __attribute__((packed)) zsa_nav_present {
 struct __attribute__((packed)) zsa_nav_motion {
     int16_t dx;
     int16_t dy;
+};
+
+/* ZSA_MSG_EVT_NAV_REPORT_RAW (17 bytes) — raw Cirque Gen6 PTP packet.
+ * QMK side decodes via navigator_trackpad_core_decode(). The full 17 bytes
+ * (cirque header bytes 0-1 + payload bytes 2-16) are forwarded so the decode
+ * runs against bytes identical to the wired i2c-read path. */
+struct __attribute__((packed)) zsa_nav_report_raw {
+    uint8_t data[17];
 };
 
 /* ---- DFU state / error codes ---- */
