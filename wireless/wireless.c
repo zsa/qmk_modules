@@ -7,6 +7,7 @@
  */
 
 #include <stddef.h>
+#include <string.h>
 #include "wireless.h"
 #include "bluetooth.h"
 #include "report.h"
@@ -48,6 +49,9 @@ static uint8_t nrf_led_state;
 static int32_t nav_accum_dx;
 static int32_t nav_accum_dy;
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
+
+static uint8_t nav_raw_report[17];
+static bool    nav_raw_fresh;
 
 /* ---- Parser instance ---- */
 
@@ -160,6 +164,14 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 
+        case ZSA_MSG_EVT_NAV_REPORT_RAW:
+            if (frame->len >= sizeof(struct zsa_nav_report_raw)) {
+                const struct zsa_nav_report_raw *r = (const struct zsa_nav_report_raw *)frame->payload;
+                memcpy(nav_raw_report, r->data, sizeof(nav_raw_report));
+                nav_raw_fresh = true;
+            }
+            break;
+
         default:
             break;
     }
@@ -219,6 +231,13 @@ void zsa_wireless_nav_consume_motion(int16_t *dx, int16_t *dy) {
     }
     nav_accum_dx = 0;
     nav_accum_dy = 0;
+}
+
+bool zsa_wireless_nav_consume_raw(uint8_t out[17]) {
+    if (!nav_raw_fresh) return false;
+    memcpy(out, nav_raw_report, sizeof(nav_raw_report));
+    nav_raw_fresh = false;
+    return true;
 }
 
 /* ---- Idle power management ---- */

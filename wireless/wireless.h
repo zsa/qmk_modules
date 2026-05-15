@@ -41,3 +41,7 @@ bool zsa_wireless_link_ready(void);
  * consume_motion every pointing_device_task to drain the accumulator. */
 uint8_t zsa_wireless_nav_device_type(void);  /* enum zsa_nav_device_type, 0 if none */
 void    zsa_wireless_nav_consume_motion(int16_t *dx, int16_t *dy);
+
+/* True if a fresh raw nav report (17 B) has arrived from the nRF since the
+ * previous call. On true, *out is filled and the freshness flag is cleared. */
+bool zsa_wireless_nav_consume_raw(uint8_t out[17]);
