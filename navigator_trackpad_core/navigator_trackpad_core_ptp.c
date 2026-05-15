@@ -1,16 +1,18 @@
-// Copyright 2025 ZSA Technology Labs, Inc <contact@zsa.io>
+// Copyright 2026 ZSA Technology Labs, Inc <contact@zsa.io>
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// PTP (Precision Touchpad) mode implementation for Navigator trackpad
-// Converts Cirque Gen 6 sensor data to Windows Precision Touchpad HID reports
-// Also provides a fallback mouse collection for systems that don't support PTP
+// PTP (Precision Touchpad) mode implementation — core/transport-agnostic.
+// Converts a decoded Cirque Gen 6 report into Windows Precision Touchpad HID
+// reports. Also provides a fallback mouse collection for systems that don't
+// support PTP. The caller is responsible for paces and supplying the decoded
+// `cgen6_report_t` (i2c read for the wired driver, UART event for wireless).
 
 #include <math.h>
-#include "navigator_trackpad_ptp.h"
-#include "navigator_trackpad_common.h"
+#include "navigator_trackpad_core.h"
 #include "quantum.h"
 #include "report.h"
 #include "timer.h"
+#include "digitizer.h"
 
 // External declarations for report sending (defined in usb_main.c)
 extern void send_digitizer_touchpad(report_digitizer_touchpad_t *report);
@@ -34,6 +36,32 @@ extern uint8_t digitizer_touchpad_get_input_mode(void);
 
 // Button masks
 #define BUTTON_PRIMARY          0x01
+
+// Logical coordinate range for HID descriptor (what we report to the OS)
+#define TRACKPAD_LOGICAL_MAX 2048
+
+// Sensor coordinate range (measured empirically from Cirque Gen6)
+// These define the actual usable touch area of the sensor
+#define SENSOR_X_MIN 281
+#define SENSOR_X_MAX 2018
+#define SENSOR_Y_MIN 276
+#define SENSOR_Y_MAX 2018
+
+// Fixed-point multipliers for coordinate scaling (Q16 format)
+// Precomputed as: (TRACKPAD_LOGICAL_MAX << 16) / (SENSOR_MAX - SENSOR_MIN)
+// This avoids expensive division at runtime
+#define SENSOR_SCALE_X_MULT 77176  // 2048 * 65536 / (2018 - 281)
+#define SENSOR_SCALE_Y_MULT 76957  // 2048 * 65536 / (2018 - 276)
+
+// Mouse fallback mode configuration (when host doesn't support PTP)
+// TRACKPAD_MOUSE_SENSITIVITY: Movement multiplier (0.5 = slower, 1.0 = normal, 2.0 = faster)
+// TRACKPAD_MOUSE_ACCELERATION: Acceleration curve exponent (1.0 = linear, 1.2 = moderate accel)
+#ifndef TRACKPAD_MOUSE_SENSITIVITY
+#    define TRACKPAD_MOUSE_SENSITIVITY 0.3f
+#endif
+#ifndef TRACKPAD_MOUSE_ACCELERATION
+#    define TRACKPAD_MOUSE_ACCELERATION 1.1f
+#endif
 
 // Tap-to-click configuration
 #ifndef TRACKPAD_TAP_TERM_MS
@@ -123,7 +151,7 @@ static inline int8_t clamp_to_int8(int32_t value) {
 
 // Process fallback mouse movement and tap-to-click
 // Uses settle time and movement suppression like navigator_trackpad_mouse for smooth operation
-static void process_fallback_mouse(cgen6_report_t *sensor_report, bool finger_down, bool prev_finger_down) {
+static void process_fallback_mouse(const cgen6_report_t *sensor_report, bool finger_down, bool prev_finger_down) {
     int8_t dx = 0;
     int8_t dy = 0;
     uint8_t buttons = 0;
@@ -254,49 +282,25 @@ static inline uint16_t scale_y(uint16_t raw) {
     return ((uint32_t)(raw - SENSOR_Y_MIN) * SENSOR_SCALE_Y_MULT) >> 16;
 }
 
-// PTP task function - synchronous polling with timer-based throttling
-bool navigator_trackpad_ptp_task(void) {
-    static uint32_t last_poll_time  = 0;
-    static uint32_t last_probe_time = 0;
+// Core dispatch — caller supplies the decoded report and paces the call.
+bool navigator_trackpad_core_dispatch(const cgen6_report_t *report) {
     static uint8_t  prev_buttons = 0;
     // Track previous finger state to detect lift-offs
     static bool     prev_finger0_tip = false;
     static bool     prev_finger1_tip = false;
 
-    uint32_t now = timer_read32();
-
-    // Throttle polling to NAVIGATOR_TRACKPAD_POLL_INTERVAL_MS
-    if (timer_elapsed32(last_poll_time) < NAVIGATOR_TRACKPAD_POLL_INTERVAL_MS) {
-        return false;
-    }
-    last_poll_time = now;
-
-    // Handle disconnected/uninitialized state with slower probe interval
-    if (!trackpad_init) {
-        if (timer_elapsed32(last_probe_time) < NAVIGATOR_TRACKPAD_PROBE_INTERVAL_MS) {
-            return false;
-        }
-        last_probe_time = now;
-        navigator_trackpad_device_init();
-        return false;
-    }
-
-    // Read the report data into local struct
-    cgen6_report_t sensor_report = {0};
-    if (!cirque_gen_6_read_report(&sensor_report)) {
-        return false;
-    }
+    if (!report) return false;
 
     // Current finger states - require both tip AND confidence from sensor
-    bool finger0_tip = sensor_report.fingers[0].tip && sensor_report.fingers[0].confidence;
-    bool finger1_tip = sensor_report.fingers[1].tip && sensor_report.fingers[1].confidence;
+    bool finger0_tip = report->fingers[0].tip && report->fingers[0].confidence;
+    bool finger1_tip = report->fingers[1].tip && report->fingers[1].confidence;
 
     // Use sensor's contact_count to detect ghost fingers
     // Only suppress finger 1 if:
     // - contact_count says 0 or 1 finger, AND
     // - finger 1 was already touching last frame (not a new touch)
     // This prevents ghost fingers while allowing two-finger taps to register
-    uint8_t sensor_contact_count = sensor_report.contact_count;
+    uint8_t sensor_contact_count = report->contact_count;
     if (sensor_contact_count == 0) {
         finger0_tip = false;
         finger1_tip = false;
@@ -311,41 +315,41 @@ bool navigator_trackpad_ptp_task(void) {
     bool finger0_contact = finger0_tip || prev_finger0_tip;
     bool finger1_contact = finger1_tip || prev_finger1_tip;
 
-    uint8_t buttons = sensor_report.buttons & BUTTON_PRIMARY;
+    uint8_t buttons = report->buttons & BUTTON_PRIMARY;
     bool button_changed = (buttons != prev_buttons);
 
     // Contact count includes fingers that are touching OR lifting off this frame
     uint8_t contact_count = (finger0_contact ? 1 : 0) + (finger1_contact ? 1 : 0);
 
     // Build report from sensor data using explicit byte manipulation
-    uint8_t report[PTP_REPORT_SIZE] = {0};
+    uint8_t out_report[PTP_REPORT_SIZE] = {0};
 
-    report[0] = PTP_REPORT_ID;
+    out_report[0] = PTP_REPORT_ID;
 
     // Finger 0 (include if touching or lifting off)
     if (finger0_contact) {
-        build_finger_bytes(&report[PTP_FINGER0_OFFSET], 0,
-                           scale_x(sensor_report.fingers[0].x),
-                           scale_y(sensor_report.fingers[0].y),
+        build_finger_bytes(&out_report[PTP_FINGER0_OFFSET], 0,
+                           scale_x(report->fingers[0].x),
+                           scale_y(report->fingers[0].y),
                            finger0_tip,
-                           sensor_report.fingers[0].confidence);
+                           report->fingers[0].confidence);
     }
 
     // Finger 1 (include if touching or lifting off)
     if (finger1_contact) {
-        build_finger_bytes(&report[PTP_FINGER1_OFFSET], 1,
-                           scale_x(sensor_report.fingers[1].x),
-                           scale_y(sensor_report.fingers[1].y),
+        build_finger_bytes(&out_report[PTP_FINGER1_OFFSET], 1,
+                           scale_x(report->fingers[1].x),
+                           scale_y(report->fingers[1].y),
                            finger1_tip,
-                           sensor_report.fingers[1].confidence);
+                           report->fingers[1].confidence);
     }
 
     // Scan time (2 bytes, little-endian)
-    report[PTP_SCAN_TIME_OFFSET]     = sensor_report.scan_time & 0xFF;
-    report[PTP_SCAN_TIME_OFFSET + 1] = (sensor_report.scan_time >> 8) & 0xFF;
+    out_report[PTP_SCAN_TIME_OFFSET]     = report->scan_time & 0xFF;
+    out_report[PTP_SCAN_TIME_OFFSET + 1] = (report->scan_time >> 8) & 0xFF;
 
     // Contact count (bits 0-3) + buttons (bits 4-6)
-    report[PTP_COUNT_BUTTONS_OFFSET] = (contact_count & 0x0F) | ((buttons & BUTTON_PRIMARY) << 4);
+    out_report[PTP_COUNT_BUTTONS_OFFSET] = (contact_count & 0x0F) | ((buttons & BUTTON_PRIMARY) << 4);
 
     // Get current input mode and handle mode changes
     uint8_t input_mode = digitizer_touchpad_get_input_mode();
@@ -358,13 +362,13 @@ bool navigator_trackpad_ptp_task(void) {
     // Send PTP report only in PTP mode (mode 3)
     if (input_mode == TRACKPAD_INPUT_MODE_PTP) {
         if (contact_count > 0 || button_changed) {
-            send_digitizer_touchpad((report_digitizer_touchpad_t *)report);
+            send_digitizer_touchpad((report_digitizer_touchpad_t *)out_report);
         }
     }
 
     // Process fallback mouse only in mouse mode (mode 0)
     if (input_mode == TRACKPAD_INPUT_MODE_MOUSE) {
-        process_fallback_mouse(&sensor_report, finger0_tip, prev_finger0_tip);
+        process_fallback_mouse(report, finger0_tip, prev_finger0_tip);
     }
 
     // Update previous state
