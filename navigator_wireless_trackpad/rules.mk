@@ -1,0 +1,4 @@
+DIGITIZER_ENABLE = yes
+DIGITIZER_MODE = touchpad
+
+SRC += $(MODULE_PATH_NAVIGATOR_WIRELESS_TRACKPAD)/navigator_wireless_trackpad.c
