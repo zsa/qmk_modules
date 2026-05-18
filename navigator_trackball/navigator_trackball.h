@@ -43,5 +43,3 @@ typedef struct {
     uint8_t reg;
     uint8_t data;
 } paw3805ek_reg_seq_t;
-
-void     restore_cpi(uint8_t cpi);
