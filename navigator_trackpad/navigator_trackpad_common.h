@@ -149,10 +149,8 @@ void navigator_trackpad_device_init(void);
 // CPI management
 uint16_t navigator_trackpad_get_cpi(void);
 void     navigator_trackpad_set_cpi(uint16_t cpi);
-void     restore_cpi(uint8_t cpi);
 
 // Shared globals
-extern uint16_t       current_cpi;
 extern bool           trackpad_init;
 
 // Helper functions

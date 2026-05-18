@@ -12,8 +12,8 @@
 #include "timer.h"
 
 // Shared globals
-uint16_t       current_cpi   = DEFAULT_CPI_TICK;
-bool           trackpad_init = false;
+static uint16_t current_cpi  = DEFAULT_CPI_TICK;
+bool            trackpad_init = false;
 
 // I2C communication functions
 i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
@@ -358,7 +358,7 @@ uint16_t navigator_trackpad_get_cpi(void) {
     return current_cpi;
 }
 
-void restore_cpi(uint8_t cpi) {
+static void restore_cpi(uint8_t cpi) {
     current_cpi = cpi;
     set_cirque_cpi();
 }
