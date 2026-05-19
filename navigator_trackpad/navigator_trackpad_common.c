@@ -358,11 +358,6 @@ uint16_t navigator_trackpad_get_cpi(void) {
     return current_cpi;
 }
 
-static void restore_cpi(uint8_t cpi) {
-    current_cpi = cpi;
-    set_cirque_cpi();
-}
-
 void navigator_trackpad_set_cpi(uint16_t cpi) {
     if (cpi == 0) { // Decrease one tick
         if (current_cpi > 1) {
