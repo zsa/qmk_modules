@@ -57,17 +57,18 @@
 #define CPI_6 1800
 #define CPI_7 2048
 
-// Physical trackpad dimensions (in 0.01 inch units for HID descriptor)
-// Navigator trackpad is circular, 40mm diameter (1.575 inches actual)
-// We report larger physical dimensions to maintain good cursor speed
-// The OS uses this ratio to calculate movement sensitivity
-
-#define TRACkbPAD_DIMENSIONS_FACTOR 5
+// Physical trackpad dimensions (in 0.01 inch units for HID descriptor).
+// Navigator pad is ~40mm / 1.57" actual. We report a larger area (~3.5x = 5.5")
+// so the OS treats cursor movement as faster than the tiny surface alone implies.
+// CAP: do NOT inflate beyond ~3.5x. Higher values push the two contacts of a
+// two-finger tap past Windows' tap-separation threshold, which silently breaks
+// two-finger-tap right-click. 550 (~3.5x) is the empirical max that keeps the
+// gesture reliable at natural finger spacing while preserving cursor speed.
 #ifndef TRACKPAD_PHYSICAL_WIDTH
-#    define TRACKPAD_PHYSICAL_WIDTH 157 * TRACkbPAD_DIMENSIONS_FACTOR   // 1.57 inches (40mm actual size)
+#    define TRACKPAD_PHYSICAL_WIDTH 550   // ~3.5x of 157 (1.57"/40mm actual)
 #endif
 #ifndef TRACKPAD_PHYSICAL_HEIGHT
-#    define TRACKPAD_PHYSICAL_HEIGHT 157 * TRACkbPAD_DIMENSIONS_FACTOR  // 1.57 inches (40mm actual size)
+#    define TRACKPAD_PHYSICAL_HEIGHT 550  // ~3.5x of 157 (1.57"/40mm actual)
 #endif
 
 // New-name aliases consumed by digitizer.h parametric defines
