@@ -8,9 +8,43 @@
 #include <math.h>
 #include "navigator_trackpad_ptp.h"
 #include "navigator_trackpad_common.h"
+#include "navigator_trackpad_rotation.h"
 #include "quantum.h"
 #include "report.h"
 #include "timer.h"
+
+// Normalize the configured angle to [0, 360) so negative or >360 values still
+// hit the integer right-angle fast-paths.
+#define _NAVIGATOR_TRACKPAD_ROT (((NAVIGATOR_TRACKPAD_ROTATION % 360) + 360) % 360)
+
+#if _NAVIGATOR_TRACKPAD_ROT != 0 && _NAVIGATOR_TRACKPAD_ROT != 90 && \
+    _NAVIGATOR_TRACKPAD_ROT != 180 && _NAVIGATOR_TRACKPAD_ROT != 270
+#    define _NT_PAD_ROT_RAD (_NAVIGATOR_TRACKPAD_ROT * 3.14159265358979f / 180.0f)
+// Evaluate cos/sin at compile time to avoid runtime trig / math-library calls.
+static const float pad_rotation_cos = __builtin_cosf(_NT_PAD_ROT_RAD);
+static const float pad_rotation_sin = __builtin_sinf(_NT_PAD_ROT_RAD);
+#endif
+
+// Apply the configured rotation to an absolute point (lvalues px, py) and to a
+// relative delta (lvalues dx, dy). Selected at compile time: 0 -> no-op,
+// right angles -> integer fast-path, else -> float path. Passing the same
+// lvalue as input and output is safe (the helpers read by value first).
+#if _NAVIGATOR_TRACKPAD_ROT == 90
+#    define NT_ROTATE_POINT(px, py) nt_rotate_point_ortho((px), (py), NAVIGATOR_TRACKPAD_CENTER_X, NAVIGATOR_TRACKPAD_CENTER_Y, 1, TRACKPAD_LOGICAL_MAX, &(px), &(py))
+#    define NT_ROTATE_DELTA(dx, dy) nt_rotate_delta_ortho((dx), (dy), 1, &(dx), &(dy))
+#elif _NAVIGATOR_TRACKPAD_ROT == 180
+#    define NT_ROTATE_POINT(px, py) nt_rotate_point_ortho((px), (py), NAVIGATOR_TRACKPAD_CENTER_X, NAVIGATOR_TRACKPAD_CENTER_Y, 2, TRACKPAD_LOGICAL_MAX, &(px), &(py))
+#    define NT_ROTATE_DELTA(dx, dy) nt_rotate_delta_ortho((dx), (dy), 2, &(dx), &(dy))
+#elif _NAVIGATOR_TRACKPAD_ROT == 270
+#    define NT_ROTATE_POINT(px, py) nt_rotate_point_ortho((px), (py), NAVIGATOR_TRACKPAD_CENTER_X, NAVIGATOR_TRACKPAD_CENTER_Y, 3, TRACKPAD_LOGICAL_MAX, &(px), &(py))
+#    define NT_ROTATE_DELTA(dx, dy) nt_rotate_delta_ortho((dx), (dy), 3, &(dx), &(dy))
+#elif _NAVIGATOR_TRACKPAD_ROT != 0
+#    define NT_ROTATE_POINT(px, py) nt_rotate_point((px), (py), NAVIGATOR_TRACKPAD_CENTER_X, NAVIGATOR_TRACKPAD_CENTER_Y, pad_rotation_cos, pad_rotation_sin, TRACKPAD_LOGICAL_MAX, &(px), &(py))
+#    define NT_ROTATE_DELTA(dx, dy) nt_rotate_delta((dx), (dy), pad_rotation_cos, pad_rotation_sin, &(dx), &(dy))
+#else
+#    define NT_ROTATE_POINT(px, py) ((void)0)
+#    define NT_ROTATE_DELTA(dx, dy) ((void)0)
+#endif
 
 // External declarations for report sending (defined in usb_main.c)
 extern void send_digitizer_touchpad(report_digitizer_touchpad_t *report);
@@ -183,6 +217,11 @@ static void process_fallback_mouse(cgen6_report_t *sensor_report, bool finger_do
             int16_t raw_dx = (int16_t)sensor_report->fingers[0].x - (int16_t)mouse_state.last_x;
             int16_t raw_dy = (int16_t)sensor_report->fingers[0].y - (int16_t)mouse_state.last_y;
 
+            // Rotate the relative motion vector (same convention as the trackball).
+            // Tap/drag detection uses squared distance, which rotation leaves
+            // invariant, so only the reported deltas need rotating.
+            NT_ROTATE_DELTA(raw_dx, raw_dy);
+
             // Clamp deltas to prevent jumps from bad sensor data
             if (raw_dx > TRACKPAD_MAX_DELTA) raw_dx = TRACKPAD_MAX_DELTA;
             if (raw_dx < -TRACKPAD_MAX_DELTA) raw_dx = -TRACKPAD_MAX_DELTA;
@@ -311,6 +350,10 @@ bool navigator_trackpad_ptp_task(void) {
             cur_id[cur_n]   = sensor_report.fingers[ss].id;
             cur_x[cur_n]    = scale_x(sensor_report.fingers[ss].x);
             cur_y[cur_n]    = scale_y(sensor_report.fingers[ss].y);
+            // Rotate the absolute contact about the configured center. Both
+            // contacts share the center, so the transform is rigid: their
+            // separation (used for two-finger gestures) is preserved.
+            NT_ROTATE_POINT(cur_x[cur_n], cur_y[cur_n]);
             cur_conf[cur_n] = sensor_report.fingers[ss].confidence;
             cur_n++;
         }
