@@ -24,11 +24,13 @@ bool digitizer_touchpad_task(void) {
 // navigator_trackpad_set_cpi(0) decrements one CPI tick; any non-zero value increments.
 // CPI controls only matter in mouse-fallback mode; harmless in PTP mode.
 //
-// The NAVIGATOR_* / TOGGLE_* / DRAG_SCROLL keycodes are shared with the
-// navigator_trackball module so that layouts authored for a trackball (e.g. via
-// Oryx) compile unchanged on a trackpad. The CPI variants map to the trackpad's
-// real CPI control; the trackball-only speed/scroll keycodes have no trackpad
-// equivalent and are accepted as no-ops (swallowed so they don't type anything).
+// All NAVIGATOR_* / TRACKPAD_* / TOGGLE_* / DRAG_SCROLL keycodes are declared
+// once in the zsa/defaults module (always loaded) so trackball and trackpad can
+// be compiled together without enum redefinitions, and so layouts authored for a
+// trackball (e.g. via Oryx) compile unchanged on a trackpad. Here the CPI
+// variants map to the trackpad's real CPI control; the trackball-only
+// speed/scroll keycodes have no trackpad equivalent and are accepted as no-ops
+// (swallowed so they don't type anything).
 bool process_record_navigator_trackpad(uint16_t keycode, keyrecord_t *record) {
     switch (keycode) {
         case TRACKPAD_INC_CPI:
