@@ -82,6 +82,27 @@
 // Logical coordinate range for HID descriptor (what we report to the OS)
 #define TRACKPAD_LOGICAL_MAX 2048
 
+// Rotation of the reported orientation, in degrees clockwise. Applies to both
+// PTP (absolute) and mouse-fallback (relative) modes. The touch surface is
+// circular, so any angle rotates cleanly about the center without clipping.
+// Defined here (a compiled-in header), not in the module config.h, because the
+// module config.h is force-included BEFORE the keymap config.h -- defining it
+// there would lock the default in first and make keymap overrides a -Werror
+// redefinition. Defining it here lets a keymap's config.h #define win normally.
+#ifndef NAVIGATOR_TRACKPAD_ROTATION
+#    define NAVIGATOR_TRACKPAD_ROTATION 0
+#endif
+
+// Pivot for absolute (PTP) rotation, in logical coordinates. Default is the
+// center of the logical box. Override if the circle's center is found to map to
+// a different point during hardware testing.
+#ifndef NAVIGATOR_TRACKPAD_CENTER_X
+#    define NAVIGATOR_TRACKPAD_CENTER_X (TRACKPAD_LOGICAL_MAX / 2)
+#endif
+#ifndef NAVIGATOR_TRACKPAD_CENTER_Y
+#    define NAVIGATOR_TRACKPAD_CENTER_Y (TRACKPAD_LOGICAL_MAX / 2)
+#endif
+
 // Sensor coordinate range (measured empirically from Cirque Gen6)
 // These define the actual usable touch area of the sensor
 #define SENSOR_X_MIN 281
