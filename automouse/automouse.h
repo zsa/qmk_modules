@@ -14,6 +14,12 @@
 #    define AUTOMOUSE_TIMEOUT 650
 #endif
 
+// Idle safety timeout (ms) for ONESHOT "tap to exit" mode. Before the first tap,
+// the layer drops after this much inactivity. 0 = disabled (layer stays until tapped).
+#ifndef AUTOMOUSE_ONESHOT_TIMEOUT
+#    define AUTOMOUSE_ONESHOT_TIMEOUT 0
+#endif
+
 #ifndef AUTOMOUSE_THRESHOLD
 #    define AUTOMOUSE_THRESHOLD 10
 #endif

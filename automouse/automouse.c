@@ -106,7 +106,15 @@ report_mouse_t pointing_device_task_automouse(report_mouse_t mouse_report) {
     }
 
 #ifdef AUTOMOUSE_ONESHOT
-    if (state.is_active && state.oneshot_triggered && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
+    bool short_timeout = state.is_active && state.oneshot_triggered &&
+                         timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT;
+#if AUTOMOUSE_ONESHOT_TIMEOUT > 0
+    bool idle_timeout = state.is_active && !state.oneshot_triggered &&
+                        timer_elapsed(state.last_activity) > AUTOMOUSE_ONESHOT_TIMEOUT;
+#else
+    bool idle_timeout = false;
+#endif
+    if (short_timeout || idle_timeout) {
 #else
     if (state.is_active && timer_elapsed(state.last_activity) > AUTOMOUSE_TIMEOUT) {
 #endif
