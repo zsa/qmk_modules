@@ -41,3 +41,7 @@ void automouse_disable(void);
 void automouse_toggle(void);
 bool automouse_is_enabled(void);
 bool automouse_is_active(void);
+
+// Feed motion from a sensor that bypasses the QMK pointing-device pipeline
+// (e.g. a digitizer/trackpad) so it can activate the mouse layer.
+void automouse_report_motion(int16_t dx, int16_t dy, uint8_t buttons);

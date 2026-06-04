@@ -66,6 +66,38 @@ static void automouse_deactivate(void) {
     }
 }
 
+// Accumulate motion deltas and activate the mouse layer once movement crosses
+// the threshold. Shared by the pointing-device task (trackball and any other
+// QMK pointing device) and by external sensors that bypass that pipeline —
+// e.g. the Navigator trackpad, which emits digitizer reports directly.
+static void automouse_accumulate(int16_t x, int16_t y, int16_t h, int16_t v, uint8_t buttons) {
+    // Skip activation checks during debounce or post-keypress delay
+    if (timer_elapsed(state.last_activation) <= AUTOMOUSE_DEBOUNCE ||
+        timer_elapsed(state.last_keypress) <= AUTOMOUSE_DELAY) {
+        return;
+    }
+
+    state.accumulated_x += x;
+    state.accumulated_y += y;
+    state.accumulated_h += h;
+    state.accumulated_v += v;
+
+    bool threshold_exceeded = abs(state.accumulated_x) > AUTOMOUSE_THRESHOLD ||
+                              abs(state.accumulated_y) > AUTOMOUSE_THRESHOLD ||
+                              abs(state.accumulated_h) > AUTOMOUSE_SCROLL_THRESHOLD ||
+                              abs(state.accumulated_v) > AUTOMOUSE_SCROLL_THRESHOLD ||
+                              (buttons && state.is_active);
+
+    if (threshold_exceeded) {
+        state.accumulated_x = 0;
+        state.accumulated_y = 0;
+        state.accumulated_h = 0;
+        state.accumulated_v = 0;
+        state.last_activation = timer_read();
+        automouse_activate();
+    }
+}
+
 // --- Public API ---
 
 void automouse_enable(void) {
@@ -121,33 +153,21 @@ report_mouse_t pointing_device_task_automouse(report_mouse_t mouse_report) {
         automouse_deactivate();
     }
 
-    // Skip activation checks during debounce or post-keypress delay
-    if (timer_elapsed(state.last_activation) <= AUTOMOUSE_DEBOUNCE ||
-        timer_elapsed(state.last_keypress) <= AUTOMOUSE_DELAY) {
-        return mouse_report;
-    }
-
-    state.accumulated_x += mouse_report.x;
-    state.accumulated_y += mouse_report.y;
-    state.accumulated_h += mouse_report.h;
-    state.accumulated_v += mouse_report.v;
-
-    bool threshold_exceeded = abs(state.accumulated_x) > AUTOMOUSE_THRESHOLD ||
-                              abs(state.accumulated_y) > AUTOMOUSE_THRESHOLD ||
-                              abs(state.accumulated_h) > AUTOMOUSE_SCROLL_THRESHOLD ||
-                              abs(state.accumulated_v) > AUTOMOUSE_SCROLL_THRESHOLD ||
-                              (mouse_report.buttons && state.is_active);
-
-    if (threshold_exceeded) {
-        state.accumulated_x = 0;
-        state.accumulated_y = 0;
-        state.accumulated_h = 0;
-        state.accumulated_v = 0;
-        state.last_activation = timer_read();
-        automouse_activate();
-    }
+    automouse_accumulate(mouse_report.x, mouse_report.y, mouse_report.h, mouse_report.v, mouse_report.buttons);
 
     return mouse_report;
+}
+
+// Activation entry point for pointing sensors outside the QMK pointing-device
+// pipeline (the trackpad sends digitizer reports, never a report_mouse_t).
+// The module's pointing_device_task hook still runs every cycle — automouse
+// forces POINTING_DEVICE_ENABLE — so timeout/deactivation housekeeping is
+// unaffected; this only injects motion as an activation signal.
+void automouse_report_motion(int16_t dx, int16_t dy, uint8_t buttons) {
+    if (!state.is_enabled) {
+        return;
+    }
+    automouse_accumulate(dx, dy, 0, 0, buttons);
 }
 
 bool process_record_automouse(uint16_t keycode, keyrecord_t *record) {

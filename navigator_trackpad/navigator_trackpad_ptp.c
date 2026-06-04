@@ -13,6 +13,10 @@
 #include "report.h"
 #include "timer.h"
 
+#if COMMUNITY_MODULE_AUTOMOUSE_ENABLE == TRUE
+#    include <automouse.h>
+#endif
+
 // Normalize the configured angle to [0, 360) so negative or >360 values still
 // hit the integer right-angle fast-paths.
 #define _NAVIGATOR_TRACKPAD_ROT (((NAVIGATOR_TRACKPAD_ROTATION % 360) + 360) % 360)
@@ -361,6 +365,32 @@ bool navigator_trackpad_ptp_task(void) {
 
     uint8_t buttons = sensor_report.buttons & BUTTON_PRIMARY;
     bool button_changed = (buttons != prev_buttons);
+
+#if COMMUNITY_MODULE_AUTOMOUSE_ENABLE == TRUE
+    // Feed primary-contact motion to automouse so a finger moving on the pad can
+    // activate the mouse layer. This runs regardless of input mode: in PTP mode
+    // the host derives cursor motion from the absolute contacts we emit, so there
+    // is no relative-delta report (send_mouse_report) for automouse to observe.
+    // Deltas are in logical units (0..TRACKPAD_LOGICAL_MAX); keyed on the sensor's
+    // stable contact id so a fresh touch doesn't produce a jump from a stale slot.
+    {
+        static int16_t  am_prev_id = -1;
+        static uint16_t am_prev_x  = 0;
+        static uint16_t am_prev_y  = 0;
+        if (cur_n > 0) {
+            if (cur_id[0] == am_prev_id) {
+                automouse_report_motion((int16_t)cur_x[0] - (int16_t)am_prev_x,
+                                        (int16_t)cur_y[0] - (int16_t)am_prev_y,
+                                        buttons);
+            }
+            am_prev_id = cur_id[0];
+            am_prev_x  = cur_x[0];
+            am_prev_y  = cur_y[0];
+        } else {
+            am_prev_id = -1;  // all fingers lifted; next touch starts fresh
+        }
+    }
+#endif
 
     // Assemble the emitted contacts, packed into the first report slots so
     // contact_count always matches the slots the host should read:
