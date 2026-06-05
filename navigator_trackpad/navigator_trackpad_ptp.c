@@ -8,6 +8,7 @@
 #include <math.h>
 #include "navigator_trackpad_ptp.h"
 #include "navigator_trackpad_common.h"
+#include "navigator_trackpad_contacts.h"
 #include "navigator_trackpad_rotation.h"
 #include "quantum.h"
 #include "report.h"
@@ -304,14 +305,11 @@ bool navigator_trackpad_ptp_task(void) {
     static uint8_t  prev_buttons = 0;
     // Slot-0 presence from last frame, for the mouse-mode fallback tap detector.
     static bool     prev_finger0_tip = false;
-    // Contacts emitted (tip down) last frame, identified by the sensor's stable
-    // per-finger id, with their last scaled position — so we can emit exactly one
-    // clean tip=0 when a contact lifts (the host tracks contacts by id, not slot).
-    static int16_t  prev_cid[2]   = {-1, -1};
-    static uint16_t prev_cx[2]    = {0, 0};
-    static uint16_t prev_cy[2]    = {0, 0};
-    static bool     prev_cconf[2] = {false, false};
-    static uint8_t  prev_cn       = 0;
+    // Contacts the host currently believes are down, keyed to the sensor's
+    // stable per-finger id. Reconciled against each frame so every lifted
+    // contact gets a clean tip=0 and none is ever stranded (see
+    // navigator_trackpad_contacts.h).
+    static nt_contact_state_t host_contacts = {0};
 
     uint32_t now = timer_read32();
 
@@ -345,20 +343,20 @@ bool navigator_trackpad_ptp_task(void) {
     // Cirque keeps a finger's id constant even when it moves the contact to a
     // different packet slot, so we key on id (not slot) to avoid teleporting/
     // dropped contacts. Confidence is reported as-is (stays 1 for a real contact).
-    int16_t  cur_id[2];
-    uint16_t cur_x[2], cur_y[2];
-    bool     cur_conf[2];
-    uint8_t  cur_n = 0;
-    for (uint8_t ss = 0; ss < 2; ss++) {
+    nt_sensor_contact_t cur[NT_MAX_CONTACTS];
+    uint8_t             cur_n = 0;
+    for (uint8_t ss = 0; ss < 2 && cur_n < NT_MAX_CONTACTS; ss++) {
         if (sensor_report.fingers[ss].tip) {
-            cur_id[cur_n]   = sensor_report.fingers[ss].id;
-            cur_x[cur_n]    = scale_x(sensor_report.fingers[ss].x);
-            cur_y[cur_n]    = scale_y(sensor_report.fingers[ss].y);
+            uint16_t px = scale_x(sensor_report.fingers[ss].x);
+            uint16_t py = scale_y(sensor_report.fingers[ss].y);
             // Rotate the absolute contact about the configured center. Both
             // contacts share the center, so the transform is rigid: their
             // separation (used for two-finger gestures) is preserved.
-            NT_ROTATE_POINT(cur_x[cur_n], cur_y[cur_n]);
-            cur_conf[cur_n] = sensor_report.fingers[ss].confidence;
+            NT_ROTATE_POINT(px, py);
+            cur[cur_n].id   = sensor_report.fingers[ss].id;
+            cur[cur_n].x    = px;
+            cur[cur_n].y    = py;
+            cur[cur_n].conf = sensor_report.fingers[ss].confidence;
             cur_n++;
         }
     }
@@ -425,17 +423,21 @@ bool navigator_trackpad_ptp_task(void) {
             em_n++;
         }
     }
+    // Reconcile against what the host believes is down: continue still-present
+    // contacts, release (tip=0) any that vanished, and pick up new contacts as
+    // slots allow. Guarantees no contact is ever stranded on the host.
+    nt_emit_list_t emit;
+    nt_reconcile_contacts(&host_contacts, cur, cur_n, &emit);
 
-    uint8_t contact_count = em_n;
+    uint8_t contact_count = emit.count;
 
-    // Build report from the packed emit list.
+    // Build report from the emit list (one finger per HID slot).
+    static const uint8_t finger_offset[NT_MAX_CONTACTS] = {PTP_FINGER0_OFFSET, PTP_FINGER1_OFFSET};
     uint8_t report[PTP_REPORT_SIZE] = {0};
     report[0] = PTP_REPORT_ID;
-    if (em_n > 0) {
-        build_finger_bytes(&report[PTP_FINGER0_OFFSET], (uint8_t)em_id[0], em_x[0], em_y[0], em_tip[0], em_conf[0]);
-    }
-    if (em_n > 1) {
-        build_finger_bytes(&report[PTP_FINGER1_OFFSET], (uint8_t)em_id[1], em_x[1], em_y[1], em_tip[1], em_conf[1]);
+    for (uint8_t i = 0; i < emit.count; i++) {
+        build_finger_bytes(&report[finger_offset[i]], emit.items[i].host_id,
+                           emit.items[i].x, emit.items[i].y, emit.items[i].tip, emit.items[i].conf);
     }
 
     // Scan time (2 bytes, little-endian)
@@ -444,15 +446,6 @@ bool navigator_trackpad_ptp_task(void) {
 
     // Contact count (bits 0-3) + buttons (bits 4-6)
     report[PTP_COUNT_BUTTONS_OFFSET] = (contact_count & 0x0F) | ((buttons & BUTTON_PRIMARY) << 4);
-
-    // Remember this frame's down-contacts for next-frame lift detection.
-    for (uint8_t i = 0; i < cur_n; i++) {
-        prev_cid[i]   = cur_id[i];
-        prev_cx[i]    = cur_x[i];
-        prev_cy[i]    = cur_y[i];
-        prev_cconf[i] = cur_conf[i];
-    }
-    prev_cn = cur_n;
 
     // Get current input mode and handle mode changes
     uint8_t input_mode = digitizer_touchpad_get_input_mode();
