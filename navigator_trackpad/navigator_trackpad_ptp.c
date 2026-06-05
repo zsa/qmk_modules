@@ -376,53 +376,20 @@ bool navigator_trackpad_ptp_task(void) {
         static uint16_t am_prev_x  = 0;
         static uint16_t am_prev_y  = 0;
         if (cur_n > 0) {
-            if (cur_id[0] == am_prev_id) {
-                automouse_report_motion((int16_t)cur_x[0] - (int16_t)am_prev_x,
-                                        (int16_t)cur_y[0] - (int16_t)am_prev_y,
+            if (cur[0].id == am_prev_id) {
+                automouse_report_motion((int16_t)cur[0].x - (int16_t)am_prev_x,
+                                        (int16_t)cur[0].y - (int16_t)am_prev_y,
                                         buttons);
             }
-            am_prev_id = cur_id[0];
-            am_prev_x  = cur_x[0];
-            am_prev_y  = cur_y[0];
+            am_prev_id = cur[0].id;
+            am_prev_x  = cur[0].x;
+            am_prev_y  = cur[0].y;
         } else {
             am_prev_id = -1;  // all fingers lifted; next touch starts fresh
         }
     }
 #endif
 
-    // Assemble the emitted contacts, packed into the first report slots so
-    // contact_count always matches the slots the host should read:
-    //   1. currently-down contacts (tip=1), then
-    //   2. a single clean tip=0 lift for any id reported last frame but gone now,
-    //      as space allows (2 slots). If both slots are filled by current
-    //      contacts, a simultaneously-lifted id simply stops being reported and
-    //      the host infers the lift from its absence + the lower contact_count.
-    int16_t  em_id[2];
-    uint16_t em_x[2], em_y[2];
-    bool     em_conf[2], em_tip[2];
-    uint8_t  em_n = 0;
-    for (uint8_t i = 0; i < cur_n && em_n < 2; i++) {
-        em_id[em_n]   = cur_id[i];
-        em_x[em_n]    = cur_x[i];
-        em_y[em_n]    = cur_y[i];
-        em_conf[em_n] = cur_conf[i];
-        em_tip[em_n]  = true;
-        em_n++;
-    }
-    for (uint8_t p = 0; p < prev_cn && em_n < 2; p++) {
-        bool still_down = false;
-        for (uint8_t i = 0; i < cur_n; i++) {
-            if (cur_id[i] == prev_cid[p]) { still_down = true; break; }
-        }
-        if (!still_down) {
-            em_id[em_n]   = prev_cid[p];
-            em_x[em_n]    = prev_cx[p];
-            em_y[em_n]    = prev_cy[p];
-            em_conf[em_n] = prev_cconf[p];
-            em_tip[em_n]  = false;  // clean lift
-            em_n++;
-        }
-    }
     // Reconcile against what the host believes is down: continue still-present
     // contacts, release (tip=0) any that vanished, and pick up new contacts as
     // slots allow. Guarantees no contact is ever stranded on the host.
