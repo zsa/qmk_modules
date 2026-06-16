@@ -79,8 +79,13 @@
 #    define DIGITIZER_TOUCHPAD_PHYSICAL_HEIGHT TRACKPAD_PHYSICAL_HEIGHT
 #endif
 
-// Logical coordinate range for HID descriptor (what we report to the OS)
-#define TRACKPAD_LOGICAL_MAX 2048
+// Logical coordinate range we report to the OS. Set to the ASIC's native
+// linearized range (0..897, see SENSOR_*_MAX below) so coordinates pass through
+// 1:1 with no upscaling/interpolation. The HID descriptor's logical maximum is
+// overridden to match in post_config.h (DIGITIZER_TOUCHPAD_LOGICAL_MAX) -- keep
+// the two in sync. Cursor speed is unaffected by this value; it is set by the
+// (inflated) physical dimensions in post_config.h.
+#define TRACKPAD_LOGICAL_MAX 897
 
 // Rotation of the reported orientation, in degrees clockwise. Applies to both
 // PTP (absolute) and mouse-fallback (relative) modes. The touch surface is
@@ -116,9 +121,12 @@
 
 // Fixed-point multipliers for coordinate scaling (Q16 format)
 // Precomputed as: (TRACKPAD_LOGICAL_MAX << 16) / (SENSOR_MAX - SENSOR_MIN)
-// This avoids expensive division at runtime
-#define SENSOR_SCALE_X_MULT 149629  // 2048 * 65536 / (897 - 0)
-#define SENSOR_SCALE_Y_MULT 149629  // 2048 * 65536 / (897 - 0)
+// This avoids expensive division at runtime.
+// With TRACKPAD_LOGICAL_MAX == the sensor range (897), this is exactly 1.0 in
+// Q16 (65536): scale_x/scale_y just clamp to [0, 897] and pass through, so the
+// chip's native linearized coordinates reach the host without interpolation.
+#define SENSOR_SCALE_X_MULT 65536  // 897 * 65536 / (897 - 0) == 1.0 (identity)
+#define SENSOR_SCALE_Y_MULT 65536  // 897 * 65536 / (897 - 0) == 1.0 (identity)
 
 // Common finger structure (used by both mouse and PTP modes)
 typedef struct {

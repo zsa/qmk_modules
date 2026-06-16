@@ -17,5 +17,13 @@
 #    define DIGITIZER_TOUCHPAD_PHYSICAL_HEIGHT 550
 #endif
 
-// Logical max stays at the core default of 2048.
+// HID descriptor logical maximum (both axes). Overridden from the core default
+// of 2048 to the Cirque ASIC's native linearized range so coordinates are
+// reported 1:1 with no upscaling. MUST match TRACKPAD_LOGICAL_MAX / SENSOR_*_MAX
+// in navigator_trackpad_common.h. Cursor speed is set by the physical dimensions
+// above, not by this value, so lowering it does not slow the cursor.
+#ifndef DIGITIZER_TOUCHPAD_LOGICAL_MAX
+#    define DIGITIZER_TOUCHPAD_LOGICAL_MAX 897
+#endif
+
 // Contact count stays at the core default of 2.
