@@ -104,17 +104,21 @@
 #endif
 
 // Sensor coordinate range (measured empirically from Cirque Gen6)
-// These define the actual usable touch area of the sensor
-#define SENSOR_X_MIN 281
-#define SENSOR_X_MAX 2018
-#define SENSOR_Y_MIN 276
-#define SENSOR_Y_MAX 2018
+// These define the actual usable touch area of the sensor.
+// With the ASIC's logical scaling enabled (see navigator_trackpad_device_init),
+// the chip emits already-linearized coordinates in a square 0..897 box for this
+// circular pad (measured by sweeping the pad edge). The cardinal points of the
+// circle reach the axis extremes, so X and Y share the same range.
+#define SENSOR_X_MIN 0
+#define SENSOR_X_MAX 897
+#define SENSOR_Y_MIN 0
+#define SENSOR_Y_MAX 897
 
 // Fixed-point multipliers for coordinate scaling (Q16 format)
 // Precomputed as: (TRACKPAD_LOGICAL_MAX << 16) / (SENSOR_MAX - SENSOR_MIN)
 // This avoids expensive division at runtime
-#define SENSOR_SCALE_X_MULT 77176  // 2048 * 65536 / (2018 - 281)
-#define SENSOR_SCALE_Y_MULT 76957  // 2048 * 65536 / (2018 - 276)
+#define SENSOR_SCALE_X_MULT 149629  // 2048 * 65536 / (897 - 0)
+#define SENSOR_SCALE_Y_MULT 149629  // 2048 * 65536 / (897 - 0)
 
 // Common finger structure (used by both mouse and PTP modes)
 typedef struct {

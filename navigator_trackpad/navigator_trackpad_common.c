@@ -309,7 +309,7 @@ void navigator_trackpad_device_init(void) {
     cirque_gen6_swap_xy(true);
     cirque_gen6_invert_x(true);
     cirque_gen6_invert_y(true);
-    cirque_gen6_enable_logical_scaling(false);  // Disable scaling for raw coordinates
+    cirque_gen6_enable_logical_scaling(true);  // Use the ASIC's processed (linearized) coordinate path
 
     trackpad_init = true;
 }
