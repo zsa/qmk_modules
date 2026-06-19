@@ -91,6 +91,17 @@ extern uint8_t digitizer_touchpad_get_input_mode(void);
 #    define TRACKPAD_MAX_DELTA 250  // Max allowed delta per frame to prevent jumps
 #endif
 
+// Consecutive empty sensor reads (at NAVIGATOR_TRACKPAD_POLL_INTERVAL_MS each)
+// required before we declare lift-off and release a still-tracked contact. The
+// Cirque streams reports continuously while a finger is on the pad and goes
+// quiet on lift-off, but because we poll faster than the sensor samples, a lone
+// empty read also happens *between* samples while a finger is down. Waiting for
+// a short run avoids releasing a still-present contact, while still flushing a
+// stranded one within a few ms if the single tip=0 lift packet is ever missed.
+#ifndef TRACKPAD_LIFTOFF_CONFIRM_FRAMES
+#    define TRACKPAD_LIFTOFF_CONFIRM_FRAMES 3
+#endif
+
 // Build a finger's 6 bytes into the report buffer
 // Format: [conf:1 + tip:1 + pad:6] [contact_id:3 + pad:5] [X_lo] [X_hi] [Y_lo] [Y_hi]
 static void build_finger_bytes(uint8_t *buf, uint8_t contact_id, uint16_t x, uint16_t y, bool tip, bool confidence) {
@@ -305,6 +316,9 @@ bool navigator_trackpad_ptp_task(void) {
     static uint8_t  prev_buttons = 0;
     // Slot-0 presence from last frame, for the mouse-mode fallback tap detector.
     static bool     prev_finger0_tip = false;
+    // Consecutive empty reads while a contact is still tracked. Used to confirm
+    // lift-off before flushing a stranded contact (see the read path below).
+    static uint8_t  no_data_frames = 0;
     // Contacts the host currently believes are down, keyed to the sensor's
     // stable per-finger id. Reconciled against each frame so every lifted
     // contact gets a clean tip=0 and none is ever stranded (see
@@ -329,10 +343,46 @@ bool navigator_trackpad_ptp_task(void) {
         return false;
     }
 
-    // Read the report data into local struct
+    // Read the report data into local struct.
+    //
+    // A failed read is one of two things: a genuine I2C/bus error (the read
+    // helper clears trackpad_init and the probe path re-inits next cycle), or a
+    // successful transaction that returned no touch packet. The Cirque streams
+    // reports continuously while any contact is present and goes quiet on
+    // lift-off, so a *run* of empty reads means every finger has left the pad.
+    //
+    // We must still reconcile in that case — with zero current contacts — so any
+    // contact the host believes is down gets a clean tip=0. Otherwise the
+    // contact is stranded, and the next touch (with a reused sensor id) is taken
+    // as a continuation, teleporting the cursor by the lift-to-retouch vector
+    // (the "jump back to where the last stroke started" bug). The zeroed
+    // sensor_report below carries no fingers, so falling through drives cur_n==0
+    // and nt_reconcile_contacts emits the release.
     cgen6_report_t sensor_report = {0};
     if (!cirque_gen_6_read_report(&sensor_report)) {
-        return false;
+        if (!trackpad_init) {
+            // Dead bus: let the probe/re-init path recover; don't synthesize
+            // lift-offs off a failed transaction.
+            no_data_frames = 0;
+            return false;
+        }
+        if (host_contacts.count == 0) {
+            // Pad already idle — nothing to release.
+            no_data_frames = 0;
+            return false;
+        }
+        // A contact is still tracked but this poll had no packet. Empty reads
+        // also occur between samples while a finger is down (poll interval <
+        // sensor sample period), so wait for a short run before declaring
+        // lift-off. Until then, leave the host's contacts untouched (as before).
+        if (++no_data_frames < TRACKPAD_LIFTOFF_CONFIRM_FRAMES) {
+            return false;
+        }
+        // Confirmed lift-off: fall through with the zeroed report so the
+        // reconciler releases the stranded contact(s) with tip=0.
+        no_data_frames = 0;
+    } else {
+        no_data_frames = 0;
     }
 
     // Slot-0 presence (raw tip) drives the mouse-mode fallback tap detector below.
