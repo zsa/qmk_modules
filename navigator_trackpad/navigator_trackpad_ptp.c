@@ -10,6 +10,7 @@
 #include "navigator_trackpad_common.h"
 #include "navigator_trackpad_contacts.h"
 #include "navigator_trackpad_filter.h"
+#include "navigator_trackpad_lut.h"
 #include "navigator_trackpad_rotation.h"
 #include "quantum.h"
 #include "report.h"
@@ -440,6 +441,12 @@ bool navigator_trackpad_ptp_task(void) {
         if (sensor_report.fingers[ss].tip) {
             uint16_t px = scale_x(sensor_report.fingers[ss].x);
             uint16_t py = scale_y(sensor_report.fingers[ss].y);
+#if NAVIGATOR_TRACKPAD_LUT_CORRECTION == TRUE
+            // Subtract the calibrated geometric distortion field so straight
+            // physical strokes report straight (removes the ~1 mm diagonal bow).
+            // Applied on the raw scaled coordinate, before rotation/smoothing.
+            nt_lut_correct(&px, &py);
+#endif
             // Rotate the absolute contact about the configured center. Both
             // contacts share the center, so the transform is rigid: their
             // separation (used for two-finger gestures) is preserved.
