@@ -1,7 +1,7 @@
 #pragma once
 
 #ifndef ZSA_WIRELESS_BAUD_RATE
-#    define ZSA_WIRELESS_BAUD_RATE 115200
+#    define ZSA_WIRELESS_BAUD_RATE 1000000
 #endif
 
 /* Idle power management defaults */
