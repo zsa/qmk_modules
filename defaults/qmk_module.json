@@ -14,6 +14,7 @@
         { "key": "TOGGLE_AIM",        "aliases": ["NV_TAIM"] },
         { "key": "DRAG_SCROLL",       "aliases": ["NV_DSCR"] },
         { "key": "TOGGLE_SCROLL",     "aliases": ["NV_TSCR"] },
+        { "key": "TOGGLE_SCROLL_VERTICAL", "aliases": ["NV_VSCR"] },
         { "key": "NAVIGATOR_CLEAR_SPEED", "aliases": ["NV_CSPD"] }
     ]
 }

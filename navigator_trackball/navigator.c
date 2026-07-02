@@ -41,6 +41,7 @@ float scroll_accumulated_h = 0;
 float scroll_accumulated_v = 0;
 
 bool set_scrolling = false;
+bool scroll_vertical_only = false;
 bool navigator_turbo = false;
 bool navigator_aim = false;
 static bool navigator_speed_suppressed = false;
@@ -112,6 +113,12 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
         // Accumulate scroll movement
         scroll_accumulated_h += (float)mouse_report.x / NAVIGATOR_SCROLL_DIVIDER;
         scroll_accumulated_v += (float)mouse_report.y / NAVIGATOR_SCROLL_DIVIDER;
+
+        // Vertical-only mode: discard any horizontal movement so it never
+        // accumulates or produces a horizontal scroll event.
+        if (scroll_vertical_only) {
+            scroll_accumulated_h = 0.0f;
+        }
 
         // This allows fractional accumulation to build up before triggering scroll
         float abs_h = (scroll_accumulated_h < 0) ? -scroll_accumulated_h : scroll_accumulated_h;
@@ -217,6 +224,9 @@ bool process_record_navigator_trackball(uint16_t keycode, keyrecord_t *record) {
             break;
         case TOGGLE_SCROLL:
             if (record->event.pressed) set_scrolling = !set_scrolling;
+            break;
+        case TOGGLE_SCROLL_VERTICAL:
+            if (record->event.pressed) scroll_vertical_only = !scroll_vertical_only;
             break;
         case NAVIGATOR_CLEAR_SPEED:
             if (record->event.pressed) {
