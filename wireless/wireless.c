@@ -326,6 +326,14 @@ static void idle_power_task(void) {
         return;
     }
 
+#ifdef ZSA_DEV_NO_SLEEP
+    /* Dev toggle: keep the USB/BT state sync above (the nRF relies on those
+     * edges) but never step into DIM/LEDS_OFF/DEEP — the board stays fully
+     * awake so debug sessions (SWD, log captures) aren't interrupted.
+     * Build with ZSA_DEV_NO_SLEEP=yes. */
+    return;
+#endif
+
     /* nRF is in ship mode — stay in DEEP, don't wake on keypresses.
      * Wake only happens via EVT_BLE_STATUS from nRF (handle_rx_frame). */
     if (nrf_ship_mode) {
