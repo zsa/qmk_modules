@@ -13,6 +13,10 @@ enum zsa_idle_step {
 
 /* Cached nRF state, updated via UART events */
 bool    zsa_wireless_ble_connected(void);
+/* True while the nRF is in BLE discovery mode (advertising / awaiting pairing),
+ * i.e. discoverable so a host can find and pair with it. Driven by
+ * ZSA_MSG_EVT_PAIR_STATE (ACTIVE). */
+bool    zsa_wireless_discovery_active(void);
 uint8_t zsa_wireless_battery_soc(void);
 uint8_t zsa_wireless_battery_flags(void);
 
