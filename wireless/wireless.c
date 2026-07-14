@@ -43,12 +43,6 @@ static uint8_t nrf_battery_soc;
 static uint8_t nrf_battery_flags;
 static uint8_t nrf_led_state;
 
-/* Accumulated navigator motion since last consume. Updated from the UART rx
- * handler when EVT_NAV_MOTION arrives, drained by the navigator_wireless
- * pointing_device driver. int32_t to avoid overflow if events pile up between
- * pointing_device_task ticks. */
-static int32_t nav_accum_dx;
-static int32_t nav_accum_dy;
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
 
 static uint8_t nav_raw_report[17];
@@ -161,14 +155,6 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 
-        case ZSA_MSG_EVT_NAV_MOTION:
-            if (frame->len >= sizeof(struct zsa_nav_motion)) {
-                const struct zsa_nav_motion *m = (const struct zsa_nav_motion *)frame->payload;
-                nav_accum_dx += m->dx;
-                nav_accum_dy += m->dy;
-            }
-            break;
-
         case ZSA_MSG_EVT_NAV_REPORT_RAW:
             if (frame->len >= sizeof(struct zsa_nav_report_raw)) {
                 const struct zsa_nav_report_raw *r = (const struct zsa_nav_report_raw *)frame->payload;
@@ -222,24 +208,6 @@ bool zsa_wireless_link_ready(void) {
 
 uint8_t zsa_wireless_nav_device_type(void) {
     return nav_device_type;
-}
-
-void zsa_wireless_nav_consume_motion(int16_t *dx, int16_t *dy) {
-    /* Atomic-ish drain: snapshot then clear. UART rx happens from the same
-     * cooperative task as pointing_device_task in QMK, so no IRQ disable
-     * needed — the rx handler can't preempt this code. */
-    if (dx) {
-        if      (nav_accum_dx >  INT16_MAX) *dx = INT16_MAX;
-        else if (nav_accum_dx <  INT16_MIN) *dx = INT16_MIN;
-        else                                *dx = (int16_t)nav_accum_dx;
-    }
-    if (dy) {
-        if      (nav_accum_dy >  INT16_MAX) *dy = INT16_MAX;
-        else if (nav_accum_dy <  INT16_MIN) *dy = INT16_MIN;
-        else                                *dy = (int16_t)nav_accum_dy;
-    }
-    nav_accum_dx = 0;
-    nav_accum_dy = 0;
 }
 
 bool zsa_wireless_nav_consume_raw(uint8_t out[17]) {

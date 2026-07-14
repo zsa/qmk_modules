@@ -52,8 +52,12 @@ enum zsa_msg_type {
     ZSA_MSG_CMD_PAIR         = 0x21,
     ZSA_MSG_CMD_IDLE_STATE   = 0x22,
     ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=disconnected, 1=connected */
-    ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: 0=disable sensor polling, 1=enable */
-    ZSA_MSG_CMD_NAV_CPI      = 0x25,  /* 1 B: 0-255 normalized; sensor driver maps to native units */
+    ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: 0=disable sensor polling, 1=enable
+                                       * (trackpad flavor only; trackball builds
+                                       * poll unconditionally and ignore this) */
+    /* 0x25 reserved — was ZSA_MSG_CMD_NAV_CPI (removed 2026-07). Wireless
+     * trackball CPI rides the emulated-i2c 0x8D register snoop instead.
+     * Do NOT reuse this ID. */
 
     /* nRF -> STM32: DFU commands (0x30-0x3F) */
     ZSA_MSG_DFU_ERASE        = 0x30,  /* 4 B: addr LE32 */
@@ -74,7 +78,9 @@ enum zsa_msg_type {
     ZSA_MSG_EVT_LED_STATE    = 0x83,
     ZSA_MSG_EVT_LED_RAIL     = 0x84,  /* 1 B: bitmask of active LED rails */
     ZSA_MSG_EVT_NAV_PRESENT  = 0x85,  /* 1 B: device type — 0=none, 1=trackball, 2=touchpad */
-    ZSA_MSG_EVT_NAV_MOTION   = 0x86,  /* 4 B: int16 dx, int16 dy (LE) */
+    /* 0x86 reserved — was ZSA_MSG_EVT_NAV_MOTION (removed 2026-07). Trackball
+     * motion is delivered via the left-nRF's emulated-i2c nav mirror at 0x28,
+     * never over UART. Do NOT reuse this ID. */
     ZSA_MSG_EVT_NAV_REPORT_RAW = 0x87, /* 17 B: raw Cirque Gen6 PTP packet bytes
                                         * (CGEN6_MAX_PACKET_SIZE on the QMK decode side).
                                         * Decoded in QMK; nRF is a dumb pipe. */
@@ -157,17 +163,12 @@ struct __attribute__((packed)) zsa_usb_state {
     uint8_t connected; /* 0 = disconnected, 1 = connected */
 };
 
-/* ZSA_MSG_CMD_NAV_ENABLE (1 byte) */
+/* ZSA_MSG_CMD_NAV_ENABLE (1 byte) — trackpad flavor only */
 struct __attribute__((packed)) zsa_nav_enable {
     uint8_t enabled; /* 0 = disable sensor polling, 1 = enable */
 };
 
-/* ZSA_MSG_CMD_NAV_CPI (1 byte). Normalized 0-255 abstraction; the sensor driver
- * on the nRF side maps it to its own native units (e.g. paw3805ek register 0x8D).
- * Out-of-range values are clamped silently. */
-struct __attribute__((packed)) zsa_nav_cpi {
-    uint8_t cpi;
-};
+/* struct zsa_nav_cpi removed with ZSA_MSG_CMD_NAV_CPI (0x25, reserved). */
 
 /* ZSA_MSG_EVT_NAV_PRESENT (1 byte) */
 enum zsa_nav_device_type {
@@ -180,13 +181,7 @@ struct __attribute__((packed)) zsa_nav_present {
     uint8_t device_type; /* enum zsa_nav_device_type */
 };
 
-/* ZSA_MSG_EVT_NAV_MOTION (4 bytes). Sensor-agnostic relative motion deltas.
- * Sent by the nRF whenever non-zero motion has accumulated. Receiver should
- * accumulate dx/dy until the QMK pointing-device task consumes them. */
-struct __attribute__((packed)) zsa_nav_motion {
-    int16_t dx;
-    int16_t dy;
-};
+/* struct zsa_nav_motion removed with ZSA_MSG_EVT_NAV_MOTION (0x86, reserved). */
 
 /* ZSA_MSG_EVT_NAV_REPORT_RAW (17 bytes) — raw Cirque Gen6 PTP packet.
  * QMK side decodes via navigator_trackpad_core_decode(). The full 17 bytes
