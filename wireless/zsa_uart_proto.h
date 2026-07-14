@@ -52,9 +52,8 @@ enum zsa_msg_type {
     ZSA_MSG_CMD_PAIR         = 0x21,
     ZSA_MSG_CMD_IDLE_STATE   = 0x22,
     ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=disconnected, 1=connected */
-    ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: 0=disable sensor polling, 1=enable
-                                       * (trackpad flavor only; trackball builds
-                                       * poll unconditionally and ignore this) */
+    ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: nav capability bitmask (ZSA_NAV_CAP_*);
+                                       * 0 = no nav support in this QMK build */
     /* 0x25 reserved — was ZSA_MSG_CMD_NAV_CPI (removed 2026-07). Wireless
      * trackball CPI rides the emulated-i2c 0x8D register snoop instead.
      * Do NOT reuse this ID. */
@@ -77,7 +76,10 @@ enum zsa_msg_type {
     ZSA_MSG_EVT_PAIR_STATE   = 0x82,
     ZSA_MSG_EVT_LED_STATE    = 0x83,
     ZSA_MSG_EVT_LED_RAIL     = 0x84,  /* 1 B: bitmask of active LED rails */
-    ZSA_MSG_EVT_NAV_PRESENT  = 0x85,  /* 1 B: device type — 0=none, 1=trackball, 2=touchpad */
+    ZSA_MSG_EVT_NAV_PRESENT  = 0x85,  /* 1 B: detected device type — 0=none,
+                                       * 1=trackball, 2=touchpad. Sent as the
+                                       * CMD_NAV_ENABLE ack and on every
+                                       * presence change */
     /* 0x86 reserved — was ZSA_MSG_EVT_NAV_MOTION (removed 2026-07). Trackball
      * motion is delivered via the left-nRF's emulated-i2c nav mirror at 0x28,
      * never over UART. Do NOT reuse this ID. */
@@ -163,9 +165,15 @@ struct __attribute__((packed)) zsa_usb_state {
     uint8_t connected; /* 0 = disconnected, 1 = connected */
 };
 
-/* ZSA_MSG_CMD_NAV_ENABLE (1 byte) — trackpad flavor only */
+/* ZSA_MSG_CMD_NAV_ENABLE (1 byte) — QMK announces its compiled-in nav
+ * capabilities at link-up, retried every 1 s until acked with
+ * EVT_NAV_PRESENT (sent even when 0). The nRF runs device detection —
+ * and exposes the emulated 0x28 trackball mirror — only for advertised
+ * capabilities. */
+#define ZSA_NAV_CAP_TRACKBALL 0x01
+#define ZSA_NAV_CAP_TRACKPAD  0x02
 struct __attribute__((packed)) zsa_nav_enable {
-    uint8_t enabled; /* 0 = disable sensor polling, 1 = enable */
+    uint8_t enabled; /* ZSA_NAV_CAP_* bitmask; 0 = none */
 };
 
 /* struct zsa_nav_cpi removed with ZSA_MSG_CMD_NAV_CPI (0x25, reserved). */

@@ -17,17 +17,9 @@ void digitizer_touchpad_init(void) {
 }
 
 bool digitizer_touchpad_task(void) {
-    /* Send NAV_ENABLE once the link is up, like navigator_wireless does. */
-    static uint32_t last_enable_attempt_ms;
-    if (zsa_wireless_link_ready() && zsa_wireless_nav_device_type() == 0) {
-        uint32_t now = timer_read32();
-        if (last_enable_attempt_ms == 0 ||
-            TIMER_DIFF_32(now, last_enable_attempt_ms) >= 1000) {
-            struct zsa_nav_enable en = { .enabled = 1 };
-            zsa_wireless_send_frame(ZSA_MSG_CMD_NAV_ENABLE, (const uint8_t *)&en, sizeof(en));
-            last_enable_attempt_ms = now;
-        }
-    }
+    /* The wireless core announces our nav capabilities (CMD_NAV_ENABLE) at
+     * link-up; we only decode raw packets once the nRF reports a touchpad. */
+    if (zsa_wireless_nav_device_type() != ZSA_NAV_DEVICE_TOUCHPAD) return false;
 
     uint8_t bytes[NAV_TRACKPAD_PACKET_LEN];
     if (!zsa_wireless_nav_consume_raw(bytes)) return false;

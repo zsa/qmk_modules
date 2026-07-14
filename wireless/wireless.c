@@ -18,9 +18,9 @@
 #include "wait.h"
 #include "connection.h"
 #include "matrix.h"
-#ifdef ZSA_BLE_LOG
+/* log_tap.h resolves zsa_log()/zsa_log_tap_init() to real symbols under
+ * ZSA_BLE_LOG and to no-op static inlines otherwise, so include it always. */
 #include "log_tap.h"
-#endif
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
 #endif
@@ -47,6 +47,26 @@ static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
 
 static uint8_t nav_raw_report[17];
 static bool    nav_raw_fresh;
+
+/* ---- Nav capability announce ---- *
+ *
+ * QMK's nav support is compile-time (which modules a keymap pulls in).
+ * We announce the compiled-in capability bitmask to the nRF at link-up so
+ * it only runs nav-device detection — and only exposes the emulated 0x28
+ * trackball mirror — when this build actually supports a nav device.
+ * Retried every 1 s until the nRF acks with any EVT_NAV_PRESENT. */
+static const uint8_t nav_cap_mask =
+    0
+#ifdef POINTING_DEVICE_ENABLE
+    | ZSA_NAV_CAP_TRACKBALL
+#endif
+#ifdef DIGITIZER_ENABLE
+    | ZSA_NAV_CAP_TRACKPAD
+#endif
+    ;
+static bool     nav_announce_acked  = false;
+static uint32_t last_nav_announce_ms = 0;
+#define NAV_ANNOUNCE_INTERVAL_MS 1000
 
 /* ---- Parser instance ---- */
 
@@ -83,10 +103,30 @@ static void send_full_state(void) {
     send_idle_state(idle_step);
 }
 
+/* Announce compiled-in nav capabilities to the nRF once the link is up,
+ * retrying every 1 s until acked with an EVT_NAV_PRESENT. Sent even when the
+ * bitmask is 0 (tells the nRF to disable nav detection for this build). */
+static void nav_announce_task(void) {
+    if (!link_ready || nav_announce_acked) {
+        return;
+    }
+    if (last_nav_announce_ms != 0 &&
+        timer_elapsed32(last_nav_announce_ms) < NAV_ANNOUNCE_INTERVAL_MS) {
+        return;
+    }
+    struct zsa_nav_enable en = { .enabled = nav_cap_mask };
+    zsa_wireless_send_frame(ZSA_MSG_CMD_NAV_ENABLE, (const uint8_t *)&en, sizeof(en));
+    last_nav_announce_ms = timer_read32();
+}
+
 static void handle_rx_frame(const struct zsa_frame *frame) {
     switch (frame->type) {
         case ZSA_MSG_LINK_UP:
             link_ready = true;
+            /* Link (re)established — the nRF may have rebooted, so re-announce
+             * our nav capabilities immediately and wait for a fresh ack. */
+            nav_announce_acked   = false;
+            last_nav_announce_ms = 0;
             /* nRF rebooted (e.g. after ship mode) — clear ship flag */
             if (nrf_ship_mode) {
                 nrf_ship_mode = false;
@@ -149,6 +189,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             break;
 
         case ZSA_MSG_EVT_NAV_PRESENT:
+            /* The nRF acks a capability announce with the currently detected
+             * device type (possibly 0=none) and re-sends on any presence change. */
+            nav_announce_acked = true;
             if (frame->len >= sizeof(struct zsa_nav_present)) {
                 const struct zsa_nav_present *p = (const struct zsa_nav_present *)frame->payload;
                 nav_device_type = p->device_type;
@@ -394,6 +437,9 @@ void bluetooth_task(void) {
         send_command(ZSA_MSG_LINK_UP);
         last_link_up_ms = timer_read32();
     }
+
+    /* Announce our nav capabilities once the link is up (retries until acked) */
+    nav_announce_task();
 
     idle_power_task();
 }
