@@ -123,6 +123,14 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
     switch (frame->type) {
         case ZSA_MSG_LINK_UP:
             link_ready = true;
+            /* Reply (rate-limited) so the nRF's link-probe loop latches even
+             * when we were already up: after an nRF-only reboot it probes
+             * LINK_UP every 100 ms and stops only on receiving ours — without
+             * this reply the half-open link probes forever. */
+            if (timer_elapsed32(last_link_up_ms) >= LINK_UP_INTERVAL_MS) {
+                send_command(ZSA_MSG_LINK_UP);
+                last_link_up_ms = timer_read32();
+            }
             /* Link (re)established — the nRF may have rebooted, so re-announce
              * our nav capabilities immediately and wait for a fresh ack. */
             nav_announce_acked   = false;
