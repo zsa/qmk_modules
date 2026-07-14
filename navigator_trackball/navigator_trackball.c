@@ -181,14 +181,19 @@ void pointing_device_driver_init(void) {
     i2c_init();
     if (sci18is606_configure() == I2C_STATUS_SUCCESS) {
         paw3805ek_configure();
-    } else {
-        return;
+        trackball_init = 1;
+        restore_cpi(current_cpi);
     }
 
-    trackball_init = 1;
-    restore_cpi(current_cpi);
+    // Always arm the periodic probe/read callback, even when the sensor did
+    // not answer just now. On the wireless keyboard the responder at 0x28 is
+    // the left nRF's emulated mirror, which only appears once a trackball is
+    // actually plugged in — so a board that booted without one must keep
+    // probing (NAVIGATOR_TRACKBALL_PROBE cadence, via the !trackball_init
+    // branch of the callback) to pick it up on hot-plug. Without this, a
+    // failed first init left no retry scheduled and the trackball stayed dead
+    // until reboot.
     if (!callback_token) {
-        // Register the callback to read the trackball motion
         callback_token = defer_exec(NAVIGATOR_TRACKBALL_READ, sci18is606_read_callback, NULL);
     }
 }
