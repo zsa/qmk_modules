@@ -12,6 +12,88 @@ ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 0, 0);
 #    error "The moonlight module requires an rgb_matrix-enabled keyboard (RGB_MATRIX_ENABLE = yes)."
 #endif
 
+// Modes that must never run on a lamp: reactive/keypress-driven effects,
+// plus NONE and out-of-range. SOLID_COLOR is excluded from the carousel
+// too — it is the "steady" state reached via MOONLIGHT_ANIM_STOP.
+static bool moonlight_mode_is_lamp_safe(uint8_t mode) {
+    switch (mode) {
+        case RGB_MATRIX_NONE:
+        case RGB_MATRIX_SOLID_COLOR:
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE_SIMPLE
+        case RGB_MATRIX_SOLID_REACTIVE_SIMPLE:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE
+        case RGB_MATRIX_SOLID_REACTIVE:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE_WIDE
+        case RGB_MATRIX_SOLID_REACTIVE_WIDE:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE_MULTIWIDE
+        case RGB_MATRIX_SOLID_REACTIVE_MULTIWIDE:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE_CROSS
+        case RGB_MATRIX_SOLID_REACTIVE_CROSS:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE_MULTICROSS
+        case RGB_MATRIX_SOLID_REACTIVE_MULTICROSS:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE_NEXUS
+        case RGB_MATRIX_SOLID_REACTIVE_NEXUS:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_REACTIVE_MULTINEXUS
+        case RGB_MATRIX_SOLID_REACTIVE_MULTINEXUS:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SPLASH
+        case RGB_MATRIX_SPLASH:
+#endif
+#ifdef ENABLE_RGB_MATRIX_MULTISPLASH
+        case RGB_MATRIX_MULTISPLASH:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_SPLASH
+        case RGB_MATRIX_SOLID_SPLASH:
+#endif
+#ifdef ENABLE_RGB_MATRIX_SOLID_MULTISPLASH
+        case RGB_MATRIX_SOLID_MULTISPLASH:
+#endif
+#ifdef ENABLE_RGB_MATRIX_TYPING_HEATMAP
+        case RGB_MATRIX_TYPING_HEATMAP: // framebuffer effect, keypress-driven
+#endif
+            return false;
+        default:
+            return mode < RGB_MATRIX_EFFECT_MAX;
+    }
+}
+
+// Next lamp-safe animation after `from`, wrapping. Falls back to
+// SOLID_COLOR if the board somehow has no lamp-safe animations.
+static uint8_t moonlight_next_anim(uint8_t from) {
+    uint8_t mode = from;
+    for (uint8_t i = 0; i < RGB_MATRIX_EFFECT_MAX; i++) {
+        mode = (mode + 1 < RGB_MATRIX_EFFECT_MAX) ? mode + 1 : 1;
+        if (moonlight_mode_is_lamp_safe(mode)) {
+            return mode;
+        }
+    }
+    return RGB_MATRIX_SOLID_COLOR;
+}
+
+#if !defined(MOONLIGHT_DEFAULT_ANIMATION) && defined(ENABLE_RGB_MATRIX_BREATHING)
+#    define MOONLIGHT_DEFAULT_ANIMATION RGB_MATRIX_BREATHING
+#endif
+
+static uint8_t moonlight_default_anim(void) {
+#ifdef MOONLIGHT_DEFAULT_ANIMATION
+    if (moonlight_mode_is_lamp_safe(MOONLIGHT_DEFAULT_ANIMATION)) {
+        return MOONLIGHT_DEFAULT_ANIMATION;
+    }
+#endif
+    return moonlight_next_anim(RGB_MATRIX_SOLID_COLOR);
+}
+
+// Last animation used this power session (0 = none yet), so
+// stop-then-start resumes the same animation.
+static uint8_t moonlight_last_anim = 0;
+
 bool process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
     if (!process_record_moonlight_kb(keycode, record)) {
         return false;
@@ -50,6 +132,38 @@ bool process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
             return false;
         case MOONLIGHT_HUE_DOWN:
             rgb_matrix_decrease_hue();
+            return false;
+        case MOONLIGHT_ANIM_START: {
+            uint8_t target = moonlight_last_anim ? moonlight_last_anim : moonlight_default_anim();
+            rgb_matrix_enable();
+            rgb_matrix_mode(target);
+            moonlight_last_anim = target;
+            return false;
+        }
+        case MOONLIGHT_ANIM_STOP: {
+            uint8_t cur = rgb_matrix_get_mode();
+            if (moonlight_mode_is_lamp_safe(cur)) {
+                moonlight_last_anim = cur; // resume point for the next START
+            }
+            rgb_matrix_mode(RGB_MATRIX_SOLID_COLOR);
+            return false;
+        }
+        case MOONLIGHT_ANIM_NEXT: {
+            uint8_t cur  = rgb_matrix_get_mode();
+            uint8_t base = moonlight_mode_is_lamp_safe(cur)
+                               ? cur
+                               : (moonlight_last_anim ? moonlight_last_anim : RGB_MATRIX_SOLID_COLOR);
+            uint8_t next = moonlight_next_anim(base);
+            rgb_matrix_enable();
+            rgb_matrix_mode(next);
+            moonlight_last_anim = next;
+            return false;
+        }
+        case MOONLIGHT_ANIM_FASTER:
+            rgb_matrix_increase_speed();
+            return false;
+        case MOONLIGHT_ANIM_SLOWER:
+            rgb_matrix_decrease_speed();
             return false;
         default:
             return true;
