@@ -41,8 +41,8 @@ bool zsa_wireless_link_ready(void);
 /* Navigator event hooks. The wireless module tracks the currently-detected
  * device type from EVT_NAV_PRESENT events and forwards raw trackpad reports
  * only. Trackball motion is delivered exclusively via the nRF's emulated-I²C
- * nav register mirror at 0x28 (or the real sensor over TRRS in wired mode),
- * never over UART. */
+ * nav register mirror (0x28 = real bridge, left-plugged; 0x2C = left-nRF
+ * emulated mirror, right-plugged, wireless), never over UART. */
 uint8_t zsa_wireless_nav_device_type(void);  /* enum zsa_nav_device_type, 0 if none */
 
 /* True if a fresh raw nav report (17 B) has arrived from the nRF since the

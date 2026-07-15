@@ -10,6 +10,13 @@
 #    define NAVIGATOR_TRACKBALL_ADDRESS 0x50
 #endif
 
+// Real bridge = 0x28<<1 (left-plugged, direct SCI18IS606 on the STM32's bus).
+// Left-nRF wireless mirror = 0x2C<<1 (right-plugged, wireless; the left nRF
+// emulates a register-compatible mirror of the bridge at this address).
+#ifndef NAVIGATOR_TRACKBALL_MIRROR_ADDRESS
+#    define NAVIGATOR_TRACKBALL_MIRROR_ADDRESS 0x58
+#endif
+
 #ifndef NAVIGATOR_TRACKBALL_CPI
 #    define NAVIGATOR_TRACKBALL_CPI 40
 #endif

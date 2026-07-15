@@ -81,8 +81,9 @@ enum zsa_msg_type {
                                        * CMD_NAV_ENABLE ack and on every
                                        * presence change */
     /* 0x86 reserved — was ZSA_MSG_EVT_NAV_MOTION (removed 2026-07). Trackball
-     * motion is delivered via the left-nRF's emulated-i2c nav mirror at 0x28,
-     * never over UART. Do NOT reuse this ID. */
+     * motion is delivered over I2C, never UART: real bridge at 0x28 when
+     * left-plugged (or over TRRS in wired mode), left-nRF emulated mirror at
+     * 0x2C when right-plugged in wireless mode. Do NOT reuse this ID. */
     ZSA_MSG_EVT_NAV_REPORT_RAW = 0x87, /* 17 B: raw Cirque Gen6 PTP packet bytes
                                         * (CGEN6_MAX_PACKET_SIZE on the QMK decode side).
                                         * Decoded in QMK; nRF is a dumb pipe. */

@@ -52,8 +52,9 @@ static bool    nav_raw_fresh;
  *
  * QMK's nav support is compile-time (which modules a keymap pulls in).
  * We announce the compiled-in capability bitmask to the nRF at link-up so
- * it only runs nav-device detection — and only exposes the emulated 0x28
- * trackball mirror — when this build actually supports a nav device.
+ * it only runs nav-device detection — and only exposes the trackball mirror
+ * (0x28 = real bridge, left-plugged; 0x2C = left-nRF emulated mirror,
+ * right-plugged, wireless) — when this build actually supports a nav device.
  * Retried every 1 s until the nRF acks with any EVT_NAV_PRESENT. */
 static const uint8_t nav_cap_mask =
     0
