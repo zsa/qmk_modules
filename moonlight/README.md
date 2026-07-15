@@ -74,9 +74,9 @@ Flash the resulting firmware with Keymapp, or directly with
 Both example keymaps lay out the full keycode set on a single layer (see
 "Layer-switching keys" below for why it has to be one layer):
 
-- Row 1: `MNL_ON`, `MNL_OFF`, `MNL_BRI`, `MNL_DIM`
-- Row 2: `MNL_HUU`, `MNL_HUD`, plus `QK_BOOT` at the far end of the row so
-  the board stays reflashable
+- Row 1 (top): `MNL_ON`, `MNL_OFF`, `MNL_BRI`, `MNL_DIM`, with `QK_BOOT`
+  on the far top-right corner key so the board stays reflashable
+- Row 2: `MNL_HUU`, `MNL_HUD`
 - Row 3: `MNL_AST`, `MNL_ASP`, `MNL_ANX`, `MNL_FST`, `MNL_SLW`
 - Row 4: `MNL_P1` through `MNL_P8`
 - Every other position is `KC_NO`
