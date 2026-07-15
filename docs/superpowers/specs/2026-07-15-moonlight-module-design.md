@@ -61,6 +61,9 @@ Users hand-edit a keymap.json (typically starting from an example), keep
 `"modules": ["moonlight"]`, arrange the keycodes on whichever physical keys
 still work, and build with `qmk compile`.
 
+The repo root `README.md` also gets a one-line entry for `moonlight` in its
+available-modules list.
+
 ## Standalone power (works on a wall charger)
 
 **Mechanism (verified against `firmware25` sources):**
@@ -118,7 +121,7 @@ animation within a power session).
 | `MOONLIGHT_ANIM_NEXT` | `MNL_ANX` | next animation, skipping reactive effects (runtime skip) |
 | `MOONLIGHT_ANIM_FASTER` | `MNL_FST` | animation speed up |
 | `MOONLIGHT_ANIM_SLOWER` | `MNL_SLW` | animation speed down |
-| `MOONLIGHT_PRESET_1`…`_8` | `MNL_P1`…`MNL_P8` | steady mode + jump to preset HSV |
+| `MOONLIGHT_PRESET_1`…`_8` | `MNL_P1`…`MNL_P8` | steady mode + jump to preset hue/saturation (current brightness preserved) |
 
 Notes:
 
@@ -131,6 +134,10 @@ Notes:
   `#define MOONLIGHT_PRESET_1 {HSV_CORAL}` (any `{h, s, v}` triple, so warm
   white via low saturation is possible). Unset slots get built-in defaults.
   Pressing a preset always lands in steady mode.
+- Presets change color only: the module applies the preset's hue and
+  saturation and preserves the current brightness (the `v` in the triple is
+  accepted for convenience with `HSV_*` macros but ignored). Changing color
+  never causes a brightness jump.
 
 ## Reactive-animation exclusion
 
@@ -190,7 +197,7 @@ override works).
 | `MOONLIGHT_MIN_BOOT_BRIGHTNESS` | `40` | brightness floor applied at power-up |
 | `MOONLIGHT_MIN_BRIGHTNESS` | `16` | floor for `MOONLIGHT_DIMMER` (dark ≠ off; use `MNL_OFF`) |
 | `MOONLIGHT_DEFAULT_ANIMATION` | breathing | animation used by first `MNL_AST` of a session; falls back to the first enabled non-reactive animation if breathing is disabled |
-| `MOONLIGHT_PRESET_1`…`_8` | built-in palette | per-keymap HSV preset colors |
+| `MOONLIGHT_PRESET_1`…`_8` | built-in palette | per-keymap preset colors (hue/sat applied, v ignored) |
 
 Plus the non-tunable `NO_USB_STARTUP_CHECK`.
 
