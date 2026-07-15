@@ -128,6 +128,25 @@ static const HSV moonlight_presets[] = {
     MOONLIGHT_PRESET_5_HSV, MOONLIGHT_PRESET_6_HSV, MOONLIGHT_PRESET_7_HSV, MOONLIGHT_PRESET_8_HSV,
 };
 
+// Lamp-only: nothing but moonlight controls (and QK_BOOT, for flashing)
+// gets processed — a broken matrix can never type into a host.
+bool pre_process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
+    if (!pre_process_record_moonlight_kb(keycode, record)) {
+        return false;
+    }
+#if MOONLIGHT_LAMP_ONLY
+    switch (keycode) {
+        case MOONLIGHT_ON ... MOONLIGHT_PRESET_8:
+        case QK_BOOT:
+            return true;
+        default:
+            return false;
+    }
+#else
+    return true;
+#endif
+}
+
 bool process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
     if (!process_record_moonlight_kb(keycode, record)) {
         return false;
