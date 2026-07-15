@@ -16,15 +16,6 @@ uint8_t current_cpi = NAVIGATOR_TRACKBALL_CPI;
 
 uint8_t has_motion = 0;
 
-/* BLE-NUS logger (viewed with ble_log.py). Provided by modules/zsa/wireless/
- * log_tap.c when ZSA_BLE_LOG is set; no-op stub otherwise. Declared locally to
- * avoid depending on the wireless module's include path. */
-#ifdef ZSA_BLE_LOG
-void zsa_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-#else
-static inline void zsa_log(const char *fmt, ...) { (void)fmt; }
-#endif
-
 uint8_t trackball_init = 0;
 
 deferred_token callback_token = 0;
@@ -115,18 +106,14 @@ bool paw3805ek_configure(void) {
         buf[1] = paw3805ek_configure_seq[i].reg;
         buf[2] = paw3805ek_configure_seq[i].data;
         if (sci18is606_spi_tx(buf, 3, true) != I2C_STATUS_SUCCESS) {
-            zsa_log("[TB] paw3805ek cfg step %u SPI tx FAILED", i);
             return false;
         }
         // Wait for the sensor to restart after the software reset cmd
         wait_ms(1);
 
         // Check the sensor ID to validate the spi link after the reset
-        if (i == 1) {
-            zsa_log("[TB] paw3805ek ID read=0x%02X (expect 0x%02X)", buf[1], PAW3805EK_ID);
-            if (buf[1] != PAW3805EK_ID) {
-                return false;
-            }
+        if (i == 1 && buf[1] != PAW3805EK_ID) {
+            return false;
         }
     }
 
@@ -189,22 +176,8 @@ uint32_t sci18is606_read_callback(uint32_t trigger_time, void *cb_arg) {
         pointing_device_driver_init();
         return NAVIGATOR_TRACKBALL_PROBE;
     }
-    bool m = paw3805ek_has_motion();
-    if (m) {
+    if (paw3805ek_has_motion()) {
         has_motion = 1;
-    }
-    /* Heartbeat: how often we poll the 0x28 mirror and how often it reports the
-     * motion bit set. motion_bit_set staying 0 while you move => the mirror is
-     * serving no motion (left accumulator empty => upstream: right/ESB/left).
-     * motion_bit_set climbing => the mirror has motion; look downstream. */
-    static uint32_t polls, motion_bits, hb_last;
-    polls++;
-    if (m) {
-        motion_bits++;
-    }
-    if (timer_elapsed32(hb_last) >= 1000) {
-        hb_last = timer_read32();
-        zsa_log("[TB] poll hb: polls=%u motion_bit_set=%u", (unsigned)polls, (unsigned)motion_bits);
     }
     return NAVIGATOR_TRACKBALL_READ;
 }
@@ -214,34 +187,24 @@ void pointing_device_driver_init(void) {
     i2c_init();
 
     // Probe the real bridge first (0x50, left-plugged); if it doesn't ACK,
-    // fall back to the left-nRF wireless mirror (0x58, right-plugged). This
-    // also re-runs on every re-probe (see sci18is606_read_callback), so a
-    // trackball moved between halves at runtime is picked back up.
+    // fall back to the left-nRF wireless mirror (0x58, right-plugged). Re-runs
+    // on every re-probe (see sci18is606_read_callback), so a trackball moved
+    // between halves at runtime is picked back up.
     nav_addr = NAVIGATOR_TRACKBALL_ADDRESS;
     i2c_status_t bridge = sci18is606_configure();
     if (bridge != I2C_STATUS_SUCCESS) {
         nav_addr = NAVIGATOR_TRACKBALL_MIRROR_ADDRESS;
         bridge = sci18is606_configure();
     }
-    zsa_log("[TB] init: sci18is606_configure -> %d (nav_addr=0x%02X, %s)", (int)bridge, nav_addr,
-            bridge == I2C_STATUS_SUCCESS ? "bridge OK" : "no bridge @0x50/@0x58");
     if (bridge == I2C_STATUS_SUCCESS) {
-        bool cfg = paw3805ek_configure();
-        zsa_log("[TB] init: paw3805ek_configure -> %d (%s)", (int)cfg,
-                cfg ? "sensor OK" : "sensor init FAILED");
+        paw3805ek_configure();
         trackball_init = 1;
         restore_cpi(current_cpi);
     }
-    zsa_log("[TB] init: done, trackball_init=%d", trackball_init);
 
-    // Always arm the periodic probe/read callback, even when the sensor did
-    // not answer just now. On the wireless keyboard the responder at 0x28 is
-    // the left nRF's emulated mirror, which only appears once a trackball is
-    // actually plugged in — so a board that booted without one must keep
-    // probing (NAVIGATOR_TRACKBALL_PROBE cadence, via the !trackball_init
-    // branch of the callback) to pick it up on hot-plug. Without this, a
-    // failed first init left no retry scheduled and the trackball stayed dead
-    // until reboot.
+    // Always arm the periodic probe/read callback, even on failure, so a
+    // board that booted without a trackball keeps probing at
+    // NAVIGATOR_TRACKBALL_PROBE cadence and picks one up on hot-plug.
     if (!callback_token) {
         callback_token = defer_exec(NAVIGATOR_TRACKBALL_READ, sci18is606_read_callback, NULL);
     }
@@ -255,16 +218,6 @@ report_mouse_t pointing_device_driver_get_report(report_mouse_t mouse_report) {
     if (has_motion) {
         has_motion = 0;
         paw3804ek_read_motion(&mouse_report);
-        /* The actual deltas QMK reads from the mirror. Non-zero here means the
-         * full path sensor->right->ESB->left accumulator->0x28 mirror->STM32
-         * works and the cursor should move; if it still doesn't, the fault is in
-         * QMK's pointing-device/report/HID layer, not the transport. */
-        static uint32_t rd_last;
-        if ((mouse_report.x != 0 || mouse_report.y != 0) &&
-            timer_elapsed32(rd_last) >= 500) {
-            rd_last = timer_read32();
-            zsa_log("[TB] read: x=%d y=%d", (int)mouse_report.x, (int)mouse_report.y);
-        }
     }
     return mouse_report;
 }
