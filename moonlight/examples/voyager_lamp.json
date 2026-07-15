@@ -1,0 +1,20 @@
+{
+    "keyboard": "zsa/voyager",
+    "keymap": "moonlight_lamp",
+    "layout": "LAYOUT",
+    "modules": ["zsa/defaults", "zsa/moonlight"],
+    "layers": [
+        [
+            "MNL_ON",  "MNL_OFF", "MNL_BRI", "MNL_DIM", "KC_NO", "KC_NO",
+            "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO", "QK_BOOT",
+            "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO", "KC_NO",
+            "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO", "KC_NO",
+            "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO", "KC_NO",
+            "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO", "KC_NO",
+            "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO", "KC_NO",
+            "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO",   "KC_NO", "KC_NO",
+            "KC_NO",   "KC_NO",
+            "KC_NO",   "KC_NO"
+        ]
+    ]
+}
