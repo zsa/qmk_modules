@@ -12,6 +12,29 @@ ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 0, 0);
 #    error "The moonlight module requires an rgb_matrix-enabled keyboard (RGB_MATRIX_ENABLE = yes)."
 #endif
 
+// Swallow every non-moonlight keycode so a broken matrix can never type
+// into a host. Keymaps for working keyboards may set this to 0.
+//
+// These tunables default here (not in config.h) because a module's
+// config.h is included before the keymap's config.h in QMK's config
+// chain: an #ifndef default here lets a keymap's #define override it,
+// whereas the same #ifndef in config.h would already have "won" by the
+// time the keymap's config.h is processed, and a bare #define would
+// collide with it under -Werror.
+#ifndef MOONLIGHT_LAMP_ONLY
+#    define MOONLIGHT_LAMP_ONLY 1
+#endif
+
+// A lamp never boots dark: brightness floor applied at power-up.
+#ifndef MOONLIGHT_MIN_BOOT_BRIGHTNESS
+#    define MOONLIGHT_MIN_BOOT_BRIGHTNESS 40
+#endif
+
+// MOONLIGHT_DIMMER floor (dim ≠ off; MOONLIGHT_OFF turns the light off).
+#ifndef MOONLIGHT_MIN_BRIGHTNESS
+#    define MOONLIGHT_MIN_BRIGHTNESS 16
+#endif
+
 // Modes that must never run on a lamp: reactive/keypress-driven effects,
 // plus NONE and out-of-range. SOLID_COLOR is excluded from the carousel
 // too — it is the "steady" state reached via MOONLIGHT_ANIM_STOP.
@@ -220,6 +243,7 @@ bool process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
             return false;
         case MOONLIGHT_PRESET_1 ... MOONLIGHT_PRESET_8: {
             HSV preset = moonlight_presets[keycode - MOONLIGHT_PRESET_1];
+            rgb_matrix_enable(); // presets turn the light on, like MOONLIGHT_ANIM_START
             rgb_matrix_mode(RGB_MATRIX_SOLID_COLOR); // presets always land steady
             rgb_matrix_sethsv(preset.h, preset.s, rgb_matrix_get_hsv().v);
             return false;
