@@ -131,8 +131,9 @@ Notes:
   without it only one animation is ever reachable. No toggle keycode:
   on/off are discrete by design.
 - Preset colors are defined per keymap in its `config.h`:
-  `#define MOONLIGHT_PRESET_1 {HSV_CORAL}` (any `{h, s, v}` triple, so warm
-  white via low saturation is possible). Unset slots get built-in defaults.
+  `#define MOONLIGHT_PRESET_1_HSV {HSV_CORAL}` (any `{h, s, v}` triple, so
+  warm white via low saturation is possible; the `_HSV` suffix avoids
+  colliding with the keycode name). Unset slots get built-in defaults.
   Pressing a preset always lands in steady mode.
 - Presets change color only: the module applies the preset's hue and
   saturation and preserves the current brightness (the `v` in the triple is
@@ -197,7 +198,7 @@ override works).
 | `MOONLIGHT_MIN_BOOT_BRIGHTNESS` | `40` | brightness floor applied at power-up |
 | `MOONLIGHT_MIN_BRIGHTNESS` | `16` | floor for `MOONLIGHT_DIMMER` (dark ≠ off; use `MNL_OFF`) |
 | `MOONLIGHT_DEFAULT_ANIMATION` | breathing | animation used by first `MNL_AST` of a session; falls back to the first enabled non-reactive animation if breathing is disabled |
-| `MOONLIGHT_PRESET_1`…`_8` | built-in palette | per-keymap preset colors (hue/sat applied, v ignored) |
+| `MOONLIGHT_PRESET_1_HSV`…`_8_HSV` | built-in palette | per-keymap preset colors (hue/sat applied, v ignored) |
 
 Plus the non-tunable `NO_USB_STARTUP_CHECK`.
 
