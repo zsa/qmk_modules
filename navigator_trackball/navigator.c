@@ -41,6 +41,7 @@ float scroll_accumulated_h = 0;
 float scroll_accumulated_v = 0;
 
 bool set_scrolling = false;
+bool scroll_vertical_only = false;
 bool navigator_turbo = false;
 bool navigator_aim = false;
 static bool navigator_speed_suppressed = false;
@@ -64,6 +65,18 @@ static const uint8_t navigator_turbo_layers[] = NAVIGATOR_TURBO_LAYERS;
 static bool navigator_turbo_layer_active(void) {
     for (uint8_t i = 0; i < _NAVIGATOR_TURBO_LAYER_COUNT; i++) {
         if (layer_state_is(navigator_turbo_layers[i])) return true;
+    }
+    return false;
+}
+#endif
+
+#ifdef _NAVIGATOR_DRAG_SCROLL_HAS_LAYERS
+static const uint8_t navigator_drag_scroll_layers[] = NAVIGATOR_DRAG_SCROLL_LAYERS;
+#define _NAVIGATOR_DRAG_SCROLL_LAYER_COUNT (sizeof(navigator_drag_scroll_layers) / sizeof(navigator_drag_scroll_layers[0]))
+
+static bool navigator_drag_scroll_layer_active(void) {
+    for (uint8_t i = 0; i < _NAVIGATOR_DRAG_SCROLL_LAYER_COUNT; i++) {
+        if (layer_state_is(navigator_drag_scroll_layers[i])) return true;
     }
     return false;
 }
@@ -108,10 +121,23 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
         mouse_report.x /= NAVIGATOR_AIM_DIVIDER;
         mouse_report.y /= NAVIGATOR_AIM_DIVIDER;
     }
-    if (set_scrolling) {
+    // Drag scroll converts trackball motion into scroll events. It can be
+    // driven by the DRAG_SCROLL/TOGGLE_SCROLL keycodes or by activating one
+    // of the configured drag scroll layers.
+    bool scroll_active = set_scrolling;
+#ifdef _NAVIGATOR_DRAG_SCROLL_HAS_LAYERS
+    scroll_active = scroll_active || navigator_drag_scroll_layer_active();
+#endif
+    if (scroll_active) {
         // Accumulate scroll movement
         scroll_accumulated_h += (float)mouse_report.x / NAVIGATOR_SCROLL_DIVIDER;
         scroll_accumulated_v += (float)mouse_report.y / NAVIGATOR_SCROLL_DIVIDER;
+
+        // Vertical-only mode: discard any horizontal movement so it never
+        // accumulates or produces a horizontal scroll event.
+        if (scroll_vertical_only) {
+            scroll_accumulated_h = 0.0f;
+        }
 
         // This allows fractional accumulation to build up before triggering scroll
         float abs_h = (scroll_accumulated_h < 0) ? -scroll_accumulated_h : scroll_accumulated_h;
@@ -217,6 +243,9 @@ bool process_record_navigator_trackball(uint16_t keycode, keyrecord_t *record) {
             break;
         case TOGGLE_SCROLL:
             if (record->event.pressed) set_scrolling = !set_scrolling;
+            break;
+        case TOGGLE_SCROLL_VERTICAL:
+            if (record->event.pressed) scroll_vertical_only = !scroll_vertical_only;
             break;
         case NAVIGATOR_CLEAR_SPEED:
             if (record->event.pressed) {

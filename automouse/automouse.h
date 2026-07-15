@@ -14,6 +14,12 @@
 #    define AUTOMOUSE_TIMEOUT 650
 #endif
 
+// Idle safety timeout (ms) for ONESHOT "tap to exit" mode. Before the first tap,
+// the layer drops after this much inactivity. 0 = disabled (layer stays until tapped).
+#ifndef AUTOMOUSE_ONESHOT_TIMEOUT
+#    define AUTOMOUSE_ONESHOT_TIMEOUT 0
+#endif
+
 #ifndef AUTOMOUSE_THRESHOLD
 #    define AUTOMOUSE_THRESHOLD 10
 #endif
@@ -35,3 +41,7 @@ void automouse_disable(void);
 void automouse_toggle(void);
 bool automouse_is_enabled(void);
 bool automouse_is_active(void);
+
+// Feed motion from a sensor that bypasses the QMK pointing-device pipeline
+// (e.g. a digitizer/trackpad) so it can activate the mouse layer.
+void automouse_report_motion(int16_t dx, int16_t dy, uint8_t buttons);

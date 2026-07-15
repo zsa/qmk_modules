@@ -1,8 +1,0 @@
-{
-    "module_name": "Navigator Wireless Trackpad",
-    "maintainer": "ZSA",
-    "license": "GPL-2.0-or-later",
-    "features": {
-        "digitizer": true
-    }
-}

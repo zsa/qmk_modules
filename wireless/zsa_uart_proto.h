@@ -192,10 +192,9 @@ struct __attribute__((packed)) zsa_nav_present {
 
 /* struct zsa_nav_motion removed with ZSA_MSG_EVT_NAV_MOTION (0x86, reserved). */
 
-/* ZSA_MSG_EVT_NAV_REPORT_RAW (17 bytes) — raw Cirque Gen6 PTP packet.
- * QMK side decodes via navigator_trackpad_core_decode(). The full 17 bytes
- * (cirque header bytes 0-1 + payload bytes 2-16) are forwarded so the decode
- * runs against bytes identical to the wired i2c-read path. */
+/* ZSA_MSG_EVT_NAV_REPORT_RAW (17 bytes) — raw Cirque Gen6 PTP packet
+ * (cirque header bytes 0-1 + payload bytes 2-16), identical to the wired
+ * i2c-read path. Currently unconsumed on the QMK side. */
 struct __attribute__((packed)) zsa_nav_report_raw {
     uint8_t data[17];
 };

@@ -4,6 +4,13 @@
 #    define ZSA_WIRELESS_BAUD_RATE 1000000
 #endif
 
+/* Idle power-down (DIM/LEDS_OFF/DEEP) disabled by default for every build —
+ * the board stays fully awake. Remove this define to restore normal idle
+ * behavior. */
+#ifndef ZSA_DEV_NO_SLEEP
+#    define ZSA_DEV_NO_SLEEP
+#endif
+
 /* Idle power management defaults */
 #ifndef ZSA_IDLE_DIM_MS
 #    define ZSA_IDLE_DIM_MS 30000

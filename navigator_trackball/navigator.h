@@ -42,6 +42,11 @@
     #define _NAVIGATOR_TURBO_HAS_LAYERS
 #endif
 
+#ifdef NAVIGATOR_DRAG_SCROLL_LAYERS
+    #define _NAVIGATOR_DRAG_SCROLL_HAS_LAYERS
+#endif
+
 extern bool set_scrolling;
+extern bool scroll_vertical_only;
 extern bool navigator_turbo;
 extern bool navigator_aim;

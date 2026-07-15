@@ -1,56 +1,22 @@
 // Copyright 2025 ZSA Technology Labs, Inc <contact@zsa.io>
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// I2C-side of the Cirque Gen 6 driver. Decode + dispatch live in the shared
-// navigator_trackpad_core module; this file owns chip configuration and the
-// raw-packet read.
+// Common hardware layer for Navigator trackpad
+// Shared by both mouse and PTP implementations
 
 #include <stdint.h>
-#include <string.h>
 #include <sys/types.h>
-#include "navigator_trackpad_i2c.h"
+#include "navigator_trackpad_common.h"
 #include "i2c_master.h"
 #include "quantum.h"
 #include "timer.h"
 
-#ifndef NAVIGATOR_TRACKPAD_ADDRESS
-#    define NAVIGATOR_TRACKPAD_ADDRESS 0x58
-#endif
+// Shared globals
+static uint16_t current_cpi  = DEFAULT_CPI_TICK;
+bool            trackpad_init = false;
 
-#ifndef NAVIGATOR_TRACKPAD_TIMEOUT
-#    define NAVIGATOR_TRACKPAD_TIMEOUT 100
-#endif
-
-// Packet size (matches NAV_TRACKPAD_PACKET_LEN from the core header).
-#define CGEN6_MAX_PACKET_SIZE 17
-
-// C3 error codes when reading memory
-#define CGEN6_SUCCESS      0x00
-#define CGEN6_CKSUM_FAILED 0x01
-#define CGEN6_LEN_MISMATCH 0x02
-#define CGEN6_I2C_FAILED   0x03
-
-// C3 register addresses
-#define CGEN6_REG_BASE     0x20000800
-#define CGEN6_HARDWARE_ID  (CGEN6_REG_BASE + 0x08)
-#define CGEN6_FIRMWARE_ID  (CGEN6_REG_BASE + 0x09)
-#define CGEN6_FIRMWARE_REV (CGEN6_REG_BASE + 0x10)
-#define CGEN6_VENDOR_ID    (CGEN6_REG_BASE + 0x0A)
-#define CGEN6_PRODUCT_ID   (CGEN6_REG_BASE + 0x0C)
-#define CGEN6_VERSION_ID   (CGEN6_REG_BASE + 0x0E)
-#define CGEN6_FEED_CONFIG4 0x200E000B
-#define CGEN6_FEED_CONFIG3 0x200E000A
-#define CGEN6_SYS_CONFIG1  0x20000008
-#define CGEN6_XY_CONFIG    0x20080018
-#define CGEN6_SFR_BASE     0x40000008
-#define CGEN6_GPIO_BASE    0x00052000
-#define CGEN6_I2C_DR       0x61010000
-
-// Shared file-scope state with the rest of the wired shim.
-bool trackpad_init = false;
-
-// Low-level I2C read of the next pending HID-style packet.
-static i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
+// I2C communication functions
+i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
     i2c_status_t res = i2c_receive(NAVIGATOR_TRACKPAD_ADDRESS, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);
     if (res != I2C_STATUS_SUCCESS) {
         return res;
@@ -59,7 +25,7 @@ static i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
     return res;
 }
 
-static void cirque_gen6_clear(void) {
+void cirque_gen6_clear(void) {
     uint8_t buf[CGEN6_MAX_PACKET_SIZE];
     for (uint8_t i = 0; i < 5; i++) {
         wait_ms(1);
@@ -69,7 +35,7 @@ static void cirque_gen6_clear(void) {
     }
 }
 
-static uint8_t cirque_gen6_read_memory(uint32_t addr, uint8_t *data, uint16_t cnt, bool fast_read) {
+uint8_t cirque_gen6_read_memory(uint32_t addr, uint8_t *data, uint16_t cnt, bool fast_read) {
     uint8_t  cksum = 0;
     uint8_t  res   = CGEN6_SUCCESS;
     uint8_t  len[2];
@@ -116,7 +82,7 @@ static uint8_t cirque_gen6_read_memory(uint32_t addr, uint8_t *data, uint16_t cn
     return res;
 }
 
-static uint8_t cirque_gen6_write_memory(uint32_t addr, uint8_t *data, uint16_t cnt) {
+uint8_t cirque_gen6_write_memory(uint32_t addr, uint8_t *data, uint16_t cnt) {
     uint8_t res   = CGEN6_SUCCESS;
     uint8_t cksum = 0, i = 0;
     uint8_t preamble[8] = {0x00, 0x09, (uint8_t)(addr & 0x000000FF), (uint8_t)((addr & 0x0000FF00) >> 8), (uint8_t)((addr & 0x00FF0000) >> 16), (uint8_t)((addr & 0xFF000000) >> 24), (uint8_t)(cnt & 0x00FF), (uint8_t)((cnt & 0xFF00) >> 8)};
@@ -144,7 +110,7 @@ static uint8_t cirque_gen6_write_memory(uint32_t addr, uint8_t *data, uint16_t c
 }
 
 // Register access functions
-static uint8_t cirque_gen6_read_reg(uint32_t addr, bool fast_read) {
+uint8_t cirque_gen6_read_reg(uint32_t addr, bool fast_read) {
     uint8_t data;
     uint8_t res = cirque_gen6_read_memory(addr, &data, 1, fast_read);
     if (res != CGEN6_SUCCESS) {
@@ -154,19 +120,55 @@ static uint8_t cirque_gen6_read_reg(uint32_t addr, bool fast_read) {
     return data;
 }
 
-static uint8_t cirque_gen6_write_reg(uint32_t addr, uint8_t data) {
+uint16_t cirque_gen6_read_reg_16(uint32_t addr) {
+    uint8_t buf[2];
+    uint8_t res = cirque_gen6_read_memory(addr, buf, 2, false);
+    if (res != CGEN6_SUCCESS) {
+        printf("Failed to read 16bits from register at address 0x%08X with error 0x%02X\n", (u_int)addr, res);
+        return 0;
+    }
+    return (buf[1] << 8) | buf[0];
+}
+
+uint32_t cirque_gen6_read_reg_32(uint32_t addr) {
+    uint8_t buf[4];
+    uint8_t res = cirque_gen6_read_memory(addr, buf, 4, false);
+    if (res != CGEN6_SUCCESS) {
+        printf("Failed to read 32bits from register at address 0x%08X with error 0x%02X\n", (u_int)addr, res);
+        return 0;
+    }
+    return (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];
+}
+
+uint8_t cirque_gen6_write_reg(uint32_t addr, uint8_t data) {
     return cirque_gen6_write_memory(addr, &data, 1);
 }
 
+uint8_t cirque_gen6_write_reg_16(uint32_t addr, uint16_t data) {
+    uint8_t buf[2] = {data & 0xFF, (data >> 8) & 0xFF};
+    return cirque_gen6_write_memory(addr, buf, 2);
+}
+
+uint8_t cirque_gen6_write_reg_32(uint32_t addr, uint32_t data) {
+    uint8_t buf[4] = {data & 0xFF, (data >> 8) & 0xFF, (data >> 16) & 0xFF, (data >> 24) & 0xFF};
+    return cirque_gen6_write_memory(addr, buf, 4);
+}
+
 // Configuration functions
-static uint8_t cirque_gen6_set_ptp_mode(void) {
+uint8_t cirque_gen6_set_relative_mode(void) {
+    uint8_t feed_config4 = cirque_gen6_read_reg(CGEN6_FEED_CONFIG4, false);
+    feed_config4 &= 0xF3;
+    return cirque_gen6_write_reg(CGEN6_FEED_CONFIG4, feed_config4);
+}
+
+uint8_t cirque_gen6_set_ptp_mode(void) {
     uint8_t feed_config4 = cirque_gen6_read_reg(CGEN6_FEED_CONFIG4, false);
     feed_config4 &= 0xF7;
     feed_config4 |= 0x04;
     return cirque_gen6_write_reg(CGEN6_FEED_CONFIG4, feed_config4);
 }
 
-static uint8_t cirque_gen6_swap_xy(bool set) {
+uint8_t cirque_gen6_swap_xy(bool set) {
     uint8_t xy_config = cirque_gen6_read_reg(CGEN6_XY_CONFIG, false);
     if (set) {
         xy_config |= 0x04;
@@ -176,7 +178,7 @@ static uint8_t cirque_gen6_swap_xy(bool set) {
     return cirque_gen6_write_reg(CGEN6_XY_CONFIG, xy_config);
 }
 
-static uint8_t cirque_gen6_invert_y(bool set) {
+uint8_t cirque_gen6_invert_y(bool set) {
     uint8_t xy_config = cirque_gen6_read_reg(CGEN6_XY_CONFIG, false);
     if (set) {
         xy_config |= 0x02;
@@ -186,7 +188,7 @@ static uint8_t cirque_gen6_invert_y(bool set) {
     return cirque_gen6_write_reg(CGEN6_XY_CONFIG, xy_config);
 }
 
-static uint8_t cirque_gen6_invert_x(bool set) {
+uint8_t cirque_gen6_invert_x(bool set) {
     uint8_t xy_config = cirque_gen6_read_reg(CGEN6_XY_CONFIG, false);
     if (set) {
         xy_config |= 0x01;
@@ -196,7 +198,7 @@ static uint8_t cirque_gen6_invert_x(bool set) {
     return cirque_gen6_write_reg(CGEN6_XY_CONFIG, xy_config);
 }
 
-static uint8_t cirque_gen6_enable_logical_scaling(bool set) {
+uint8_t cirque_gen6_enable_logical_scaling(bool set) {
     uint8_t xy_config = cirque_gen6_read_reg(CGEN6_XY_CONFIG, false);
     if (set) {
         xy_config &= ~0x08;
@@ -206,16 +208,60 @@ static uint8_t cirque_gen6_enable_logical_scaling(bool set) {
     return cirque_gen6_write_reg(CGEN6_XY_CONFIG, xy_config);
 }
 
-// Public: read one raw 17-byte packet from the chip. Decode happens in core.
-bool navigator_trackpad_i2c_read_packet(uint8_t out[NAV_TRACKPAD_PACKET_LEN]) {
-    if (cirque_gen6_read_report(out, CGEN6_MAX_PACKET_SIZE) != I2C_STATUS_SUCCESS) {
+// Motion detection - returns true if data ready, false on no motion or I2C failure
+bool cirque_gen6_has_motion(void) {
+    uint8_t data;
+    uint8_t res = cirque_gen6_read_memory(CGEN6_I2C_DR, &data, 1, true);
+    if (res != CGEN6_SUCCESS) {
         trackpad_init = false;
         return false;
     }
-    return true;
+    return data != 0;
 }
 
-// Device initialization
+// Report reading - fills provided report struct. Returns true on valid data, false on I2C failure or no data.
+bool cirque_gen_6_read_report(cgen6_report_t *report) {
+    uint8_t packet[CGEN6_MAX_PACKET_SIZE];
+    if (cirque_gen6_read_report(packet, CGEN6_MAX_PACKET_SIZE) != I2C_STATUS_SUCCESS) {
+        trackpad_init = false;
+        return false;
+    }
+
+    uint8_t report_id = packet[2];
+
+    // PTP mode report
+    if (report_id == CGEN6_PTP_REPORT_ID) {
+        report->fingers[0].confidence = packet[3] & 0x01;
+        report->fingers[0].tip        = (packet[3] & 0x02) >> 1;
+        report->fingers[0].id         = (packet[3] & 0xFC) >> 2;
+        report->fingers[0].x          = packet[5] << 8 | packet[4];
+        report->fingers[0].y          = packet[7] << 8 | packet[6];
+        report->fingers[1].confidence = packet[8] & 0x01;
+        report->fingers[1].tip        = (packet[8] & 0x02) >> 1;
+        report->fingers[1].id         = (packet[8] & 0xFC) >> 2;
+        report->fingers[1].x          = packet[10] << 8 | packet[9];
+        report->fingers[1].y          = packet[12] << 8 | packet[11];
+        report->scan_time             = packet[14] << 8 | packet[13];
+        report->contact_count         = packet[15];
+        report->buttons               = packet[16];
+
+        return true;
+    }
+    // Mouse/relative mode report
+    else if (report_id == CGEN6_MOUSE_REPORT_ID) {
+        report->buttons     = packet[3];
+        report->xDelta      = packet[4];
+        report->yDelta      = packet[5];
+        report->scrollDelta = packet[6];
+        report->panDelta    = packet[7];
+        return true;
+    }
+
+    // Unknown or empty report - no valid data
+    return false;
+}
+
+// Device initialization - returns true on success, false on failure
 void navigator_trackpad_device_init(void) {
     i2c_init();
     i2c_status_t status = i2c_ping_address(NAVIGATOR_TRACKPAD_ADDRESS, NAVIGATOR_TRACKPAD_TIMEOUT);
@@ -266,4 +312,73 @@ void navigator_trackpad_device_init(void) {
     cirque_gen6_enable_logical_scaling(false);  // Disable scaling for raw coordinates
 
     trackpad_init = true;
+}
+
+// CPI management
+void set_cirque_cpi(void) {
+    // traverse the sequence by comparing the cpi_x value with the current cpi_x value
+    // set the cpi to the next value in the sequence
+    switch (current_cpi) {
+        case CPI_1: {
+            current_cpi = CPI_2;
+            break;
+        }
+        case CPI_2: {
+            current_cpi = CPI_3;
+            break;
+        }
+        case CPI_3: {
+            current_cpi = CPI_4;
+            break;
+        }
+        case CPI_4: {
+            current_cpi = CPI_5;
+            break;
+        }
+        case CPI_5: {
+            current_cpi = CPI_6;
+            break;
+        }
+        case CPI_6: {
+            current_cpi = CPI_7;
+            break;
+        }
+        case CPI_7: {
+            current_cpi = CPI_1;
+            break;
+        }
+        default: {
+            current_cpi = CPI_4;
+            break;
+        }
+    }
+}
+
+uint16_t navigator_trackpad_get_cpi(void) {
+    return current_cpi;
+}
+
+void navigator_trackpad_set_cpi(uint16_t cpi) {
+    if (cpi == 0) { // Decrease one tick
+        if (current_cpi > 1) {
+            current_cpi--;
+        }
+    } else {
+        if (current_cpi < CPI_TICKS) {
+            current_cpi++;
+        }
+    }
+    set_cirque_cpi();
+}
+
+// Helper function to count active fingers
+uint8_t cirque_gen6_finger_count(cgen6_report_t *report) {
+    uint8_t fingers = 0;
+    if (report->fingers[0].tip) {
+        fingers++;
+    }
+    if (report->fingers[1].tip) {
+        fingers++;
+    }
+    return fingers;
 }

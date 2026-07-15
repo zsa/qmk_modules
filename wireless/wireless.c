@@ -349,8 +349,7 @@ static void idle_power_task(void) {
 #ifdef ZSA_DEV_NO_SLEEP
     /* Dev toggle: keep the USB/BT state sync above (the nRF relies on those
      * edges) but never step into DIM/LEDS_OFF/DEEP — the board stays fully
-     * awake so debug sessions (SWD, log captures) aren't interrupted.
-     * Build with ZSA_DEV_NO_SLEEP=yes. */
+     * awake so debug sessions (SWD, log captures) aren't interrupted. */
     return;
 #endif
 

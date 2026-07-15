@@ -12,7 +12,7 @@
 #include <stdio.h>
 #include "quantum.h"
 
-uint8_t current_cpi = NAVIGATOR_TRACKBALL_CPI;
+static uint8_t current_cpi = NAVIGATOR_TRACKBALL_CPI;
 
 uint8_t has_motion = 0;
 
@@ -25,6 +25,9 @@ deferred_token callback_token = 0;
 // pointing_device_driver_init() and re-selected on every re-probe, so runtime
 // side swaps (trackball moved between halves) are handled transparently.
 static uint8_t nav_addr = NAVIGATOR_TRACKBALL_ADDRESS;
+
+// Forward declaration for restore_cpi (defined later, called from pointing_device_driver_init)
+static void restore_cpi(uint8_t cpi);
 
 // The sequence of commands to configure and boot the paw3805ek sensor.
 paw3805ek_reg_seq_t paw3805ek_configure_seq[] = {
@@ -226,7 +229,7 @@ uint16_t pointing_device_driver_get_cpi(void) {
     return current_cpi;
 }
 
-void restore_cpi(uint8_t cpi) {
+static void restore_cpi(uint8_t cpi) {
     current_cpi = cpi;
     paw3805ek_set_cpi();
 }
