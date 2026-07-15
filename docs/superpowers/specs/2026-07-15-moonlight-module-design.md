@@ -121,7 +121,7 @@ animation within a power session).
 | `MOONLIGHT_ANIM_NEXT` | `MNL_ANX` | next animation, skipping reactive effects (runtime skip) |
 | `MOONLIGHT_ANIM_FASTER` | `MNL_FST` | animation speed up |
 | `MOONLIGHT_ANIM_SLOWER` | `MNL_SLW` | animation speed down |
-| `MOONLIGHT_PRESET_1`…`_8` | `MNL_P1`…`MNL_P8` | steady mode + jump to preset hue/saturation (current brightness preserved) |
+| `MOONLIGHT_PRESET_1`…`_8` | `MNL_P1`…`MNL_P8` | turns the light on + steady mode + jump to preset hue/saturation (current brightness preserved) |
 
 Notes:
 
@@ -139,6 +139,9 @@ Notes:
   saturation and preserves the current brightness (the `v` in the triple is
   accepted for convenience with `HSV_*` macros but ignored). Changing color
   never causes a brightness jump.
+- Presets also turn the light on (`rgb_matrix_enable()`, mirroring
+  `MOONLIGHT_ANIM_START`'s symmetry): pressing a preset while the light is
+  off still lands you in that color, steady and lit.
 
 ## Reactive-animation exclusion
 
@@ -187,10 +190,15 @@ Everything else (hue, speed, chosen animation) restores exactly as last set.
 
 Controlled by `MOONLIGHT_LAMP_ONLY`, **default on**. A keymap that wants
 light control on a *working* keyboard can `#define MOONLIGHT_LAMP_ONLY 0`
-in its config.h (keymap config is included after module config, so the
-override works).
+in its config.h. This works because the tunable's default lives in
+`moonlight.c` under `#ifndef` rather than in the module's `config.h`:
+module `config.h` is included *before* keymap `config.h` in QMK's config
+chain, so an `#ifndef`-guarded default placed there would already have
+"won" by the time the keymap's `config.h` is processed, and the keymap's
+`#define` would collide with it under `-Werror`. Defaulting in the .c
+file (compiled after both config.h files) lets the keymap's define win.
 
-## Configuration surface (module `config.h` defaults)
+## Configuration surface (`moonlight.c` tunable defaults)
 
 | Define | Default | Meaning |
 |---|---|---|
@@ -200,7 +208,8 @@ override works).
 | `MOONLIGHT_DEFAULT_ANIMATION` | breathing | animation used by first `MNL_AST` of a session; falls back to the first enabled non-reactive animation if breathing is disabled |
 | `MOONLIGHT_PRESET_1_HSV`…`_8_HSV` | built-in palette | per-keymap preset colors (hue/sat applied, v ignored) |
 
-Plus the non-tunable `NO_USB_STARTUP_CHECK`.
+The module's `config.h` carries only the non-tunable `NO_USB_STARTUP_CHECK`
+(it must live in config.h because other translation units consume it).
 
 ## Error handling / guardrails
 

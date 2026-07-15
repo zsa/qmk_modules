@@ -35,7 +35,7 @@ All keycodes act on key-down only; the release is swallowed.
 | `MOONLIGHT_ANIM_NEXT` | `MNL_ANX` | Next animation, skipping reactive/keypress-driven effects |
 | `MOONLIGHT_ANIM_FASTER` | `MNL_FST` | Animation speed up |
 | `MOONLIGHT_ANIM_SLOWER` | `MNL_SLW` | Animation speed down |
-| `MOONLIGHT_PRESET_1` … `MOONLIGHT_PRESET_8` | `MNL_P1` … `MNL_P8` | Steady mode + jump to a preset hue/saturation |
+| `MOONLIGHT_PRESET_1` … `MOONLIGHT_PRESET_8` | `MNL_P1` … `MNL_P8` | Steady mode + jump to preset hue/sat (turns light on; brightness preserved) |
 
 Notes:
 
@@ -50,6 +50,9 @@ Notes:
   `MOONLIGHT_PRESET_n_HSV` definition is accepted for convenience with
   QMK's `HSV_*` macros but is otherwise ignored — presets never cause a
   brightness jump.
+- Presets also turn the light on, the same way `MNL_AST` does: pressing a
+  preset while the light is off still lands you in that color, steady and
+  lit, rather than leaving the light off.
 
 ## Quick start
 
@@ -82,16 +85,18 @@ Both example keymaps lay out the full keycode set on a single layer (see
 - Every other position is `KC_NO`
 
 In `examples/moonlander_lamp.json`, the flat `layers` array's grouping
-around indices 54–71 (a run of lines holding a single `KC_NO` each) looks
-odd if you're skimming it — that's not a mistake. It mirrors the physical
-argument order of the Moonlander's `LAYOUT` macro, where the thumb-cluster
-keys interleave with the main rows. Leave the shape alone if you hand-edit
-the file; only the values matter.
+around indices 54–71 (grouped 5/1/1/5/3/3 entries per line) looks odd if
+you're skimming it — that's not a mistake. It mirrors the physical
+argument order of the Moonlander's `LAYOUT` macro, including two
+single-entry lines for the interleaved thumb keys. Leave the shape alone
+if you hand-edit the file; only the values matter.
 
 ## Customization
 
-Config defines, set in a keymap's own `config.h` (module config is
-included first, so keymap-level defines override these):
+Config defines, set in a keymap's own `config.h`. The module's own
+`config.h` only carries `NO_USB_STARTUP_CHECK`; these tunables default in
+`moonlight.c` behind `#ifndef` guards specifically so that a keymap-level
+`config.h` define (processed after the module's) overrides them:
 
 | Define | Default | Meaning |
 |---|---|---|
@@ -100,6 +105,10 @@ included first, so keymap-level defines override these):
 | `MOONLIGHT_MIN_BRIGHTNESS` | `16` | Floor for `MOONLIGHT_DIMMER` — dimming stops here rather than going fully dark; use `MNL_OFF` to actually turn the light off. |
 | `MOONLIGHT_DEFAULT_ANIMATION` | breathing | Animation used the first time `MNL_AST` runs in a power session. Falls back to the first enabled non-reactive animation if breathing isn't enabled on the board. |
 | `MOONLIGHT_PRESET_1_HSV` … `MOONLIGHT_PRESET_8_HSV` | built-in palette (red, coral, gold, green, azure, blue, purple, white) | Per-keymap preset colors, e.g. `#define MOONLIGHT_PRESET_1_HSV {HSV_TEAL}`. Any `{h, s, v}` triple works, including `HSV_*` macros; only hue and saturation are actually applied (see the preset note above) — the `v` is accepted but ignored. Unset slots keep their default. |
+
+If you hand-roll a keymap.json instead of starting from an example, keep
+`"modules": ["zsa/defaults", "zsa/moonlight"]` — `zsa/defaults` is
+required by ZSA board code and isn't optional, even on a lamp-only build.
 
 To remap keys, edit the `layers` array in your keymap json (or in
 `keymap.c` if you're not using QMK Configurator json format) and place any
