@@ -209,3 +209,28 @@ bool process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
             return true;
     }
 }
+
+void keyboard_post_init_moonlight(void) {
+    keyboard_post_init_moonlight_kb();
+
+    // A lamp on a wall switch always comes on.
+    rgb_matrix_enable();
+
+    // Never boot dark.
+    HSV hsv = rgb_matrix_get_hsv();
+    if (hsv.v < MOONLIGHT_MIN_BOOT_BRIGHTNESS) {
+        rgb_matrix_sethsv(hsv.h, hsv.s, MOONLIGHT_MIN_BOOT_BRIGHTNESS);
+    }
+
+    // EEPROM may hold a reactive or out-of-range mode (previous firmware,
+    // fewer animations, etc.). Snap those to steady; remember valid
+    // animations as the START resume point.
+    uint8_t mode = rgb_matrix_get_mode();
+    if (mode == RGB_MATRIX_SOLID_COLOR) {
+        // steady — nothing to do
+    } else if (moonlight_mode_is_lamp_safe(mode)) {
+        moonlight_last_anim = mode; // restored mid-animation; keep animating
+    } else {
+        rgb_matrix_mode(RGB_MATRIX_SOLID_COLOR);
+    }
+}
