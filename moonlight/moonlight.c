@@ -94,6 +94,40 @@ static uint8_t moonlight_default_anim(void) {
 // stop-then-start resumes the same animation.
 static uint8_t moonlight_last_anim = 0;
 
+// Preset palette. Keymaps override any slot in their config.h, e.g.
+//     #define MOONLIGHT_PRESET_1_HSV {HSV_TEAL}
+// Only hue and saturation are applied; current brightness is preserved
+// (the v component is accepted for HSV_* macro convenience but ignored).
+#ifndef MOONLIGHT_PRESET_1_HSV
+#    define MOONLIGHT_PRESET_1_HSV {HSV_RED}
+#endif
+#ifndef MOONLIGHT_PRESET_2_HSV
+#    define MOONLIGHT_PRESET_2_HSV {HSV_CORAL}
+#endif
+#ifndef MOONLIGHT_PRESET_3_HSV
+#    define MOONLIGHT_PRESET_3_HSV {HSV_GOLD}
+#endif
+#ifndef MOONLIGHT_PRESET_4_HSV
+#    define MOONLIGHT_PRESET_4_HSV {HSV_GREEN}
+#endif
+#ifndef MOONLIGHT_PRESET_5_HSV
+#    define MOONLIGHT_PRESET_5_HSV {HSV_AZURE}
+#endif
+#ifndef MOONLIGHT_PRESET_6_HSV
+#    define MOONLIGHT_PRESET_6_HSV {HSV_BLUE}
+#endif
+#ifndef MOONLIGHT_PRESET_7_HSV
+#    define MOONLIGHT_PRESET_7_HSV {HSV_PURPLE}
+#endif
+#ifndef MOONLIGHT_PRESET_8_HSV
+#    define MOONLIGHT_PRESET_8_HSV {HSV_WHITE}
+#endif
+
+static const HSV moonlight_presets[] = {
+    MOONLIGHT_PRESET_1_HSV, MOONLIGHT_PRESET_2_HSV, MOONLIGHT_PRESET_3_HSV, MOONLIGHT_PRESET_4_HSV,
+    MOONLIGHT_PRESET_5_HSV, MOONLIGHT_PRESET_6_HSV, MOONLIGHT_PRESET_7_HSV, MOONLIGHT_PRESET_8_HSV,
+};
+
 bool process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
     if (!process_record_moonlight_kb(keycode, record)) {
         return false;
@@ -165,6 +199,12 @@ bool process_record_moonlight(uint16_t keycode, keyrecord_t *record) {
         case MOONLIGHT_ANIM_SLOWER:
             rgb_matrix_decrease_speed();
             return false;
+        case MOONLIGHT_PRESET_1 ... MOONLIGHT_PRESET_8: {
+            HSV preset = moonlight_presets[keycode - MOONLIGHT_PRESET_1];
+            rgb_matrix_mode(RGB_MATRIX_SOLID_COLOR); // presets always land steady
+            rgb_matrix_sethsv(preset.h, preset.s, rgb_matrix_get_hsv().v);
+            return false;
+        }
         default:
             return true;
     }
