@@ -57,9 +57,45 @@ static const float pad_rotation_sin = __builtin_sinf(_NT_PAD_ROT_RAD);
 extern void send_digitizer_touchpad(report_digitizer_touchpad_t *report);
 extern void send_digitizer_touchpad_mouse(report_digitizer_touchpad_mouse_t *report);
 
+// Output hooks — weak by default (forward straight to the USB digitizer
+// endpoint above), so wired-only builds (e.g. test_trackpad, which doesn't
+// pull in the wireless module) get byte-identical USB behavior. The wireless
+// module, when linked (e.g. fdprod_trackpad), provides a strong override that
+// routes these reports over UART to the left nRF instead, using the same
+// usb_connected_state() gate bluetooth_send_mouse() uses elsewhere, and falls
+// through to the real USB send above whenever USB actually is connected.
+__attribute__((weak)) void navigator_trackpad_output_touchpad(report_digitizer_touchpad_t *report) {
+    send_digitizer_touchpad(report);
+}
+
+__attribute__((weak)) void navigator_trackpad_output_touchpad_mouse(report_digitizer_touchpad_mouse_t *report) {
+    send_digitizer_touchpad_mouse(report);
+}
+
 // Input mode: 0 = Mouse, 3 = PTP
 // Defined in usb_main.c
 extern uint8_t digitizer_touchpad_get_input_mode(void);
+
+// Wireless input-mode override hook. Weak by default (no override — the USB
+// feature-report state above always governs), so wired-only builds are
+// unaffected. The wireless module overrides this with a strong definition
+// that shadows the BLE host's SET_REPORT(feature 0x04) input-mode write
+// (relayed from the nRF as ZSA_MSG_EVT_DIGITIZER_MODE) whenever we're not on
+// USB. Returns a signed value so "no override" (-1) is distinguishable from a
+// real mode value (0 or 3).
+__attribute__((weak)) int16_t navigator_trackpad_wireless_input_mode(void) {
+    return -1;
+}
+
+// Resolves the input mode to actually use: the wireless override when one is
+// in effect, otherwise whatever the USB feature report last set.
+static uint8_t navigator_trackpad_effective_input_mode(void) {
+    int16_t override = navigator_trackpad_wireless_input_mode();
+    if (override >= 0) {
+        return (uint8_t)override;
+    }
+    return digitizer_touchpad_get_input_mode();
+}
 
 // Input mode values (set by host via HID feature report)
 #define TRACKPAD_INPUT_MODE_MOUSE 0
@@ -179,7 +215,7 @@ static void send_mouse_report(int8_t dx, int8_t dy, uint8_t buttons) {
         .x         = dx,
         .y         = dy
     };
-    send_digitizer_touchpad_mouse(&report);
+    navigator_trackpad_output_touchpad_mouse(&report);
 }
 
 // Reset mouse state when mode changes to avoid stale timers/state
@@ -563,7 +599,7 @@ bool navigator_trackpad_ptp_task(void) {
     report[PTP_COUNT_BUTTONS_OFFSET] = (contact_count & 0x0F) | ((buttons & BUTTON_PRIMARY) << 4);
 
     // Get current input mode and handle mode changes
-    uint8_t input_mode = digitizer_touchpad_get_input_mode();
+    uint8_t input_mode = navigator_trackpad_effective_input_mode();
     if (input_mode != prev_input_mode) {
         // Mode changed - reset mouse state to avoid stale timers/state
         reset_mouse_state();
@@ -573,7 +609,7 @@ bool navigator_trackpad_ptp_task(void) {
     // Send PTP report only in PTP mode (mode 3)
     if (input_mode == TRACKPAD_INPUT_MODE_PTP) {
         if (contact_count > 0 || button_changed) {
-            send_digitizer_touchpad((report_digitizer_touchpad_t *)report);
+            navigator_trackpad_output_touchpad((report_digitizer_touchpad_t *)report);
         }
     }
 

@@ -7,7 +7,6 @@
  */
 
 #include <stddef.h>
-#include <string.h>
 #include "wireless.h"
 #include "bluetooth.h"
 #include "report.h"
@@ -45,17 +44,38 @@ static uint8_t nrf_led_state;
 
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
 
-static uint8_t nav_raw_report[17];
-static bool    nav_raw_fresh;
+#ifdef DIGITIZER_MODE_TOUCHPAD
+/* ---- Digitizer/PTP report + input-mode routing ---- *
+ *
+ * navigator_trackpad_ptp.c defines navigator_trackpad_output_touchpad(),
+ * navigator_trackpad_output_touchpad_mouse() and
+ * navigator_trackpad_wireless_input_mode() as weak (default: straight to USB,
+ * no mode override), so wired-only builds without this module (e.g.
+ * test_trackpad) are unaffected. The strong definitions below override them
+ * at link time whenever this module is also linked in (e.g. fdprod_trackpad),
+ * routing PTP reports over UART and shadowing the BLE host's input-mode
+ * writes whenever we're not on USB.
+ */
+extern void send_digitizer_touchpad(report_digitizer_touchpad_t *report);
+extern void send_digitizer_touchpad_mouse(report_digitizer_touchpad_mouse_t *report);
+
+/* Shadow input-mode state, set from ZSA_MSG_EVT_DIGITIZER_MODE (the BLE
+ * host's HID feature-report write, relayed by the nRF). Only trusted while
+ * actually wireless (not on USB) — see navigator_trackpad_wireless_input_mode()
+ * below. */
+static uint8_t digitizer_wireless_mode     = 0; /* mirrors TRACKPAD_INPUT_MODE_MOUSE */
+static bool    digitizer_wireless_mode_set = false;
+#endif
 
 /* ---- Nav capability announce ---- *
  *
  * QMK's nav support is compile-time (which modules a keymap pulls in).
  * We announce the compiled-in capability bitmask to the nRF at link-up so
- * it only runs nav-device detection — and only exposes the trackball mirror
- * (0x28 = real bridge, left-plugged; 0x2C = left-nRF emulated mirror,
- * right-plugged, wireless) — when this build actually supports a nav device.
- * Retried every 1 s until the nRF acks with any EVT_NAV_PRESENT. */
+ * it only runs nav-device detection — and only exposes the emulated-I2C
+ * mirrors (trackball: 0x28 real bridge / 0x2D left-nRF mirror; trackpad:
+ * 0x2C real pad / 0x2E left-nRF mirror, all left-plugged real / right-plugged
+ * wireless) — when this build actually supports a nav device. Retried every
+ * 1 s until the nRF acks with any EVT_NAV_PRESENT. */
 static const uint8_t nav_cap_mask =
     0
 #ifdef POINTING_DEVICE_ENABLE
@@ -207,13 +227,15 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 
-        case ZSA_MSG_EVT_NAV_REPORT_RAW:
-            if (frame->len >= sizeof(struct zsa_nav_report_raw)) {
-                const struct zsa_nav_report_raw *r = (const struct zsa_nav_report_raw *)frame->payload;
-                memcpy(nav_raw_report, r->data, sizeof(nav_raw_report));
-                nav_raw_fresh = true;
+#ifdef DIGITIZER_MODE_TOUCHPAD
+        case ZSA_MSG_EVT_DIGITIZER_MODE:
+            if (frame->len >= sizeof(struct zsa_digitizer_mode)) {
+                const struct zsa_digitizer_mode *m = (const struct zsa_digitizer_mode *)frame->payload;
+                digitizer_wireless_mode     = m->mode;
+                digitizer_wireless_mode_set = true;
             }
             break;
+#endif
 
         default:
             break;
@@ -260,13 +282,6 @@ bool zsa_wireless_link_ready(void) {
 
 uint8_t zsa_wireless_nav_device_type(void) {
     return nav_device_type;
-}
-
-bool zsa_wireless_nav_consume_raw(uint8_t out[17]) {
-    if (!nav_raw_fresh) return false;
-    memcpy(out, nav_raw_report, sizeof(nav_raw_report));
-    nav_raw_fresh = false;
-    return true;
 }
 
 /* ---- Idle power management ---- */
@@ -496,6 +511,58 @@ void bluetooth_send_mouse(report_mouse_t *report) {
 
     zsa_wireless_send_frame(ZSA_MSG_HID_MOUSE, start, len);
 }
+
+#ifdef DIGITIZER_MODE_TOUCHPAD
+/* Strong override of navigator_trackpad_ptp.c's weak
+ * navigator_trackpad_output_touchpad() hook (see the extern declarations and
+ * comment near the top of this file). Routes the PTP input report (report ID
+ * 1, 16 B total) over UART as ZSA_MSG_HID_DIGITIZER — payload is the report
+ * bytes minus the constant leading report_id byte — whenever we're not on
+ * USB, mirroring the usb_connected_state() gate used by bluetooth_send_mouse()
+ * above. Falls straight through to the real USB endpoint on USB so wired
+ * behavior stays byte-identical. */
+void navigator_trackpad_output_touchpad(report_digitizer_touchpad_t *report) {
+    if (usb_connected_state()) {
+        send_digitizer_touchpad(report);
+        return;
+    }
+    _Static_assert(sizeof(report_digitizer_touchpad_t) == 1 + ZSA_HID_DIGITIZER_LEN,
+                   "zsa_hid_digitizer payload size must track report_digitizer_touchpad_t");
+    const uint8_t *bytes = (const uint8_t *)report;
+    zsa_wireless_send_frame(ZSA_MSG_HID_DIGITIZER, bytes + 1, ZSA_HID_DIGITIZER_LEN);
+}
+
+/* Strong override of navigator_trackpad_ptp.c's weak
+ * navigator_trackpad_output_touchpad_mouse() hook. The mouse-mode fallback
+ * report (report ID 6: buttons + relative x/y) has no PTP-specific shape —
+ * it's a plain relative pointer report — so rather than invent a second UART
+ * message type, convert it to a report_mouse_t and reuse the existing mouse
+ * path (ZSA_MSG_HID_MOUSE / bluetooth_send_mouse() above), which already
+ * carries trackball motion over BLE. */
+void navigator_trackpad_output_touchpad_mouse(report_digitizer_touchpad_mouse_t *report) {
+    if (usb_connected_state()) {
+        send_digitizer_touchpad_mouse(report);
+        return;
+    }
+    report_mouse_t mouse_report = {0};
+    mouse_report.buttons        = report->buttons;
+    mouse_report.x              = (mouse_xy_report_t)report->x;
+    mouse_report.y              = (mouse_xy_report_t)report->y;
+    bluetooth_send_mouse(&mouse_report);
+}
+
+/* Strong override of navigator_trackpad_ptp.c's weak
+ * navigator_trackpad_wireless_input_mode() hook. Shadows the BLE host's PTP
+ * input-mode writes (ZSA_MSG_EVT_DIGITIZER_MODE) whenever we're actually
+ * wireless; on USB (or before any mode has ever arrived over UART) returns -1
+ * so the USB feature-report state keeps governing. */
+int16_t navigator_trackpad_wireless_input_mode(void) {
+    if (usb_connected_state() || !digitizer_wireless_mode_set) {
+        return -1;
+    }
+    return (int16_t)digitizer_wireless_mode;
+}
+#endif // DIGITIZER_MODE_TOUCHPAD
 
 void bluetooth_send_consumer(uint16_t usage) {
     uint8_t payload[3];

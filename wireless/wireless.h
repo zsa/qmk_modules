@@ -39,12 +39,12 @@ void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len)
 bool zsa_wireless_link_ready(void);
 
 /* Navigator event hooks. The wireless module tracks the currently-detected
- * device type from EVT_NAV_PRESENT events and forwards raw trackpad reports
- * only. Trackball motion is delivered exclusively via the nRF's emulated-I²C
- * nav register mirror (0x28 = real bridge, left-plugged; 0x2C = left-nRF
- * emulated mirror, right-plugged, wireless), never over UART. */
+ * device type from EVT_NAV_PRESENT events. Both trackball and trackpad
+ * motion/touch data are delivered exclusively via the nRF's emulated-I2C nav
+ * register mirrors — trackball: 0x28 real bridge (left-plugged) / 0x2D
+ * left-nRF mirror (right-plugged); trackpad: 0x2C real pad (left-plugged) /
+ * 0x2E left-nRF mirror (right-plugged) — never over UART. (Digitizer PTP HID
+ * *reports*, once decoded from that mirror, do ride UART — see
+ * ZSA_MSG_HID_DIGITIZER in zsa_uart_proto.h and navigator_trackpad_ptp.c's
+ * navigator_trackpad_output_touchpad() hook.) */
 uint8_t zsa_wireless_nav_device_type(void);  /* enum zsa_nav_device_type, 0 if none */
-
-/* True if a fresh raw nav report (17 B) has arrived from the nRF since the
- * previous call. On true, *out is filled and the freshness flag is cleared. */
-bool zsa_wireless_nav_consume_raw(uint8_t out[17]);

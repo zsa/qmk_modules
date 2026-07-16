@@ -15,9 +15,14 @@
 static uint16_t current_cpi  = DEFAULT_CPI_TICK;
 bool            trackpad_init = false;
 
+// I2C address currently in use. Defaults to the real trackpad; falls back to
+// the left-nRF wireless mirror (NAVIGATOR_TRACKPAD_MIRROR_ADDRESS) at probe
+// time in navigator_trackpad_device_init() if the real bridge doesn't ACK.
+static uint8_t nav_addr = NAVIGATOR_TRACKPAD_ADDRESS;
+
 // I2C communication functions
 i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
-    i2c_status_t res = i2c_receive(NAVIGATOR_TRACKPAD_ADDRESS, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);
+    i2c_status_t res = i2c_receive(nav_addr, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);
     if (res != I2C_STATUS_SUCCESS) {
         return res;
     }
@@ -46,7 +51,7 @@ uint8_t cirque_gen6_read_memory(uint32_t addr, uint8_t *data, uint16_t cnt, bool
     // Read the length of the data + 3 bytes (first 2 bytes for the length and the last byte for the checksum)
     // Create a buffer to store the data
     uint8_t buf[cnt + 3];
-    if (i2c_transmit_and_receive(NAVIGATOR_TRACKPAD_ADDRESS, preamble, 8, buf, cnt + 3, NAVIGATOR_TRACKPAD_TIMEOUT) != I2C_STATUS_SUCCESS) {
+    if (i2c_transmit_and_receive(nav_addr, preamble, 8, buf, cnt + 3, NAVIGATOR_TRACKPAD_TIMEOUT) != I2C_STATUS_SUCCESS) {
         res |= CGEN6_I2C_FAILED;
         trackpad_init = false;
     }
@@ -99,7 +104,7 @@ uint8_t cirque_gen6_write_memory(uint32_t addr, uint8_t *data, uint16_t cnt) {
 
     buf[cnt + 8] = cksum;
 
-    if (i2c_transmit(NAVIGATOR_TRACKPAD_ADDRESS, buf, cnt + 9, NAVIGATOR_TRACKPAD_TIMEOUT) != I2C_STATUS_SUCCESS) {
+    if (i2c_transmit(nav_addr, buf, cnt + 9, NAVIGATOR_TRACKPAD_TIMEOUT) != I2C_STATUS_SUCCESS) {
         res |= CGEN6_I2C_FAILED;
         trackpad_init = false;
     }
@@ -264,7 +269,17 @@ bool cirque_gen_6_read_report(cgen6_report_t *report) {
 // Device initialization - returns true on success, false on failure
 void navigator_trackpad_device_init(void) {
     i2c_init();
-    i2c_status_t status = i2c_ping_address(NAVIGATOR_TRACKPAD_ADDRESS, NAVIGATOR_TRACKPAD_TIMEOUT);
+
+    // Probe the real trackpad first (0x58, left-plugged); if it doesn't ACK,
+    // fall back to the left-nRF wireless mirror (0x5C, right-plugged). Re-runs
+    // on every re-probe (see the 1 s retry in navigator_trackpad_ptp_task()),
+    // so a trackpad moved between halves at runtime is picked back up.
+    nav_addr = NAVIGATOR_TRACKPAD_ADDRESS;
+    i2c_status_t status = i2c_ping_address(nav_addr, NAVIGATOR_TRACKPAD_TIMEOUT);
+    if (status != I2C_STATUS_SUCCESS) {
+        nav_addr = NAVIGATOR_TRACKPAD_MIRROR_ADDRESS;
+        status   = i2c_ping_address(nav_addr, NAVIGATOR_TRACKPAD_TIMEOUT);
+    }
     if (status != I2C_STATUS_SUCCESS) {
         trackpad_init = false;
         return;

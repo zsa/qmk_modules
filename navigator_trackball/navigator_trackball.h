@@ -10,11 +10,14 @@
 #    define NAVIGATOR_TRACKBALL_ADDRESS 0x50
 #endif
 
-// Real bridge = 0x28<<1 (left-plugged, direct SCI18IS606 on the STM32's bus).
-// Left-nRF wireless mirror = 0x2C<<1 (right-plugged, wireless; the left nRF
-// emulates a register-compatible mirror of the bridge at this address).
+// Real bridge = 0x28<<1 = 0x50 (left-plugged, direct SCI18IS606 on the
+// STM32's bus). Left-nRF wireless mirror = 0x2D<<1 = 0x5A (right-plugged,
+// wireless; the left nRF emulates a register-compatible mirror of the bridge
+// at this address). Moved from 0x2C/0x58 (2026-07) because that address now
+// belongs to the real trackpad (NAVIGATOR_TRACKPAD_ADDRESS) — the trackball
+// and trackpad mirrors must not collide on the shared emulated-I2C bus.
 #ifndef NAVIGATOR_TRACKBALL_MIRROR_ADDRESS
-#    define NAVIGATOR_TRACKBALL_MIRROR_ADDRESS 0x58
+#    define NAVIGATOR_TRACKBALL_MIRROR_ADDRESS 0x5A
 #endif
 
 #ifndef NAVIGATOR_TRACKBALL_CPI

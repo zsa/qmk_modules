@@ -41,6 +41,13 @@ enum zsa_msg_type {
     ZSA_MSG_HID_KEYBOARD     = 0x01,
     ZSA_MSG_HID_MOUSE        = 0x02,
     ZSA_MSG_HID_SYSTEM       = 0x03,
+    ZSA_MSG_HID_DIGITIZER    = 0x04,  /* 15 B: PTP touchpad input report (report
+                                       * ID 1 implied/constant) minus its
+                                       * leading report_id byte. See struct
+                                       * zsa_hid_digitizer below. The mouse-mode
+                                       * fallback report (report ID 6) has no
+                                       * PTP-specific shape and rides
+                                       * ZSA_MSG_HID_MOUSE instead. */
 
     /* STM32 -> nRF: queries (0x10-0x1F) */
     ZSA_MSG_QUERY_BLE_STATUS = 0x10,
@@ -84,12 +91,17 @@ enum zsa_msg_type {
      * motion is delivered over I2C, never UART: real bridge at 0x28 when
      * left-plugged (or over TRRS in wired mode), left-nRF emulated mirror at
      * 0x2C when right-plugged in wireless mode. Do NOT reuse this ID. */
-    ZSA_MSG_EVT_NAV_REPORT_RAW = 0x87, /* 17 B: raw Cirque Gen6 PTP packet bytes
-                                        * (CGEN6_MAX_PACKET_SIZE on the QMK decode side).
-                                        * Decoded in QMK; nRF is a dumb pipe. */
+    /* 0x87 reserved — was ZSA_MSG_EVT_NAV_REPORT_RAW (removed 2026-07).
+     * Trackpad data now flows over the emulated-i2c pad mirror, never UART.
+     * Do NOT reuse this ID. */
     /* Reserved for touchpad future:
      *   ZSA_MSG_EVT_NAV_GESTURE = 0x88  (TLV: gesture id + params)
      */
+    ZSA_MSG_EVT_DIGITIZER_MODE = 0x89, /* 1 B: BLE host's PTP input-mode write
+                                        * (0=Mouse, 3=PTP), relayed from the
+                                        * nRF's SET_REPORT(feature 0x04)
+                                        * emulation. See struct
+                                        * zsa_digitizer_mode below. */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -114,6 +126,27 @@ struct __attribute__((packed)) zsa_hid_keyboard {
 struct __attribute__((packed)) zsa_hid_system {
     uint8_t  report_id;
     uint16_t usage;
+};
+
+/* ZSA_MSG_HID_DIGITIZER (15 bytes) — PTP touchpad input report, report ID 1
+ * implied/constant (the digitizer interface has its own report-ID space, so
+ * the ID never varies for this message). Mirrors report_digitizer_touchpad_t
+ * (tmk_core/protocol/report.h) minus its leading report_id byte:
+ *   [0]      finger0 conf:1 | tip:1 | pad:6
+ *   [1]      finger0 contact_id:3 | pad:5
+ *   [2..3]   finger0 X (LE16)
+ *   [4..5]   finger0 Y (LE16)
+ *   [6]      finger1 conf:1 | tip:1 | pad:6
+ *   [7]      finger1 contact_id:3 | pad:5
+ *   [8..9]   finger1 X (LE16)
+ *   [10..11] finger1 Y (LE16)
+ *   [12..13] scan_time (LE16)
+ *   [14]     contact_count:4 | button1:1 | button2:1 | button3:1 | pad:1
+ * The nRF prepends the constant report_id (0x01) before writing the BLE HID
+ * input-report characteristic for the PTP application collection. */
+#define ZSA_HID_DIGITIZER_LEN 15
+struct __attribute__((packed)) zsa_hid_digitizer {
+    uint8_t data[ZSA_HID_DIGITIZER_LEN];
 };
 
 /* ZSA_MSG_EVT_BLE_STATUS (2 bytes) */
@@ -192,11 +225,12 @@ struct __attribute__((packed)) zsa_nav_present {
 
 /* struct zsa_nav_motion removed with ZSA_MSG_EVT_NAV_MOTION (0x86, reserved). */
 
-/* ZSA_MSG_EVT_NAV_REPORT_RAW (17 bytes) — raw Cirque Gen6 PTP packet
- * (cirque header bytes 0-1 + payload bytes 2-16), identical to the wired
- * i2c-read path. Currently unconsumed on the QMK side. */
-struct __attribute__((packed)) zsa_nav_report_raw {
-    uint8_t data[17];
+/* struct zsa_nav_report_raw removed with ZSA_MSG_EVT_NAV_REPORT_RAW (0x87,
+ * reserved). Trackpad data flows over the emulated-i2c pad mirror instead. */
+
+/* ZSA_MSG_EVT_DIGITIZER_MODE (1 byte) */
+struct __attribute__((packed)) zsa_digitizer_mode {
+    uint8_t mode; /* 0 = Mouse (boot default), 3 = Windows Precision Touchpad */
 };
 
 /* ---- DFU state / error codes ---- */
