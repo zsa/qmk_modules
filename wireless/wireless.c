@@ -20,6 +20,8 @@
 /* log_tap.h resolves zsa_log()/zsa_log_tap_init() to real symbols under
  * ZSA_BLE_LOG and to no-op static inlines otherwise, so include it always. */
 #include "log_tap.h"
+/* rtt_debug.h resolves to no-op static inlines unless ZSA_RTT_DEBUG is set. */
+#include "rtt_debug.h"
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
 #endif
@@ -41,6 +43,13 @@ static bool    nrf_discovery_active; /* nRF advertising / awaiting pairing */
 static uint8_t nrf_battery_soc;
 static uint8_t nrf_battery_flags;
 static uint8_t nrf_led_state;
+
+#ifdef RGB_MATRIX_ENABLE
+/* Tracks the last-reported left LED rail state so EVT_LED_RAIL only resyncs
+ * the driver on the OFF->ON edge (see the handler below). Starts "on" since
+ * the STM32 only ever boots with the rail already up. */
+static bool left_led_rail_on = true;
+#endif
 
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
 
@@ -107,7 +116,9 @@ void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len)
      * task for the keymap/uart path — no reentrancy. */
     static uint8_t buf[(ZSA_LOG_MAX_PAYLOAD + ZSA_FRAME_OVERHEAD) * 2 + 1];
     uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
+    uint32_t rtt_t0    = zsa_rtt_cycles(); // TEMP DEBUG
     uart_transmit(buf, frame_len);
+    zsa_rtt_tx(type, frame_len, rtt_t0);   // TEMP DEBUG
 }
 
 static void send_command(uint8_t type) {
@@ -141,8 +152,10 @@ static void nav_announce_task(void) {
 }
 
 static void handle_rx_frame(const struct zsa_frame *frame) {
+    zsa_rtt_rx(frame->type); // TEMP DEBUG
     switch (frame->type) {
         case ZSA_MSG_LINK_UP:
+            if (!link_ready) zsa_rtt_event("LINK_UP latched"); // TEMP DEBUG
             link_ready = true;
             /* Reply (rate-limited) so the nRF's link-probe loop latches even
              * when we were already up: after an nRF-only reboot it probes
@@ -168,6 +181,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
         case ZSA_MSG_EVT_BLE_STATUS:
             if (frame->len >= sizeof(struct zsa_ble_status)) {
                 const struct zsa_ble_status *s = (const struct zsa_ble_status *)frame->payload;
+                zsa_rtt_event(s->connected ? "BLE_STATUS connected" : "BLE_STATUS disconnected"); // TEMP DEBUG
                 nrf_ble_connected  = s->connected != 0;
                 nrf_ble_device_idx = s->device_idx;
                 /* nRF is back from ship mode */
@@ -206,9 +220,21 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             if (frame->len >= sizeof(struct zsa_led_rail_state)) {
                 const struct zsa_led_rail_state *r = (const struct zsa_led_rail_state *)frame->payload;
 #ifdef RGB_MATRIX_ENABLE
-                if ((r->rails & ZSA_LED_RAIL_LEFT) && idle_step < ZSA_IDLE_LEDS_OFF) {
+                bool rail_on = (r->rails & ZSA_LED_RAIL_LEFT) != 0;
+                // The nRF also reports this on unrelated transitions (usb_connected,
+                // idle_step), so only resync on the OFF->ON edge - rail power actually
+                // returning after LEDS_OFF idle. A repeated "on" report is a no-op.
+                if (rail_on && !left_led_rail_on && idle_step < ZSA_IDLE_LEDS_OFF) {
+                    zsa_rtt_event("LED_RAIL -> rgb_matrix_init"); // TEMP DEBUG
                     rgb_matrix_init();
+                    // rgb_matrix_init() re-zeroes hardware PWM but not the driver's
+                    // software cache, so set_color() early-returns until a color
+                    // actually changes. Zero the cache too so it matches hardware and
+                    // the next rendered frame repaints every LED.
+                    rgb_matrix_set_color_all(0, 0, 0);
+                    rgb_matrix_driver.flush();
                 }
+                left_led_rail_on = rail_on;
 #endif
             }
             break;
@@ -440,6 +466,7 @@ void bluetooth_init(void) {
     zsa_parser_init(&rx_parser);
     link_ready = false;
     last_link_up_ms = timer_read32();
+    zsa_rtt_init(); // TEMP DEBUG
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();
     zsa_log("zsa_wireless: init (ZSA_BLE_LOG=on)");
@@ -447,6 +474,8 @@ void bluetooth_init(void) {
 }
 
 void bluetooth_task(void) {
+    zsa_rtt_loop_tick(); // TEMP DEBUG
+
     /* Process incoming frames */
     while (uart_available()) {
         uint8_t byte = uart_read();
