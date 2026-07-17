@@ -389,6 +389,9 @@ bool navigator_trackpad_ptp_task(void) {
     // Consecutive empty reads while a contact is still tracked. Used to confirm
     // lift-off before flushing a stranded contact (see the read path below).
     static uint8_t  no_data_frames = 0;
+    // Scan Time of the last frame we processed, to drop repeats (see below).
+    static uint16_t last_scan_time     = 0;
+    static bool     have_last_scan_time = false;
 #if NAVIGATOR_TRACKPAD_PTP_SMOOTHING == TRUE
     // Per-emitted-slot One Euro filter state, the slot's down-flag from last
     // frame (a rising edge means a fresh contact -> reset the filter), and the
@@ -459,8 +462,30 @@ bool navigator_trackpad_ptp_task(void) {
         // Confirmed lift-off: fall through with the zeroed report so the
         // reconciler releases the stranded contact(s) with tip=0.
         no_data_frames = 0;
+        have_last_scan_time = false;
     } else {
         no_data_frames = 0;
+
+        // Scan Time is the sensor's own frame counter (100us units), and the
+        // host derives its event timestamps from it, not from arrival time
+        // (hid-multitouch's mt_compute_timestamp -> MSC_TIMESTAMP -> libinput's
+        // velocity). Re-running this pipeline on a frame we already emitted is
+        // not harmless: the One Euro filter below advances on wall-clock dt, so
+        // it converges to a slightly *different* position while the report still
+        // carries the *same* scan time. The host sees the pointer move in zero
+        // time, calls the resulting infinite velocity a hardware jump, and
+        // discards the frame outright.
+        //
+        // Repeats are routine on the wireless mirror, which re-serves the last
+        // packet while a contact rests (the alternative, answering "no data",
+        // reads as a lift-off). Nothing changed at the sensor, so there is
+        // nothing to emit. This is not a lift-off either, so no_data_frames
+        // stays clear and the contact is left alone.
+        if (have_last_scan_time && sensor_report.scan_time == last_scan_time) {
+            return false;
+        }
+        last_scan_time      = sensor_report.scan_time;
+        have_last_scan_time = true;
     }
 
     // Slot-0 presence (raw tip) drives the mouse-mode fallback tap detector below.
