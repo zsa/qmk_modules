@@ -185,6 +185,14 @@ uint32_t sci18is606_read_callback(uint32_t trigger_time, void *cb_arg) {
     return NAVIGATOR_TRACKBALL_READ;
 }
 
+// Makes the next sci18is606_read_callback() tick re-run
+// pointing_device_driver_init(), re-probing the bridge and re-running
+// paw3805ek_configure(). The bridge keeps ACKing after a transport switch, so
+// nothing else clears trackball_init.
+void zsa_nav_transport_changed(void) {
+    trackball_init = 0;
+}
+
 // Override the weak custom driver functions
 void pointing_device_driver_init(void) {
     i2c_init();

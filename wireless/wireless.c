@@ -371,6 +371,11 @@ static void idle_power_wake(void) {
     last_matrix_activity_trigger();
 }
 
+/* Called on both USB<->wireless transitions. Nav modules override this to
+ * re-init their sensor: the transport switch resets the shared i2c bus, which
+ * leaves the sensor unconfigured without raising an i2c error. */
+__attribute__((weak)) void zsa_nav_transport_changed(void) {}
+
 static void idle_power_task(void) {
     static bool     was_bluetooth  = false;
     static uint32_t bt_switch_time = 0;
@@ -380,6 +385,7 @@ static void idle_power_task(void) {
         if (was_bluetooth) {
             was_bluetooth = false;
             send_usb_state(true);
+            zsa_nav_transport_changed();
         }
         nrf_ship_mode = false;
         if (idle_step != ZSA_IDLE_ACTIVE) {
@@ -393,6 +399,7 @@ static void idle_power_task(void) {
         was_bluetooth  = true;
         bt_switch_time = timer_read32();
         send_usb_state(false);
+        zsa_nav_transport_changed();
         if (idle_step != ZSA_IDLE_ACTIVE) {
             idle_power_wake();
         }
