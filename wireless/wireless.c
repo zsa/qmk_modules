@@ -24,6 +24,7 @@
 #include "rtt_debug.h"
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
+#    include "is31fl3731.h"
 #endif
 
 /* keyboard.c — not in keyboard.h but we need it to reset the idle timer */
@@ -49,6 +50,17 @@ static uint8_t nrf_led_state;
  * the driver on the OFF->ON edge (see the handler below). Starts "on" since
  * the STM32 only ever boots with the rail already up. */
 static bool left_led_rail_on = true;
+
+/* Confirmed via drivers/led/issi/is31fl3731.c (i2c_addresses[] mirrors the
+ * IS31FL3731_I2C_ADDRESS_N chain in order) and voyager_tng.c's
+ * g_is31fl3731_leds[] table: driver 0 is the left half's real chip
+ * (IS31FL3731_I2C_ADDRESS_1 / 0x74), driver 1 is the right half
+ * (IS31FL3731_I2C_ADDRESS_2 / 0x77) - the left nRF's TWIS emulation when
+ * wireless, the real chip on the TRRS bus when wired. */
+#    define ZSA_LED_DRIVER_LEFT 0
+#    define ZSA_LED_DRIVER_RIGHT 1
+
+static uint32_t last_right_led_flush_ms = 0;
 #endif
 
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
@@ -458,6 +470,33 @@ static void idle_power_task(void) {
         }
     }
 }
+
+#ifdef RGB_MATRIX_ENABLE
+/* ---- LED flush rate limiting ---- */
+
+/* Strong override of is31fl3731.c's weak is31fl3731_should_flush() hook.
+ * Wired is exempt unconditionally, keeping that path byte-for-byte
+ * unchanged - the right driver is a real chip on a real bus there, cheap to
+ * flush at full rate like the left one. Wireless keeps the left (real,
+ * local) driver at full rate too, but caps the right (emulated 0x77, relayed
+ * over ESB) driver to ZSA_RIGHT_LED_INTERVAL_MS: every flush it answers
+ * blocks on a clock-stretched I2C write (~9 ms vs ~0.65 ms for the left chip
+ * alone), and the right half doesn't need matrix-scan-rate refresh.
+ * Skipping a flush here does not clear pwm_buffer_dirty (only
+ * is31fl3731_update_pwm_buffers() does, after it actually writes), so the
+ * buffer stays dirty and the next permitted flush still sends the latest
+ * colors - nothing is lost, just delayed. */
+bool is31fl3731_should_flush(uint8_t index) {
+    if (index != ZSA_LED_DRIVER_RIGHT || usb_connected_state()) {
+        return true;
+    }
+    if (timer_elapsed32(last_right_led_flush_ms) < ZSA_RIGHT_LED_INTERVAL_MS) {
+        return false;
+    }
+    last_right_led_flush_ms = timer_read32();
+    return true;
+}
+#endif
 
 /* ---- bluetooth.h weak function implementations ---- */
 

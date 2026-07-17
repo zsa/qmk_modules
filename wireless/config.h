@@ -27,3 +27,13 @@
 #ifndef ZSA_IDLE_SCAN_DELAY_MS
 #    define ZSA_IDLE_SCAN_DELAY_MS 50
 #endif
+
+/* Minimum spacing between flushes of the right-half LED driver (0x77) while
+ * wireless. That driver is the left nRF's TWIS emulation, not a real chip -
+ * every flush blocks on a clock-stretched I2C transfer relayed over ESB
+ * (~9 ms vs ~0.65 ms for the real left chip alone). The right half doesn't
+ * need full matrix-scan-rate refresh, so this trades LED update latency for
+ * CPU time back to the main loop. */
+#ifndef ZSA_RIGHT_LED_INTERVAL_MS
+#    define ZSA_RIGHT_LED_INTERVAL_MS 50
+#endif
