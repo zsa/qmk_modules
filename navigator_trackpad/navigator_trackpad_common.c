@@ -18,6 +18,7 @@ bool            trackpad_init = false;
 // I2C address currently in use. Defaults to the real trackpad; falls back to
 // the left-nRF wireless mirror (NAVIGATOR_TRACKPAD_MIRROR_ADDRESS) at probe
 // time in navigator_trackpad_device_init() if the real bridge doesn't ACK.
+// TODO: only use this mechanism when the wirless module is enabled.
 static uint8_t nav_addr = NAVIGATOR_TRACKPAD_ADDRESS;
 
 // I2C communication functions
