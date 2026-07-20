@@ -46,6 +46,27 @@ static uint8_t nrf_battery_right_soc;
 static uint8_t nrf_battery_flags;
 static uint8_t nrf_led_state;
 
+/* ---- Adaptive charging (wired mode) ---- *
+ *
+ * The left nRF reports the USB source's CC-detected current budget
+ * (EVT_PWR_BUDGET); this module owns the charging policy: on a high-budget
+ * source it commands both halves to raise their VBUS input current limit
+ * to their devicetree value — the left over UART (CMD_VBUS_ILIM), the
+ * right over the TRRS I2C bus (voyager_right_nrf_vbus_ilim_high()).
+ * The raise is re-sent every PWR_BUDGET_MAINTAIN_INTERVAL_MS while the
+ * budget stays high: both commands are idempotent, and the resend covers
+ * right-half TRRS hot-plug, right VBUS arriving late, and nRF reboots.
+ * There is no explicit lower command — the nPM1300s auto-revert to their
+ * startup limit on VBUS removal. */
+static uint16_t nrf_power_budget_ma = ZSA_PWR_BUDGET_DEFAULT_MA;
+static uint32_t last_pwr_maintain_ms = 0;
+#define PWR_BUDGET_MAINTAIN_INTERVAL_MS 5000
+
+/* Board-provided (voyager_tng.c) right-half raise command; extern rather
+ * than including the board header to keep the module decoupled. */
+extern bool voyager_right_nrf_vbus_ilim_high(void);
+extern bool is_transport_connected(void);
+
 #ifdef RGB_MATRIX_ENABLE
 /* Tracks the last-reported left LED rail state so EVT_LED_RAIL only resyncs
  * the driver on the OFF->ON edge (see the handler below). Starts "on" since
@@ -182,6 +203,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
              * our nav capabilities immediately and wait for a fresh ack. */
             nav_announce_acked   = false;
             last_nav_announce_ms = 0;
+            /* Same reasoning for the power budget: drop any stale "high"
+             * until the nRF re-reports its real budget (sent right after
+             * link-up). */
+            nrf_power_budget_ma = ZSA_PWR_BUDGET_DEFAULT_MA;
             /* nRF rebooted (e.g. after ship mode) — clear ship flag */
             if (nrf_ship_mode) {
                 nrf_ship_mode = false;
@@ -276,6 +301,15 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 #endif
+
+        case ZSA_MSG_EVT_PWR_BUDGET:
+            if (frame->len >= sizeof(struct zsa_pwr_budget)) {
+                const struct zsa_pwr_budget *p = (const struct zsa_pwr_budget *)frame->payload;
+                nrf_power_budget_ma  = p->budget_ma;
+                /* Act on the next loop iteration, not the next 5 s tick. */
+                last_pwr_maintain_ms = 0;
+            }
+            break;
 
         default:
             break;
@@ -525,6 +559,28 @@ void bluetooth_init(void) {
 #endif
 }
 
+/* Charging policy: while a high-budget source is attached in wired mode,
+ * (re-)command both halves to raise their VBUS input limit. See the
+ * adaptive-charging comment block at the top for the full rationale. */
+static void power_budget_task(void) {
+    if (!link_ready || !usb_connected_state()) {
+        return;
+    }
+    if (nrf_power_budget_ma < ZSA_PWR_BUDGET_HIGH_MA) {
+        return;
+    }
+    if (last_pwr_maintain_ms != 0 &&
+        timer_elapsed32(last_pwr_maintain_ms) < PWR_BUDGET_MAINTAIN_INTERVAL_MS) {
+        return;
+    }
+    struct zsa_vbus_ilim payload = { .level = ZSA_VBUS_ILIM_HIGH };
+    zsa_wireless_send_frame(ZSA_MSG_CMD_VBUS_ILIM, (const uint8_t *)&payload, sizeof(payload));
+    if (is_transport_connected()) {
+        (void)voyager_right_nrf_vbus_ilim_high();
+    }
+    last_pwr_maintain_ms = timer_read32();
+}
+
 void bluetooth_task(void) {
     zsa_rtt_loop_tick(); // TEMP DEBUG
 
@@ -544,6 +600,9 @@ void bluetooth_task(void) {
 
     /* Announce our nav capabilities once the link is up (retries until acked) */
     nav_announce_task();
+
+    /* Maintain the adaptive-charging raise while a high-budget source is up */
+    power_budget_task();
 
     idle_power_task();
 }

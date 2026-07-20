@@ -64,6 +64,12 @@ enum zsa_msg_type {
     /* 0x25 reserved — was ZSA_MSG_CMD_NAV_CPI (removed 2026-07). Wireless
      * trackball CPI rides the emulated-i2c 0x8D register snoop instead.
      * Do NOT reuse this ID. */
+    ZSA_MSG_CMD_VBUS_ILIM    = 0x26,  /* 1 B: struct zsa_vbus_ilim — set the
+                                       * left half's VBUS input current limit.
+                                       * The STM32 is the charging policy
+                                       * point; the left nRF only detects CC
+                                       * capability (EVT_PWR_BUDGET) and
+                                       * executes this command. */
 
     /* nRF -> STM32: DFU commands (0x30-0x3F) */
     ZSA_MSG_DFU_ERASE        = 0x30,  /* 4 B: addr LE32 */
@@ -102,6 +108,9 @@ enum zsa_msg_type {
                                         * nRF's SET_REPORT(feature 0x04)
                                         * emulation. See struct
                                         * zsa_digitizer_mode below. */
+    ZSA_MSG_EVT_PWR_BUDGET   = 0x8A,  /* 2 B: struct zsa_pwr_budget — detected
+                                       * USB source current budget from CC1/CC2.
+                                       * Sent on CC/VBUS change and at link-up. */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -231,6 +240,26 @@ struct __attribute__((packed)) zsa_nav_present {
 /* ZSA_MSG_EVT_DIGITIZER_MODE (1 byte) */
 struct __attribute__((packed)) zsa_digitizer_mode {
     uint8_t mode; /* 0 = Mouse (boot default), 3 = Windows Precision Touchpad */
+};
+
+/* ZSA_MSG_EVT_PWR_BUDGET (2 bytes, LE) — detected USB source current budget.
+ * Carries mA (not a bool) so 1.5 A vs 3 A differentiation or a dynamic
+ * per-side split later needs no protocol change. Today the left's CC detect
+ * only distinguishes default vs high class, so it sends DEFAULT or HIGH. */
+#define ZSA_PWR_BUDGET_DEFAULT_MA  500u
+#define ZSA_PWR_BUDGET_HIGH_MA    1500u
+struct __attribute__((packed)) zsa_pwr_budget {
+    uint16_t budget_ma;
+};
+
+/* ZSA_MSG_CMD_VBUS_ILIM (1 byte) — level, not raw mA: the actual current
+ * values live in each half's devicetree (current-microamp). Lowering happens
+ * via the nPM1300's own auto-revert to the startup limit on VBUS removal;
+ * DEFAULT exists for future policy and is a no-op today. */
+#define ZSA_VBUS_ILIM_DEFAULT 0
+#define ZSA_VBUS_ILIM_HIGH    1
+struct __attribute__((packed)) zsa_vbus_ilim {
+    uint8_t level;
 };
 
 /* ---- DFU state / error codes ---- */
