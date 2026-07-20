@@ -66,6 +66,9 @@ static uint32_t last_pwr_maintain_ms = 0;
  * than including the board header to keep the module decoupled. */
 extern bool voyager_right_nrf_vbus_ilim_high(void);
 extern bool is_transport_connected(void);
+/* Bus ownership decision, made in the keyboard's matrix.c by probing the real
+ * expander. LED addressing and the grant must follow the same signal. */
+extern bool zsa_stm32_owns_right_bus(void);
 
 #ifdef RGB_MATRIX_ENABLE
 /* Tracks the last-reported left LED rail state so EVT_LED_RAIL only resyncs
@@ -83,6 +86,15 @@ static bool left_led_rail_on = true;
 #    define ZSA_LED_DRIVER_RIGHT 1
 
 static uint32_t last_right_led_flush_ms = 0;
+
+/* Point driver 1 at the real right-half chip while we own its bus, at the left
+ * nRF's mirror otherwise. Must track the same signal the matrix uses, or we
+ * would scan one device and light the other. */
+static void update_right_led_address(void) {
+    is31fl3731_set_i2c_address(ZSA_LED_DRIVER_RIGHT, zsa_stm32_owns_right_bus() ? IS31FL3731_I2C_ADDRESS_2 : ZSA_RIGHT_LED_MIRROR_ADDRESS);
+}
+#else
+static inline void update_right_led_address(void) {}
 #endif
 
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
@@ -382,6 +394,30 @@ static void send_usb_state(bool connected) {
     zsa_wireless_send_frame(ZSA_MSG_CMD_USB_STATE, (const uint8_t *)&payload, sizeof(payload));
 }
 
+/* Bus lease renewal. Resent unconditionally rather than on change: the right
+ * half releases the bus when grants stop arriving, so a dropped frame costs a
+ * brief stall, never two masters. Also re-syncs a left half that rebooted. */
+static void bus_grant_task(void) {
+    static uint32_t last_sent_ms;
+    static bool     last_granted;
+    static bool     primed;
+
+    bool granted = !zsa_stm32_owns_right_bus();
+
+    if (primed && granted == last_granted && timer_elapsed32(last_sent_ms) < ZSA_BUS_GRANT_INTERVAL_MS) {
+        return;
+    }
+    if (granted != last_granted || !primed) {
+        update_right_led_address();
+    }
+
+    struct zsa_bus_grant payload = { .granted = granted ? 1 : 0 };
+    zsa_wireless_send_frame(ZSA_MSG_CMD_BUS_GRANT, (const uint8_t *)&payload, sizeof(payload));
+    last_sent_ms = timer_read32();
+    last_granted = granted;
+    primed       = true;
+}
+
 static void idle_power_enter_step(enum zsa_idle_step step) {
 #ifdef RGB_MATRIX_ENABLE
     if (step >= ZSA_IDLE_LEDS_OFF && idle_step < ZSA_IDLE_LEDS_OFF) {
@@ -556,6 +592,9 @@ void bluetooth_init(void) {
     zsa_parser_init(&rx_parser);
     link_ready = false;
     last_link_up_ms = timer_read32();
+    /* Before rgb_matrix_init(), so a wireless cold boot never writes to the
+     * real 0x77 across the bus. */
+    update_right_led_address();
     zsa_rtt_init(); // TEMP DEBUG
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();
@@ -606,6 +645,7 @@ void bluetooth_task(void) {
     nav_announce_task();
 
     /* Maintain the adaptive-charging raise while a high-budget source is up */
+    bus_grant_task();
     power_budget_task();
 
     idle_power_task();

@@ -64,6 +64,15 @@ enum zsa_msg_type {
     /* 0x25 reserved — was ZSA_MSG_CMD_NAV_CPI (removed 2026-07). Wireless
      * trackball CPI rides the emulated-i2c 0x8D register snoop instead.
      * Do NOT reuse this ID. */
+    ZSA_MSG_CMD_BUS_GRANT    = 0x27,  /* 1 B: struct zsa_bus_grant — tell the
+                                       * right half whether it owns its own
+                                       * i2c bus. The STM32 is the arbiter: it
+                                       * withholds the grant whenever it can
+                                       * reach the real right-half expander
+                                       * over TRRS, so exactly one master ever
+                                       * drives that bus. Relayed onward by the
+                                       * left over ESB as
+                                       * WPP_REPLY_FLAG_BUS_GRANT. */
     ZSA_MSG_CMD_VBUS_ILIM    = 0x26,  /* 1 B: struct zsa_vbus_ilim — set the
                                        * left half's VBUS input current limit.
                                        * The STM32 is the charging policy
@@ -261,6 +270,19 @@ struct __attribute__((packed)) zsa_pwr_budget {
 struct __attribute__((packed)) zsa_vbus_ilim {
     uint8_t level;
 };
+
+/* ZSA_MSG_CMD_BUS_GRANT (1 byte) — a lease, not a latch. QMK resends it on
+ * every ownership re-evaluation; the right half releases the bus on its own if
+ * grants stop arriving, so a lost frame degrades to "STM32 owns the bus"
+ * rather than to two masters. */
+struct __attribute__((packed)) zsa_bus_grant {
+    uint8_t granted; /* 0 = STM32 owns the right half's i2c bus, 1 = right half does */
+};
+/* Resend cadence, and how long the left keeps relaying a grant without hearing
+ * another one. The left must expire too, or an STM32 that stops talking would
+ * leave the grant latched and the right on the bus forever. */
+#define ZSA_BUS_GRANT_INTERVAL_MS 100u
+#define ZSA_BUS_GRANT_TIMEOUT_MS  500u
 
 /* ---- DFU state / error codes ---- */
 
