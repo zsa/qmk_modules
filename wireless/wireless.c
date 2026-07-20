@@ -338,6 +338,10 @@ uint8_t zsa_wireless_battery_flags(void) {
     return nrf_battery_flags;
 }
 
+uint16_t zsa_wireless_power_budget_ma(void) {
+    return nrf_power_budget_ma;
+}
+
 void zsa_wireless_query_ble_status(void) {
     send_command(ZSA_MSG_QUERY_BLE_STATUS);
 }

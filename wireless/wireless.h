@@ -22,6 +22,10 @@ uint8_t zsa_wireless_battery_soc(void);
  * right half has never reported (e.g. powered down or not yet linked). */
 uint8_t zsa_wireless_battery_right_soc(void);
 uint8_t zsa_wireless_battery_flags(void);
+/* Detected USB source current budget in mA (EVT_PWR_BUDGET), between
+ * ZSA_PWR_BUDGET_DEFAULT_MA and the source's advertised capability. Reads as
+ * the default until a CC event reports otherwise. */
+uint16_t zsa_wireless_power_budget_ma(void);
 
 /* Send a query/command to the nRF */
 void zsa_wireless_query_ble_status(void);
