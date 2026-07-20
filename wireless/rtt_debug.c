@@ -71,6 +71,10 @@ void zsa_rtt_rx(uint8_t type) {
     }
 }
 
+void zsa_rtt_event3(const char *name, int a, int b, int c) {
+    SEGGER_RTT_printf(0, "EVT t=%u %s a=%d b=%d c=%d\n", (unsigned)timer_read32(), name, a, b, c);
+}
+
 void zsa_rtt_event(const char *name) {
     SEGGER_RTT_printf(0, "EVT t=%u %s\n", (unsigned)timer_read32(), name);
 }
@@ -105,6 +109,7 @@ void zsa_rtt_loop_tick(void) {
     }
     last_dump_ms = now;
 
+#ifdef ZSA_RTT_LOOP_STATS
     SEGGER_RTT_printf(0,
         "t=%u loops=%u dtmax=%uus | tx m=%u d=%u l=%u o=%u B=%u blkmax=%uus blksum=%uus"
         " | rx ps=%u bs=%u lr=%u o=%u | is31 n=%u durmax=%uus duravg=%uus gapmax=%ums\n",
@@ -115,6 +120,7 @@ void zsa_rtt_loop_tick(void) {
         (unsigned)w.fl_n, (unsigned)w.fl_dur_max_us,
         (unsigned)(w.fl_n ? w.fl_dur_sum_us / w.fl_n : 0),
         (unsigned)w.fl_gap_max_ms);
+#endif
 
     w = (typeof(w)){0};
 }

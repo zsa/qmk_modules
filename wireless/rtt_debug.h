@@ -20,6 +20,8 @@ void     zsa_rtt_tx(uint8_t type, uint16_t wire_len, uint32_t start_cycles);
 void     zsa_rtt_rx(uint8_t type);
 /* One-shot timestamped event marker. */
 void     zsa_rtt_event(const char *name);
+/* Event marker carrying three values. */
+void     zsa_rtt_event3(const char *name, int a, int b, int c);
 /* Record one rgb driver flush; start_cycles taken before the flush. */
 void     zsa_rtt_flush_probe(uint32_t start_cycles);
 #else
@@ -29,5 +31,6 @@ static inline uint32_t zsa_rtt_cycles(void) { return 0; }
 static inline void     zsa_rtt_tx(uint8_t type, uint16_t wire_len, uint32_t start_cycles) { (void)type; (void)wire_len; (void)start_cycles; }
 static inline void     zsa_rtt_rx(uint8_t type) { (void)type; }
 static inline void     zsa_rtt_event(const char *name) { (void)name; }
+static inline void     zsa_rtt_event3(const char *name, int a, int b, int c) { (void)name; (void)a; (void)b; (void)c; }
 static inline void     zsa_rtt_flush_probe(uint32_t start_cycles) { (void)start_cycles; }
 #endif
