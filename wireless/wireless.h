@@ -18,6 +18,9 @@ bool    zsa_wireless_ble_connected(void);
  * ZSA_MSG_EVT_PAIR_STATE (ACTIVE). */
 bool    zsa_wireless_discovery_active(void);
 uint8_t zsa_wireless_battery_soc(void);
+/* Right half SOC, relayed by the left nRF over the inter-half link. 0 when the
+ * right half has never reported (e.g. powered down or not yet linked). */
+uint8_t zsa_wireless_battery_right_soc(void);
 uint8_t zsa_wireless_battery_flags(void);
 
 /* Send a query/command to the nRF */

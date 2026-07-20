@@ -42,6 +42,7 @@ static bool    nrf_ble_connected = true;
 static uint8_t nrf_ble_device_idx;
 static bool    nrf_discovery_active; /* nRF advertising / awaiting pairing */
 static uint8_t nrf_battery_soc;
+static uint8_t nrf_battery_right_soc;
 static uint8_t nrf_battery_flags;
 static uint8_t nrf_led_state;
 
@@ -208,8 +209,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
         case ZSA_MSG_EVT_BATTERY:
             if (frame->len >= sizeof(struct zsa_battery_status)) {
                 const struct zsa_battery_status *b = (const struct zsa_battery_status *)frame->payload;
-                nrf_battery_soc   = b->soc;
-                nrf_battery_flags = b->flags;
+                nrf_battery_soc       = b->soc;
+                nrf_battery_right_soc = b->right_soc;
+                nrf_battery_flags     = b->flags;
             }
             break;
 
@@ -292,6 +294,10 @@ bool zsa_wireless_discovery_active(void) {
 
 uint8_t zsa_wireless_battery_soc(void) {
     return nrf_battery_soc;
+}
+
+uint8_t zsa_wireless_battery_right_soc(void) {
+    return nrf_battery_right_soc;
 }
 
 uint8_t zsa_wireless_battery_flags(void) {
