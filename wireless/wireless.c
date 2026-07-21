@@ -45,6 +45,7 @@ static uint8_t nrf_battery_soc;
 static uint8_t nrf_battery_right_soc;
 static uint8_t nrf_battery_flags;
 static uint8_t nrf_led_state;
+static bool    nrf_vbus_present;
 
 /* ---- Adaptive charging ---- *
  *
@@ -219,6 +220,8 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
              * until the nRF re-reports its real budget (sent right after
              * link-up). */
             nrf_power_budget_ma = ZSA_PWR_BUDGET_DEFAULT_MA;
+            /* nrf_vbus_present is left alone: the nRF re-reports it right
+             * after link-up via send_nrf_state(). */
             /* nRF rebooted (e.g. after ship mode) — clear ship flag */
             if (nrf_ship_mode) {
                 nrf_ship_mode = false;
@@ -323,6 +326,17 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 
+        case ZSA_MSG_EVT_VBUS_STATE:
+            if (frame->len >= sizeof(struct zsa_vbus_state)) {
+                const struct zsa_vbus_state *v = (const struct zsa_vbus_state *)frame->payload;
+                bool present = v->present != 0;
+                if (present != nrf_vbus_present) {
+                    nrf_vbus_present = present;
+                    zsa_wireless_vbus_changed(present);
+                }
+            }
+            break;
+
         default:
             break;
     }
@@ -352,6 +366,10 @@ uint8_t zsa_wireless_battery_flags(void) {
 
 uint16_t zsa_wireless_power_budget_ma(void) {
     return nrf_power_budget_ma;
+}
+
+bool zsa_wireless_vbus_present(void) {
+    return nrf_vbus_present;
 }
 
 void zsa_wireless_query_ble_status(void) {
@@ -455,6 +473,9 @@ static void idle_power_wake(void) {
  * re-init their sensor: the transport switch resets the shared i2c bus, which
  * leaves the sensor unconfigured without raising an i2c error. */
 __attribute__((weak)) void zsa_nav_transport_changed(void) {}
+
+/* Keyboards override this to drive their own USB D+ pullup from VBUS state. */
+__attribute__((weak)) void zsa_wireless_vbus_changed(bool present) { (void)present; }
 
 static void idle_power_task(void) {
     static bool     was_bluetooth  = false;

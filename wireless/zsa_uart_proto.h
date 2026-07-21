@@ -120,6 +120,10 @@ enum zsa_msg_type {
     ZSA_MSG_EVT_PWR_BUDGET   = 0x8A,  /* 2 B: struct zsa_pwr_budget — detected
                                        * USB source current budget from CC1/CC2.
                                        * Sent on CC/VBUS change and at link-up. */
+    ZSA_MSG_EVT_VBUS_STATE   = 0x8B,  /* 1 B: struct zsa_vbus_state — nPM1300
+                                       * VBUS presence. Gates the STM32's USB
+                                       * D+ pullup (PA15). Sent on VBUS change
+                                       * and at link-up. */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -260,6 +264,9 @@ struct __attribute__((packed)) zsa_digitizer_mode {
 struct __attribute__((packed)) zsa_pwr_budget {
     uint16_t budget_ma;
 };
+
+/* ZSA_MSG_EVT_VBUS_STATE (1 byte) */
+struct __attribute__((packed)) zsa_vbus_state { uint8_t present; };
 
 /* ZSA_MSG_CMD_VBUS_ILIM (1 byte) — level, not raw mA: the actual current
  * values live in each half's devicetree (current-microamp). Lowering happens

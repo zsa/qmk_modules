@@ -26,6 +26,13 @@ uint8_t zsa_wireless_battery_flags(void);
  * ZSA_PWR_BUDGET_DEFAULT_MA and the source's advertised capability. Reads as
  * the default until a CC event reports otherwise. */
 uint16_t zsa_wireless_power_budget_ma(void);
+/* True while the nRF reports VBUS present (EVT_VBUS_STATE), false at boot
+ * and once VBUS goes away. */
+bool zsa_wireless_vbus_present(void);
+
+/* Weak hook: keyboards override this to react to VBUS present/absent
+ * (EVT_VBUS_STATE), e.g. to drive their own USB D+ pullup. */
+void zsa_wireless_vbus_changed(bool present);
 
 /* Send a query/command to the nRF */
 void zsa_wireless_query_ble_status(void);
