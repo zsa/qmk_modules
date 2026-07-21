@@ -46,7 +46,7 @@ static uint8_t nrf_battery_right_soc;
 static uint8_t nrf_battery_flags;
 static uint8_t nrf_led_state;
 
-/* ---- Adaptive charging (wired mode) ---- *
+/* ---- Adaptive charging ---- *
  *
  * The left nRF reports the USB source's CC-detected current budget
  * (EVT_PWR_BUDGET); this module owns the charging policy: on a high-budget
@@ -602,11 +602,14 @@ void bluetooth_init(void) {
 #endif
 }
 
-/* Charging policy: while a high-budget source is attached in wired mode,
+/* Charging policy: while a high-budget source is attached (host or charger),
  * (re-)command both halves to raise their VBUS input limit. See the
  * adaptive-charging comment block at the top for the full rationale. */
 static void power_budget_task(void) {
-    if (!link_ready || !usb_connected_state()) {
+    /* Gated on the reported budget only, not usb_connected_state(): a wall
+     * charger supplies VBUS without ever enumerating. The nRF reports HIGH
+     * only while VBUS is present, so the budget alone implies power. */
+    if (!link_ready) {
         return;
     }
     if (nrf_power_budget_ma < ZSA_PWR_BUDGET_HIGH_MA) {
