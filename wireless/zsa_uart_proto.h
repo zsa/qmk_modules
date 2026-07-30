@@ -77,6 +77,8 @@ enum zsa_msg_type {
                                        * request (any key tap on the keyboard) */
     ZSA_MSG_CMD_BLE_DISCONNECT = 0x29,  /* 0 B: drop the active BLE link; the
                                          * nRF re-advertises afterwards */
+    ZSA_MSG_CMD_BLE_UNPAIR   = 0x2A,  /* 0 B: clear all bonds, refresh the BLE
+                                       * identity and re-advertise */
     ZSA_MSG_CMD_VBUS_ILIM    = 0x26,  /* 1 B: struct zsa_vbus_ilim — set the
                                        * left half's VBUS input current limit.
                                        * The STM32 is the charging policy

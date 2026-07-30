@@ -108,6 +108,11 @@
 #    define ZSA_PAIR_BREATHE_MIN 20
 #endif
 
+/* How long BT_UNPR must be held before the bond-clearing command is sent. */
+#ifndef ZSA_UNPAIR_HOLD_MS
+#    define ZSA_UNPAIR_HOLD_MS 3000
+#endif
+
 /* How long a reported pair state stays trusted. The nRF refreshes the level
  * every 1 s; past this the state is treated as IDLE so a dead link can never
  * leave keys suppressed. */

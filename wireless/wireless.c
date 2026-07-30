@@ -437,6 +437,10 @@ void zsa_wireless_cmd_ble_disconnect(void) {
     send_command(ZSA_MSG_CMD_BLE_DISCONNECT);
 }
 
+void zsa_wireless_cmd_ble_unpair(void) {
+    send_command(ZSA_MSG_CMD_BLE_UNPAIR);
+}
+
 bool zsa_wireless_link_ready(void) {
     return link_ready;
 }
@@ -696,6 +700,26 @@ bool rgb_matrix_indicators_kb(void) {
 }
 #endif /* RGB_MATRIX_ENABLE */
 
+/* ---- BT_UNPR hold ---- */
+
+static bool     unpair_held;
+static bool     unpair_sent;
+static uint32_t unpair_press_ms;
+
+/* Sends CMD_BLE_UNPAIR once BT_UNPR has been held ZSA_UNPAIR_HOLD_MS, at most
+ * once per press. Driven from bluetooth_task() because process_record only
+ * runs on key edges, never while a key stays down. */
+static void unpair_hold_task(void) {
+    if (!unpair_held || unpair_sent) {
+        return;
+    }
+    if (timer_elapsed32(unpair_press_ms) < ZSA_UNPAIR_HOLD_MS) {
+        return;
+    }
+    zsa_wireless_cmd_ble_unpair();
+    unpair_sent = true;
+}
+
 /* Auto-generated per-module hook, called from process_record_modules() before
  * process_record_kb/_user — returning false swallows the key before the keymap
  * sees it. Both edges are swallowed so no unmatched release leaks through. */
@@ -703,6 +727,8 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
     if (!process_record_wireless_kb(keycode, record)) {
         return false;
     }
+    /* Precedence: pairing confirm (any key accepts) > advertising suppression
+     * > module keycodes. */
     if (zsa_wireless_pair_confirm_pending()) {
         if (record->event.pressed) {
             zsa_wireless_cmd_pair_accept();
@@ -717,6 +743,18 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
         case BLE_DISCONNECT:
             if (record->event.pressed) {
                 zsa_wireless_cmd_ble_disconnect();
+            }
+            return false;
+        /* Core's BT_UNPR, left an unimplemented stub by process_connection().
+         * Modules run first, so this arm owns it. Destructive:
+         * unpair_hold_task() fires it after the hold. */
+        case QK_BLUETOOTH_UNPAIR:
+            if (record->event.pressed) {
+                unpair_held     = true;
+                unpair_sent     = false;
+                unpair_press_ms = timer_read32();
+            } else {
+                unpair_held = false;
             }
             return false;
     }
@@ -785,6 +823,9 @@ void bluetooth_task(void) {
 
     /* Announce our nav capabilities once the link is up (retries until acked) */
     nav_announce_task();
+
+    /* Fire BT_UNPR once its hold completes */
+    unpair_hold_task();
 
     /* Maintain the adaptive-charging raise while a high-budget source is up */
     bus_grant_task();
