@@ -38,12 +38,6 @@ static RGB status_hsv_to_rgb(HSV hsv) {
     };
 }
 
-/* Triangle wave, ramping 0->255->0 across a full 0-255 phase. Indistinguishable
- * from a sine at six LEDs and far cheaper. */
-static uint8_t status_tri(uint8_t t) {
-    return (t < 128) ? (uint8_t)(t * 2) : (uint8_t)((255 - t) * 2);
-}
-
 /* Sweep period from the detected source budget, linear between the two ends:
  * a slow charger breathes lazily, a high-budget one visibly hurries. */
 static uint16_t status_breathe_period_ms(void) {
@@ -85,7 +79,7 @@ void zsa_wireless_status_draw_gauge(uint8_t first_led, uint8_t soc) {
 
         if (v && charging) {
             /* Subtracting the per-LED lag walks the crest from left to right. */
-            uint8_t wave = status_tri((uint8_t)(phase - (uint8_t)(i * STATUS_BREATHE_LED_STEP)));
+            uint8_t wave = zsa_wireless_status_tri((uint8_t)(phase - (uint8_t)(i * STATUS_BREATHE_LED_STEP)));
             uint8_t amp  = (uint8_t)(ZSA_STATUS_BREATHE_MIN + ((uint16_t)(255 - ZSA_STATUS_BREATHE_MIN) * wave) / 255);
             v            = (uint8_t)(((uint16_t)v * amp) / 255);
         }

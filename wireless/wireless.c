@@ -7,7 +7,9 @@
  */
 
 #include <stddef.h>
+#include "quantum.h"
 #include "wireless.h"
+#include "status_layer.h"
 #include "bluetooth.h"
 #include "report.h"
 #include "uart.h"
@@ -38,14 +40,17 @@ static uint32_t last_link_up_ms = 0;
 
 /* ---- Cached nRF state ---- */
 
-static bool    nrf_ble_connected = true;
-static uint8_t nrf_ble_device_idx;
-static bool    nrf_discovery_active; /* nRF advertising / awaiting pairing */
-static uint8_t nrf_battery_soc;
-static uint8_t nrf_battery_right_soc;
-static uint8_t nrf_battery_flags;
-static uint8_t nrf_led_state;
-static bool    nrf_vbus_present;
+static bool     nrf_ble_connected = true;
+static uint8_t  nrf_ble_device_idx;
+static bool     nrf_discovery_active; /* nRF advertising / awaiting pairing */
+static uint8_t  nrf_pair_state;       /* enum zsa_pair_state_val, raw */
+static uint32_t last_pair_state_ms;
+static bool     pair_state_seen;      /* any EVT_PAIR_STATE received yet */
+static uint8_t  nrf_battery_soc;
+static uint8_t  nrf_battery_right_soc;
+static uint8_t  nrf_battery_flags;
+static uint8_t  nrf_led_state;
+static bool     nrf_vbus_present;
 
 /* ---- Adaptive charging ---- *
  *
@@ -198,6 +203,32 @@ static void nav_announce_task(void) {
     last_nav_announce_ms = timer_read32();
 }
 
+/* Fail-safe gate for key suppression and full-matrix rendering. The nRF
+ * refreshes the pair state every second; a lapse means the link is gone, and a
+ * stale state must never keep the keyboard mute. pair_state_seen covers boot,
+ * where last_pair_state_ms and timer_read32() are both near 0. */
+static bool pair_state_fresh(void) {
+    return link_ready && pair_state_seen && timer_elapsed32(last_pair_state_ms) < ZSA_PAIR_STATE_STALE_MS;
+}
+
+/* Advertising, freshness-gated. Distinct from zsa_wireless_discovery_active(),
+ * which reports the raw last-known value for the status LED. */
+static bool pair_advertising(void) {
+    return nrf_discovery_active && pair_state_fresh();
+}
+
+/* Confirm is a prompt that needs an answer: leave the idle steps and power the
+ * matrix back up so the blink is visible. Advertising deliberately does not do
+ * this — it runs continuously while unplugged and would pin the LEDs on. */
+static void pair_confirm_wake(void) {
+    if (idle_step != ZSA_IDLE_ACTIVE) {
+        idle_power_wake();
+    }
+#ifdef RGB_MATRIX_ENABLE
+    rgb_matrix_enable_noeeprom();
+#endif
+}
+
 static void handle_rx_frame(const struct zsa_frame *frame) {
     zsa_rtt_rx(frame->type); // TEMP DEBUG
     switch (frame->type) {
@@ -260,6 +291,12 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 const struct zsa_pair_state *p = (const struct zsa_pair_state *)frame->payload;
                 /* ACTIVE = advertising / awaiting pairing = discovery mode. */
                 nrf_discovery_active = (p->state == ZSA_PAIR_ACTIVE);
+                if (p->state == ZSA_PAIR_CONFIRM && nrf_pair_state != ZSA_PAIR_CONFIRM) {
+                    pair_confirm_wake();
+                }
+                nrf_pair_state     = p->state;
+                last_pair_state_ms = timer_read32();
+                pair_state_seen    = true;
             }
             break;
 
@@ -352,6 +389,10 @@ bool zsa_wireless_discovery_active(void) {
     return nrf_discovery_active;
 }
 
+bool zsa_wireless_pair_confirm_pending(void) {
+    return nrf_pair_state == ZSA_PAIR_CONFIRM && pair_state_fresh();
+}
+
 uint8_t zsa_wireless_battery_soc(void) {
     return nrf_battery_soc;
 }
@@ -386,6 +427,10 @@ void zsa_wireless_cmd_hibernate(void) {
 
 void zsa_wireless_cmd_pair(void) {
     send_command(ZSA_MSG_CMD_PAIR);
+}
+
+void zsa_wireless_cmd_pair_accept(void) {
+    send_command(ZSA_MSG_CMD_PAIR_ACCEPT);
 }
 
 bool zsa_wireless_link_ready(void) {
@@ -557,7 +602,8 @@ static void idle_power_task(void) {
             }
         }
 
-        /* handle_rx_frame may have woken us (e.g. EVT_BLE_STATUS) */
+        /* handle_rx_frame may have woken us (EVT_BLE_STATUS, or a
+         * EVT_PAIR_STATE carrying CONFIRM) */
         if (idle_step < ZSA_IDLE_LEDS_OFF) {
             break;
         }
@@ -605,6 +651,62 @@ bool is31fl3731_should_flush(uint8_t index) {
     return true;
 }
 #endif
+
+/* ---- Pairing / advertising indication ---- *
+ *
+ * Two mutually exclusive whole-matrix effects, plus key suppression while
+ * either is up: advertising breathes blue, a pending pairing request blinks
+ * blue and turns any keypress into an accept. */
+
+#ifdef RGB_MATRIX_ENABLE
+static void pair_paint(uint8_t level) {
+    rgb_matrix_set_color_all((uint8_t)(((uint16_t)ZSA_PAIR_COLOR_R * level) / 255),
+                             (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_G * level) / 255),
+                             (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_B * level) / 255));
+}
+
+static void pair_render_blink(void) {
+    uint32_t phase = timer_read32() % ZSA_PAIR_BLINK_MS;
+    pair_paint(phase < (ZSA_PAIR_BLINK_MS / 2) ? 255 : 0);
+}
+
+static void pair_render_breathe(void) {
+    uint8_t phase = (uint8_t)(((timer_read32() % ZSA_PAIR_BREATHE_MS) * 256) / ZSA_PAIR_BREATHE_MS);
+    uint8_t wave  = zsa_wireless_status_tri(phase);
+    pair_paint((uint8_t)(ZSA_PAIR_BREATHE_MIN + ((uint16_t)(255 - ZSA_PAIR_BREATHE_MIN) * wave) / 255));
+}
+
+/* Strong override of rgb_matrix.c's weak hook. Runs after the per-module
+ * indicators and before the keymap's, so returning true here keeps the keymap
+ * from overpainting the effect. */
+bool rgb_matrix_indicators_kb(void) {
+    if (zsa_wireless_pair_confirm_pending()) {
+        pair_render_blink();
+        return true;
+    }
+    if (pair_advertising()) {
+        pair_render_breathe();
+        return true;
+    }
+    return rgb_matrix_indicators_user();
+}
+#endif /* RGB_MATRIX_ENABLE */
+
+/* Auto-generated per-module hook, called from process_record_modules() before
+ * process_record_kb/_user — returning false swallows the key before the keymap
+ * sees it. Both edges are swallowed so no unmatched release leaks through. */
+bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
+    if (!process_record_wireless_kb(keycode, record)) {
+        return false;
+    }
+    if (zsa_wireless_pair_confirm_pending()) {
+        if (record->event.pressed) {
+            zsa_wireless_cmd_pair_accept();
+        }
+        return false;
+    }
+    return !pair_advertising();
+}
 
 /* ---- bluetooth.h weak function implementations ---- */
 

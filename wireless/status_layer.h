@@ -3,6 +3,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* Triangle wave, ramping 0->255->0 across a full 0-255 phase. Indistinguishable
+ * from a sine at these LED counts and far cheaper. */
+static inline uint8_t zsa_wireless_status_tri(uint8_t t) {
+    return (t < 128) ? (uint8_t)(t * 2) : (uint8_t)((255 - t) * 2);
+}
+
 /* BLE status overlay rendering.
  *
  * The keymap owns which layer is the status layer; this module owns what that

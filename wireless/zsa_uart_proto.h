@@ -73,6 +73,8 @@ enum zsa_msg_type {
                                        * drives that bus. Relayed onward by the
                                        * left over ESB as
                                        * WPP_REPLY_FLAG_BUS_GRANT. */
+    ZSA_MSG_CMD_PAIR_ACCEPT  = 0x28,  /* 0 B: user accepted the pending pairing
+                                       * request (any key tap on the keyboard) */
     ZSA_MSG_CMD_VBUS_ILIM    = 0x26,  /* 1 B: struct zsa_vbus_ilim — set the
                                        * left half's VBUS input current limit.
                                        * The STM32 is the charging policy
@@ -197,6 +199,8 @@ enum zsa_pair_state_val {
     ZSA_PAIR_ACTIVE = 1,
     ZSA_PAIR_DONE   = 2,
     ZSA_PAIR_FAILED = 3,
+    /* A pairing request is held awaiting user confirmation (key tap). */
+    ZSA_PAIR_CONFIRM = 4,
 };
 
 /* ZSA_MSG_EVT_LED_STATE (1 byte) */

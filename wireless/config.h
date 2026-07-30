@@ -78,3 +78,39 @@
 #ifndef ZSA_STATUS_BREATHE_FAST_MS
 #    define ZSA_STATUS_BREATHE_FAST_MS 1400
 #endif
+
+/* ---- BLE pairing / advertising indication (see wireless.c) ---- */
+
+/* Whole-matrix color used for both the advertising breathe and the
+ * pairing-confirm blink. Written as literal RGB levels, not scaled by the
+ * matrix brightness, so the prompt stays visible at any setting. */
+#ifndef ZSA_PAIR_COLOR_R
+#    define ZSA_PAIR_COLOR_R 0
+#endif
+#ifndef ZSA_PAIR_COLOR_G
+#    define ZSA_PAIR_COLOR_G 0
+#endif
+#ifndef ZSA_PAIR_COLOR_B
+#    define ZSA_PAIR_COLOR_B 255
+#endif
+
+/* Full on/off cycle of the pairing-confirm blink. */
+#ifndef ZSA_PAIR_BLINK_MS
+#    define ZSA_PAIR_BLINK_MS 1000
+#endif
+
+/* Full cycle of the advertising breathe, and the level it dips to at the
+ * trough (0-255). */
+#ifndef ZSA_PAIR_BREATHE_MS
+#    define ZSA_PAIR_BREATHE_MS 2400
+#endif
+#ifndef ZSA_PAIR_BREATHE_MIN
+#    define ZSA_PAIR_BREATHE_MIN 20
+#endif
+
+/* How long a reported pair state stays trusted. The nRF refreshes the level
+ * every 1 s; past this the state is treated as IDLE so a dead link can never
+ * leave keys suppressed. */
+#ifndef ZSA_PAIR_STATE_STALE_MS
+#    define ZSA_PAIR_STATE_STALE_MS 5000
+#endif

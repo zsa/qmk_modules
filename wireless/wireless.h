@@ -17,6 +17,10 @@ bool    zsa_wireless_ble_connected(void);
  * i.e. discoverable so a host can find and pair with it. Driven by
  * ZSA_MSG_EVT_PAIR_STATE (ACTIVE). */
 bool    zsa_wireless_discovery_active(void);
+/* True while a pairing request is waiting for the user to confirm it
+ * (ZSA_MSG_EVT_PAIR_STATE / ZSA_PAIR_CONFIRM). Mutually exclusive with
+ * discovery: the nRF reports CONFIRM in preference to ACTIVE. */
+bool    zsa_wireless_pair_confirm_pending(void);
 uint8_t zsa_wireless_battery_soc(void);
 /* Right half SOC, relayed by the left nRF over the inter-half link. 0 when the
  * right half has never reported (e.g. powered down or not yet linked). */
@@ -39,6 +43,9 @@ void zsa_wireless_query_ble_status(void);
 void zsa_wireless_query_battery(void);
 void zsa_wireless_cmd_hibernate(void);
 void zsa_wireless_cmd_pair(void);
+/* Accept the pending pairing request. Sent automatically on any keypress while
+ * zsa_wireless_pair_confirm_pending(). */
+void zsa_wireless_cmd_pair_accept(void);
 
 /* Idle power management */
 enum zsa_idle_step zsa_wireless_idle_step(void);
