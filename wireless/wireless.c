@@ -433,6 +433,10 @@ void zsa_wireless_cmd_pair_accept(void) {
     send_command(ZSA_MSG_CMD_PAIR_ACCEPT);
 }
 
+void zsa_wireless_cmd_ble_disconnect(void) {
+    send_command(ZSA_MSG_CMD_BLE_DISCONNECT);
+}
+
 bool zsa_wireless_link_ready(void) {
     return link_ready;
 }
@@ -705,7 +709,19 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
         }
         return false;
     }
-    return !pair_advertising();
+    if (pair_advertising()) {
+        return false;
+    }
+
+    switch (keycode) {
+        case BLE_DISCONNECT:
+            if (record->event.pressed) {
+                zsa_wireless_cmd_ble_disconnect();
+            }
+            return false;
+    }
+
+    return true;
 }
 
 /* ---- bluetooth.h weak function implementations ---- */

@@ -4,5 +4,11 @@
     "license": "GPL-2.0-or-later",
     "features": {
         "bluetooth": true
-    }
+    },
+    "keycodes": [
+        {
+            "key": "BLE_DISCONNECT",
+            "aliases": ["BT_DISC"]
+        }
+    ]
 }

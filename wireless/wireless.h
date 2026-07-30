@@ -46,6 +46,8 @@ void zsa_wireless_cmd_pair(void);
 /* Accept the pending pairing request. Sent automatically on any keypress while
  * zsa_wireless_pair_confirm_pending(). */
 void zsa_wireless_cmd_pair_accept(void);
+/* Drop the active BLE link, keeping the bond. The nRF re-advertises after. */
+void zsa_wireless_cmd_ble_disconnect(void);
 
 /* Idle power management */
 enum zsa_idle_step zsa_wireless_idle_step(void);
