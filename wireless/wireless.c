@@ -662,17 +662,21 @@ bool is31fl3731_should_flush(uint8_t index) {
 
 /* ---- Pairing / advertising indication ---- *
  *
- * Two mutually exclusive effects on a single LED (ZSA_PAIR_LED_INDEX):
+ * Two mutually exclusive effects on the LED run starting at ZSA_PAIR_LED_FIRST:
  * advertising breathes blue, a pending pairing request blinks blue and turns a
- * press of the key under that LED into an accept. The rest of the matrix
- * renders normally. */
+ * press of either key under those LEDs into an accept. All the LEDs get the
+ * same level, so they pulse in phase. The rest of the matrix renders
+ * normally. */
 
 #ifdef RGB_MATRIX_ENABLE
 static void pair_paint(uint8_t level) {
-    rgb_matrix_set_color(ZSA_PAIR_LED_INDEX,
-                         (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_R * level) / 255),
-                         (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_G * level) / 255),
-                         (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_B * level) / 255));
+    uint8_t r = (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_R * level) / 255);
+    uint8_t g = (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_G * level) / 255);
+    uint8_t b = (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_B * level) / 255);
+
+    for (uint8_t i = 0; i < ZSA_PAIR_LED_COUNT; i++) {
+        rgb_matrix_set_color(ZSA_PAIR_LED_FIRST + i, r, g, b);
+    }
 }
 
 static void pair_render_blink(void) {
@@ -688,7 +692,7 @@ static void pair_render_breathe(void) {
 
 /* Strong override of rgb_matrix.c's weak hook, which owns the call into the
  * keymap's hook. The keymap draws first and its return value is passed through
- * untouched; the indicator is then written over the one LED it owns. */
+ * untouched; the indicator is then written over the LEDs it owns. */
 bool rgb_matrix_indicators_kb(void) {
     bool res = rgb_matrix_indicators_user();
 
@@ -728,11 +732,12 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
     if (!process_record_wireless_kb(keycode, record)) {
         return false;
     }
-    /* The indicator key accepts a pending pairing request, matched by matrix
-     * position so the accept works whatever keycode is mapped there. Swallowed
-     * only while a confirm is pending; every other key, and this key at every
-     * other time (advertising included), passes through untouched. */
-    if (zsa_wireless_pair_confirm_pending() && record->event.key.row == ZSA_PAIR_KEY_ROW && record->event.key.col == ZSA_PAIR_KEY_COL) {
+    /* Either indicator key accepts a pending pairing request, matched by matrix
+     * position so the accept works whatever keycode is mapped there. One frame
+     * per press. Swallowed only while a confirm is pending; every other key, and
+     * these keys at every other time (advertising included), pass through
+     * untouched. */
+    if (zsa_wireless_pair_confirm_pending() && record->event.key.row == ZSA_PAIR_KEY_ROW && (record->event.key.col == ZSA_PAIR_KEY_COL_A || record->event.key.col == ZSA_PAIR_KEY_COL_B)) {
         if (record->event.pressed) {
             zsa_wireless_cmd_pair_accept();
         }

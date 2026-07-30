@@ -43,8 +43,9 @@ void zsa_wireless_query_ble_status(void);
 void zsa_wireless_query_battery(void);
 void zsa_wireless_cmd_hibernate(void);
 void zsa_wireless_cmd_pair(void);
-/* Accept the pending pairing request. Sent automatically when the key at
- * ZSA_PAIR_KEY_ROW/COL is pressed while zsa_wireless_pair_confirm_pending(). */
+/* Accept the pending pairing request. Sent automatically when either key at
+ * ZSA_PAIR_KEY_ROW/COL_A or COL_B is pressed while
+ * zsa_wireless_pair_confirm_pending(). */
 void zsa_wireless_cmd_pair_accept(void);
 /* Drop the active BLE link, keeping the bond. The nRF re-advertises after. */
 void zsa_wireless_cmd_ble_disconnect(void);
