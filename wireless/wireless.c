@@ -728,14 +728,15 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
         return false;
     }
     /* Precedence: pairing confirm (any key accepts) > advertising suppression
-     * > module keycodes. */
+     * > module keycodes. QK_BOOT and BT_UNPR skip the suppression, so DFU and
+     * bond clearing stay reachable with no cable attached. */
     if (zsa_wireless_pair_confirm_pending()) {
         if (record->event.pressed) {
             zsa_wireless_cmd_pair_accept();
         }
         return false;
     }
-    if (pair_advertising()) {
+    if (pair_advertising() && keycode != QK_BOOT && keycode != QK_BLUETOOTH_UNPAIR) {
         return false;
     }
 
