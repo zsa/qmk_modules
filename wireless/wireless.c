@@ -203,9 +203,9 @@ static void nav_announce_task(void) {
     last_nav_announce_ms = timer_read32();
 }
 
-/* Fail-safe gate for key suppression and full-matrix rendering. The nRF
- * refreshes the pair state every second; a lapse means the link is gone, and a
- * stale state must never keep the keyboard mute. pair_state_seen covers boot,
+/* Fail-safe gate for the indicator and the accept key. The nRF refreshes the
+ * pair state every second; a lapse means the link is gone, and a stale state
+ * must not leave the LED lit or the key swallowed. pair_state_seen covers boot,
  * where last_pair_state_ms and timer_read32() are both near 0. */
 static bool pair_state_fresh(void) {
     return link_ready && pair_state_seen && timer_elapsed32(last_pair_state_ms) < ZSA_PAIR_STATE_STALE_MS;
@@ -662,15 +662,17 @@ bool is31fl3731_should_flush(uint8_t index) {
 
 /* ---- Pairing / advertising indication ---- *
  *
- * Two mutually exclusive whole-matrix effects, plus key suppression while
- * either is up: advertising breathes blue, a pending pairing request blinks
- * blue and turns any keypress into an accept. */
+ * Two mutually exclusive effects on a single LED (ZSA_PAIR_LED_INDEX):
+ * advertising breathes blue, a pending pairing request blinks blue and turns a
+ * press of the key under that LED into an accept. The rest of the matrix
+ * renders normally. */
 
 #ifdef RGB_MATRIX_ENABLE
 static void pair_paint(uint8_t level) {
-    rgb_matrix_set_color_all((uint8_t)(((uint16_t)ZSA_PAIR_COLOR_R * level) / 255),
-                             (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_G * level) / 255),
-                             (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_B * level) / 255));
+    rgb_matrix_set_color(ZSA_PAIR_LED_INDEX,
+                         (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_R * level) / 255),
+                         (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_G * level) / 255),
+                         (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_B * level) / 255));
 }
 
 static void pair_render_blink(void) {
@@ -684,19 +686,18 @@ static void pair_render_breathe(void) {
     pair_paint((uint8_t)(ZSA_PAIR_BREATHE_MIN + ((uint16_t)(255 - ZSA_PAIR_BREATHE_MIN) * wave) / 255));
 }
 
-/* Strong override of rgb_matrix.c's weak hook. Runs after the per-module
- * indicators and before the keymap's, so returning true here keeps the keymap
- * from overpainting the effect. */
+/* Strong override of rgb_matrix.c's weak hook, which owns the call into the
+ * keymap's hook. The keymap draws first and its return value is passed through
+ * untouched; the indicator is then written over the one LED it owns. */
 bool rgb_matrix_indicators_kb(void) {
+    bool res = rgb_matrix_indicators_user();
+
     if (zsa_wireless_pair_confirm_pending()) {
         pair_render_blink();
-        return true;
-    }
-    if (pair_advertising()) {
+    } else if (pair_advertising()) {
         pair_render_breathe();
-        return true;
     }
-    return rgb_matrix_indicators_user();
+    return res;
 }
 #endif /* RGB_MATRIX_ENABLE */
 
@@ -727,16 +728,14 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
     if (!process_record_wireless_kb(keycode, record)) {
         return false;
     }
-    /* Precedence: pairing confirm (any key accepts) > advertising suppression
-     * > module keycodes. QK_BOOT and BT_UNPR skip the suppression, so DFU and
-     * bond clearing stay reachable with no cable attached. */
-    if (zsa_wireless_pair_confirm_pending()) {
+    /* The indicator key accepts a pending pairing request, matched by matrix
+     * position so the accept works whatever keycode is mapped there. Swallowed
+     * only while a confirm is pending; every other key, and this key at every
+     * other time (advertising included), passes through untouched. */
+    if (zsa_wireless_pair_confirm_pending() && record->event.key.row == ZSA_PAIR_KEY_ROW && record->event.key.col == ZSA_PAIR_KEY_COL) {
         if (record->event.pressed) {
             zsa_wireless_cmd_pair_accept();
         }
-        return false;
-    }
-    if (pair_advertising() && keycode != QK_BOOT && keycode != QK_BLUETOOTH_UNPAIR) {
         return false;
     }
 

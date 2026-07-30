@@ -81,7 +81,7 @@
 
 /* ---- BLE pairing / advertising indication (see wireless.c) ---- */
 
-/* Whole-matrix color used for both the advertising breathe and the
+/* Color of the indicator LED, used for both the advertising breathe and the
  * pairing-confirm blink. Written as literal RGB levels, not scaled by the
  * matrix brightness, so the prompt stays visible at any setting. */
 #ifndef ZSA_PAIR_COLOR_R
@@ -92,6 +92,19 @@
 #endif
 #ifndef ZSA_PAIR_COLOR_B
 #    define ZSA_PAIR_COLOR_B 255
+#endif
+
+/* The single LED that carries the indication, and the matrix position of the
+ * key under it. Defaults are the left half's inner thumb key. Only that key
+ * accepts a pending pairing request. */
+#ifndef ZSA_PAIR_LED_INDEX
+#    define ZSA_PAIR_LED_INDEX 25
+#endif
+#ifndef ZSA_PAIR_KEY_ROW
+#    define ZSA_PAIR_KEY_ROW 5
+#endif
+#ifndef ZSA_PAIR_KEY_COL
+#    define ZSA_PAIR_KEY_COL 1
 #endif
 
 /* Full on/off cycle of the pairing-confirm blink. */
@@ -114,8 +127,8 @@
 #endif
 
 /* How long a reported pair state stays trusted. The nRF refreshes the level
- * every 1 s; past this the state is treated as IDLE so a dead link can never
- * leave keys suppressed. */
+ * every 1 s; past this the state is treated as IDLE, so a dead link can't leave
+ * the indicator stuck on or the thumb key swallowed. */
 #ifndef ZSA_PAIR_STATE_STALE_MS
 #    define ZSA_PAIR_STATE_STALE_MS 5000
 #endif
