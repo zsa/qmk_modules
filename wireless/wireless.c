@@ -217,6 +217,24 @@ static bool pair_advertising(void) {
     return nrf_discovery_active && pair_state_fresh();
 }
 
+/* Keys swallowed by the confirm prompt, by matrix position. A key already down
+ * when the confirm arrived has no bit set, so its release still reaches the
+ * keymap. */
+static matrix_row_t pair_swallow[MATRIX_ROWS];
+static bool         pair_accept_sent;
+
+/* Drops swallow bits whose key is no longer down, so a press whose release
+ * event never arrived can't swallow an unrelated release later. Called only
+ * from bluetooth_task(), after matrix_task() has emitted this iteration's
+ * events — never from the idle loop, which scans without emitting any. */
+static void pair_swallow_reconcile(void) {
+    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+        if (pair_swallow[row]) {
+            pair_swallow[row] &= matrix_get_row(row);
+        }
+    }
+}
+
 /* Confirm is a prompt that needs an answer: leave the idle steps and power the
  * matrix back up so the blink is visible. Advertising deliberately does not do
  * this — it runs continuously while unplugged and would pin the LEDs on. */
@@ -293,6 +311,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 nrf_discovery_active = (p->state == ZSA_PAIR_ACTIVE);
                 if (p->state == ZSA_PAIR_CONFIRM && nrf_pair_state != ZSA_PAIR_CONFIRM) {
                     pair_confirm_wake();
+                    pair_accept_sent = false;
                 }
                 nrf_pair_state     = p->state;
                 last_pair_state_ms = timer_read32();
@@ -530,6 +549,48 @@ __attribute__((weak)) void zsa_nav_transport_changed(void) {}
 /* Keyboards override this to drive their own USB D+ pullup from VBUS state. */
 __attribute__((weak)) void zsa_wireless_vbus_changed(bool present) { (void)present; }
 
+/* ---- Pairing status LED ---- */
+
+/* Keyboards override this to drive their own status LED pin. */
+__attribute__((weak)) void zsa_wireless_pair_led(uint8_t state) { (void)state; }
+
+static bool    pair_led_owned;
+static uint8_t pair_led_last = ZSA_PAIR_LED_RELEASE;
+
+bool zsa_wireless_pair_led_active(void) {
+    return pair_led_owned;
+}
+
+/* Blinks the status LED: fast while a confirm is pending, slow while
+ * advertising, released otherwise. The phase comes from the absolute clock
+ * rather than elapsed-time toggling, so the blink rate is independent of how
+ * often this runs — it is called both from bluetooth_task() and from inside
+ * the idle slow-scan loop. */
+static void pair_led_task(void) {
+    bool    confirm = zsa_wireless_pair_confirm_pending();
+    bool    advert  = pair_advertising();
+    uint8_t want;
+
+    /* Confirm episode over — arm the next one. */
+    if (!confirm) {
+        pair_accept_sent = false;
+    }
+
+    if (confirm || advert) {
+        uint32_t half  = confirm ? ZSA_PAIR_LED_FAST_MS : ZSA_PAIR_LED_SLOW_MS;
+        want           = ((timer_read32() / half) & 1u) ? ZSA_PAIR_LED_ON : ZSA_PAIR_LED_OFF;
+        pair_led_owned = true;
+    } else {
+        want           = ZSA_PAIR_LED_RELEASE;
+        pair_led_owned = false;
+    }
+
+    if (want != pair_led_last) {
+        pair_led_last = want;
+        zsa_wireless_pair_led(want);
+    }
+}
+
 static void idle_power_task(void) {
     static bool     was_bluetooth  = false;
     static uint32_t bt_switch_time = 0;
@@ -610,6 +671,10 @@ static void idle_power_task(void) {
             }
         }
 
+        /* This loop never returns to the QMK task pipeline, so drive the
+         * status LED from here too. */
+        pair_led_task();
+
         /* handle_rx_frame may have woken us (EVT_BLE_STATUS, or a
          * EVT_PAIR_STATE carrying CONFIRM) */
         if (idle_step < ZSA_IDLE_LEDS_OFF) {
@@ -660,13 +725,12 @@ bool is31fl3731_should_flush(uint8_t index) {
 }
 #endif
 
-/* ---- Pairing / advertising indication ---- *
+/* ---- Pairing indication ---- *
  *
- * Two mutually exclusive effects on the LED run starting at ZSA_PAIR_LED_FIRST:
- * advertising breathes blue, a pending pairing request blinks blue and turns a
- * press of either key under those LEDs into an accept. All the LEDs get the
- * same level, so they pulse in phase. The rest of the matrix renders
- * normally. */
+ * A pending pairing request blinks the LED run starting at ZSA_PAIR_LED_FIRST
+ * blue, and any key on the rows it covers accepts. All the LEDs get the same
+ * level, so they blink in phase. The rest of the matrix renders normally, and
+ * advertising is carried by the green status LED alone (pair_led_task). */
 
 #ifdef RGB_MATRIX_ENABLE
 static void pair_paint(uint8_t level) {
@@ -684,12 +748,6 @@ static void pair_render_blink(void) {
     pair_paint(phase < (ZSA_PAIR_BLINK_MS / 2) ? 255 : 0);
 }
 
-static void pair_render_breathe(void) {
-    uint8_t phase = (uint8_t)(((timer_read32() % ZSA_PAIR_BREATHE_MS) * 256) / ZSA_PAIR_BREATHE_MS);
-    uint8_t wave  = zsa_wireless_status_tri(phase);
-    pair_paint((uint8_t)(ZSA_PAIR_BREATHE_MIN + ((uint16_t)(255 - ZSA_PAIR_BREATHE_MIN) * wave) / 255));
-}
-
 /* Strong override of rgb_matrix.c's weak hook, which owns the call into the
  * keymap's hook. The keymap draws first and its return value is passed through
  * untouched; the indicator is then written over the LEDs it owns. */
@@ -698,8 +756,6 @@ bool rgb_matrix_indicators_kb(void) {
 
     if (zsa_wireless_pair_confirm_pending()) {
         pair_render_blink();
-    } else if (pair_advertising()) {
-        pair_render_breathe();
     }
     return res;
 }
@@ -725,22 +781,51 @@ static void unpair_hold_task(void) {
     unpair_sent = true;
 }
 
+/* Auto-generated per-module hook, called from pre_process_record_modules(),
+ * ahead of the tap-hold state machine — a press swallowed here never enters it.
+ *
+ * While a confirm is pending every key is swallowed, so nothing types into the
+ * host's pairing dialog, and a press on the left half (rows below
+ * ZSA_PAIR_ACCEPT_ROWS) sends one accept for the request. Matched by matrix
+ * position, so it works whatever keycode is mapped there. Releases are
+ * swallowed only for keys whose press was, leaving a key held from before the
+ * confirm free to unregister itself. */
+bool pre_process_record_wireless(uint16_t keycode, keyrecord_t *record) {
+    if (!pre_process_record_wireless_kb(keycode, record)) {
+        return false;
+    }
+
+    uint8_t row = record->event.key.row;
+    uint8_t col = record->event.key.col;
+    /* Encoders and other virtual events carry no matrix position. */
+    if (row >= MATRIX_ROWS || col >= MATRIX_COLS) {
+        return true;
+    }
+
+    if (record->event.pressed) {
+        if (!zsa_wireless_pair_confirm_pending()) {
+            return true;
+        }
+        pair_swallow[row] |= ((matrix_row_t)1 << col);
+        if (row < ZSA_PAIR_ACCEPT_ROWS && !pair_accept_sent) {
+            zsa_wireless_cmd_pair_accept();
+            pair_accept_sent = true;
+        }
+        return false;
+    }
+
+    if (pair_swallow[row] & ((matrix_row_t)1 << col)) {
+        pair_swallow[row] &= ~((matrix_row_t)1 << col);
+        return false;
+    }
+    return true;
+}
+
 /* Auto-generated per-module hook, called from process_record_modules() before
  * process_record_kb/_user — returning false swallows the key before the keymap
  * sees it. Both edges are swallowed so no unmatched release leaks through. */
 bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
     if (!process_record_wireless_kb(keycode, record)) {
-        return false;
-    }
-    /* Either indicator key accepts a pending pairing request, matched by matrix
-     * position so the accept works whatever keycode is mapped there. One frame
-     * per press. Swallowed only while a confirm is pending; every other key, and
-     * these keys at every other time (advertising included), pass through
-     * untouched. */
-    if (zsa_wireless_pair_confirm_pending() && record->event.key.row == ZSA_PAIR_KEY_ROW && (record->event.key.col == ZSA_PAIR_KEY_COL_A || record->event.key.col == ZSA_PAIR_KEY_COL_B)) {
-        if (record->event.pressed) {
-            zsa_wireless_cmd_pair_accept();
-        }
         return false;
     }
 
@@ -835,6 +920,9 @@ void bluetooth_task(void) {
     /* Maintain the adaptive-charging raise while a high-budget source is up */
     bus_grant_task();
     power_budget_task();
+
+    pair_swallow_reconcile();
+    pair_led_task();
 
     idle_power_task();
 }

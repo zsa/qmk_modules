@@ -38,14 +38,30 @@ bool zsa_wireless_vbus_present(void);
  * (EVT_VBUS_STATE), e.g. to drive their own USB D+ pullup. */
 void zsa_wireless_vbus_changed(bool present);
 
+/* State of the pairing status LED. RELEASE hands the pin back to whatever
+ * else drives it. */
+enum zsa_pair_led_state {
+    ZSA_PAIR_LED_RELEASE = 0,
+    ZSA_PAIR_LED_OFF     = 1,
+    ZSA_PAIR_LED_ON      = 2,
+};
+
+/* Weak hook: keyboards override this to drive their own status LED pin. The
+ * module owns the blink phase and only calls on a change. */
+void zsa_wireless_pair_led(uint8_t state);
+
+/* True while the module is driving the pairing status LED. Keyboards check
+ * this before writing that pin for any other purpose. */
+bool zsa_wireless_pair_led_active(void);
+
 /* Send a query/command to the nRF */
 void zsa_wireless_query_ble_status(void);
 void zsa_wireless_query_battery(void);
 void zsa_wireless_cmd_hibernate(void);
 void zsa_wireless_cmd_pair(void);
-/* Accept the pending pairing request. Sent automatically when either key at
- * ZSA_PAIR_KEY_ROW/COL_A or COL_B is pressed while
- * zsa_wireless_pair_confirm_pending(). */
+/* Accept the pending pairing request. Sent automatically, once per request,
+ * when any key on a row below ZSA_PAIR_ACCEPT_ROWS (the left half) is pressed
+ * while zsa_wireless_pair_confirm_pending(). */
 void zsa_wireless_cmd_pair_accept(void);
 /* Drop the active BLE link, keeping the bond. The nRF re-advertises after. */
 void zsa_wireless_cmd_ble_disconnect(void);
