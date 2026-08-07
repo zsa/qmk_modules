@@ -13,14 +13,14 @@ enum zsa_idle_step {
 
 /* Cached nRF state, updated via UART events */
 bool    zsa_wireless_ble_connected(void);
-/* True while the nRF is in BLE discovery mode (advertising / awaiting pairing),
- * i.e. discoverable so a host can find and pair with it. Driven by
- * ZSA_MSG_EVT_PAIR_STATE (ACTIVE). */
+/* True while the nRF is discoverable, i.e. advertising as general-discoverable
+ * so a new host can find and pair with it. Driven by ZSA_MSG_EVT_PAIR_STATE
+ * (ACTIVE). */
 bool    zsa_wireless_discovery_active(void);
-/* True while a pairing request is waiting for the user to confirm it
- * (ZSA_MSG_EVT_PAIR_STATE / ZSA_PAIR_CONFIRM). Mutually exclusive with
- * discovery: the nRF reports CONFIRM in preference to ACTIVE. */
-bool    zsa_wireless_pair_confirm_pending(void);
+/* True while an SMP pairing is actually running (ZSA_MSG_EVT_PAIR_STATE /
+ * ZSA_PAIR_CONFIRM). Mutually exclusive with discovery: the nRF reports CONFIRM
+ * in preference to ACTIVE. */
+bool    zsa_wireless_pairing_active(void);
 uint8_t zsa_wireless_battery_soc(void);
 /* Right half SOC, relayed by the left nRF over the inter-half link. 0 when the
  * right half has never reported (e.g. powered down or not yet linked). */
@@ -58,11 +58,9 @@ bool zsa_wireless_pair_led_active(void);
 void zsa_wireless_query_ble_status(void);
 void zsa_wireless_query_battery(void);
 void zsa_wireless_cmd_hibernate(void);
+/* Enter pairing mode: the nRF advertises as general-discoverable for its
+ * pairing window. Sent by BLE_PAIR_MODE. */
 void zsa_wireless_cmd_pair(void);
-/* Accept the pending pairing request. Sent automatically, once per request,
- * when any key on a row below ZSA_PAIR_ACCEPT_ROWS (the left half) is pressed
- * while zsa_wireless_pair_confirm_pending(). */
-void zsa_wireless_cmd_pair_accept(void);
 /* Drop the active BLE link, keeping the bond. The nRF re-advertises after. */
 void zsa_wireless_cmd_ble_disconnect(void);
 /* Clear every BLE bond and refresh the identity. Sent by BT_UNPR after a

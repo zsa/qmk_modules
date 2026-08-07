@@ -42,7 +42,7 @@ static uint32_t last_link_up_ms = 0;
 
 static bool     nrf_ble_connected = true;
 static uint8_t  nrf_ble_device_idx;
-static bool     nrf_discovery_active; /* nRF advertising / awaiting pairing */
+static bool     nrf_discovery_active; /* nRF discoverable (pairing mode) */
 static uint8_t  nrf_pair_state;       /* enum zsa_pair_state_val, raw */
 static uint32_t last_pair_state_ms;
 static bool     pair_state_seen;      /* any EVT_PAIR_STATE received yet */
@@ -203,41 +203,23 @@ static void nav_announce_task(void) {
     last_nav_announce_ms = timer_read32();
 }
 
-/* Fail-safe gate for the indicator and the accept key. The nRF refreshes the
- * pair state every second; a lapse means the link is gone, and a stale state
- * must not leave the LED lit or the key swallowed. pair_state_seen covers boot,
- * where last_pair_state_ms and timer_read32() are both near 0. */
+/* Fail-safe gate for the indicators. The nRF refreshes the pair state every
+ * second; a lapse means the link is gone, and a stale state must not leave the
+ * LED lit. pair_state_seen covers boot, where last_pair_state_ms and
+ * timer_read32() are both near 0. */
 static bool pair_state_fresh(void) {
     return link_ready && pair_state_seen && timer_elapsed32(last_pair_state_ms) < ZSA_PAIR_STATE_STALE_MS;
 }
 
-/* Advertising, freshness-gated. Distinct from zsa_wireless_discovery_active(),
- * which reports the raw last-known value for the status LED. */
+/* Discoverable, freshness-gated. Distinct from zsa_wireless_discovery_active(),
+ * which reports the raw last-known value. */
 static bool pair_advertising(void) {
     return nrf_discovery_active && pair_state_fresh();
 }
 
-/* Keys swallowed by the confirm prompt, by matrix position. A key already down
- * when the confirm arrived has no bit set, so its release still reaches the
- * keymap. */
-static matrix_row_t pair_swallow[MATRIX_ROWS];
-static bool         pair_accept_sent;
-
-/* Drops swallow bits whose key is no longer down, so a press whose release
- * event never arrived can't swallow an unrelated release later. Called only
- * from bluetooth_task(), after matrix_task() has emitted this iteration's
- * events — never from the idle loop, which scans without emitting any. */
-static void pair_swallow_reconcile(void) {
-    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
-        if (pair_swallow[row]) {
-            pair_swallow[row] &= matrix_get_row(row);
-        }
-    }
-}
-
-/* Confirm is a prompt that needs an answer: leave the idle steps and power the
- * matrix back up so the blink is visible. Advertising deliberately does not do
- * this — it runs continuously while unplugged and would pin the LEDs on. */
+/* A pairing starting is worth showing: leave the idle steps and power the matrix
+ * back up. Discoverability deliberately does not do this — it can run for two
+ * minutes and would pin the LEDs on. */
 static void pair_confirm_wake(void) {
     if (idle_step != ZSA_IDLE_ACTIVE) {
         idle_power_wake();
@@ -307,11 +289,11 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
         case ZSA_MSG_EVT_PAIR_STATE:
             if (frame->len >= sizeof(struct zsa_pair_state)) {
                 const struct zsa_pair_state *p = (const struct zsa_pair_state *)frame->payload;
-                /* ACTIVE = advertising / awaiting pairing = discovery mode. */
+                /* ACTIVE = discoverable (pairing mode advertising). */
                 nrf_discovery_active = (p->state == ZSA_PAIR_ACTIVE);
+                /* CONFIRM = an SMP pairing is running. */
                 if (p->state == ZSA_PAIR_CONFIRM && nrf_pair_state != ZSA_PAIR_CONFIRM) {
                     pair_confirm_wake();
-                    pair_accept_sent = false;
                 }
                 nrf_pair_state     = p->state;
                 last_pair_state_ms = timer_read32();
@@ -408,7 +390,7 @@ bool zsa_wireless_discovery_active(void) {
     return nrf_discovery_active;
 }
 
-bool zsa_wireless_pair_confirm_pending(void) {
+bool zsa_wireless_pairing_active(void) {
     return nrf_pair_state == ZSA_PAIR_CONFIRM && pair_state_fresh();
 }
 
@@ -446,10 +428,6 @@ void zsa_wireless_cmd_hibernate(void) {
 
 void zsa_wireless_cmd_pair(void) {
     send_command(ZSA_MSG_CMD_PAIR);
-}
-
-void zsa_wireless_cmd_pair_accept(void) {
-    send_command(ZSA_MSG_CMD_PAIR_ACCEPT);
 }
 
 void zsa_wireless_cmd_ble_disconnect(void) {
@@ -561,23 +539,18 @@ bool zsa_wireless_pair_led_active(void) {
     return pair_led_owned;
 }
 
-/* Blinks the status LED: fast while a confirm is pending, slow while
- * advertising, released otherwise. The phase comes from the absolute clock
+/* Blinks the status LED: fast while a pairing is in progress, slow while
+ * discoverable, released otherwise. The phase comes from the absolute clock
  * rather than elapsed-time toggling, so the blink rate is independent of how
  * often this runs — it is called both from bluetooth_task() and from inside
  * the idle slow-scan loop. */
 static void pair_led_task(void) {
-    bool    confirm = zsa_wireless_pair_confirm_pending();
+    bool    pairing = zsa_wireless_pairing_active();
     bool    advert  = pair_advertising();
     uint8_t want;
 
-    /* Confirm episode over — arm the next one. */
-    if (!confirm) {
-        pair_accept_sent = false;
-    }
-
-    if (confirm || advert) {
-        uint32_t half  = confirm ? ZSA_PAIR_LED_FAST_MS : ZSA_PAIR_LED_SLOW_MS;
+    if (pairing || advert) {
+        uint32_t half  = pairing ? ZSA_PAIR_LED_FAST_MS : ZSA_PAIR_LED_SLOW_MS;
         want           = ((timer_read32() / half) & 1u) ? ZSA_PAIR_LED_ON : ZSA_PAIR_LED_OFF;
         pair_led_owned = true;
     } else {
@@ -725,42 +698,6 @@ bool is31fl3731_should_flush(uint8_t index) {
 }
 #endif
 
-/* ---- Pairing indication ---- *
- *
- * A pending pairing request blinks the LED run starting at ZSA_PAIR_LED_FIRST
- * blue, and any key on the rows it covers accepts. All the LEDs get the same
- * level, so they blink in phase. The rest of the matrix renders normally, and
- * advertising is carried by the green status LED alone (pair_led_task). */
-
-#ifdef RGB_MATRIX_ENABLE
-static void pair_paint(uint8_t level) {
-    uint8_t r = (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_R * level) / 255);
-    uint8_t g = (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_G * level) / 255);
-    uint8_t b = (uint8_t)(((uint16_t)ZSA_PAIR_COLOR_B * level) / 255);
-
-    for (uint8_t i = 0; i < ZSA_PAIR_LED_COUNT; i++) {
-        rgb_matrix_set_color(ZSA_PAIR_LED_FIRST + i, r, g, b);
-    }
-}
-
-static void pair_render_blink(void) {
-    uint32_t phase = timer_read32() % ZSA_PAIR_BLINK_MS;
-    pair_paint(phase < (ZSA_PAIR_BLINK_MS / 2) ? 255 : 0);
-}
-
-/* Strong override of rgb_matrix.c's weak hook, which owns the call into the
- * keymap's hook. The keymap draws first and its return value is passed through
- * untouched; the indicator is then written over the LEDs it owns. */
-bool rgb_matrix_indicators_kb(void) {
-    bool res = rgb_matrix_indicators_user();
-
-    if (zsa_wireless_pair_confirm_pending()) {
-        pair_render_blink();
-    }
-    return res;
-}
-#endif /* RGB_MATRIX_ENABLE */
-
 /* ---- BT_UNPR hold ---- */
 
 static bool     unpair_held;
@@ -781,46 +718,6 @@ static void unpair_hold_task(void) {
     unpair_sent = true;
 }
 
-/* Auto-generated per-module hook, called from pre_process_record_modules(),
- * ahead of the tap-hold state machine — a press swallowed here never enters it.
- *
- * While a confirm is pending every key is swallowed, so nothing types into the
- * host's pairing dialog, and a press on the left half (rows below
- * ZSA_PAIR_ACCEPT_ROWS) sends one accept for the request. Matched by matrix
- * position, so it works whatever keycode is mapped there. Releases are
- * swallowed only for keys whose press was, leaving a key held from before the
- * confirm free to unregister itself. */
-bool pre_process_record_wireless(uint16_t keycode, keyrecord_t *record) {
-    if (!pre_process_record_wireless_kb(keycode, record)) {
-        return false;
-    }
-
-    uint8_t row = record->event.key.row;
-    uint8_t col = record->event.key.col;
-    /* Encoders and other virtual events carry no matrix position. */
-    if (row >= MATRIX_ROWS || col >= MATRIX_COLS) {
-        return true;
-    }
-
-    if (record->event.pressed) {
-        if (!zsa_wireless_pair_confirm_pending()) {
-            return true;
-        }
-        pair_swallow[row] |= ((matrix_row_t)1 << col);
-        if (row < ZSA_PAIR_ACCEPT_ROWS && !pair_accept_sent) {
-            zsa_wireless_cmd_pair_accept();
-            pair_accept_sent = true;
-        }
-        return false;
-    }
-
-    if (pair_swallow[row] & ((matrix_row_t)1 << col)) {
-        pair_swallow[row] &= ~((matrix_row_t)1 << col);
-        return false;
-    }
-    return true;
-}
-
 /* Auto-generated per-module hook, called from process_record_modules() before
  * process_record_kb/_user — returning false swallows the key before the keymap
  * sees it. Both edges are swallowed so no unmatched release leaks through. */
@@ -833,6 +730,12 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
         case BLE_DISCONNECT:
             if (record->event.pressed) {
                 zsa_wireless_cmd_ble_disconnect();
+            }
+            return false;
+        /* Makes the board discoverable for the nRF's pairing-mode window. */
+        case BLE_PAIR_MODE:
+            if (record->event.pressed) {
+                zsa_wireless_cmd_pair();
             }
             return false;
         /* Core's BT_UNPR, left an unimplemented stub by process_connection().
@@ -921,7 +824,6 @@ void bluetooth_task(void) {
     bus_grant_task();
     power_budget_task();
 
-    pair_swallow_reconcile();
     pair_led_task();
 
     idle_power_task();

@@ -79,43 +79,10 @@
 #    define ZSA_STATUS_BREATHE_FAST_MS 1400
 #endif
 
-/* ---- BLE pairing / advertising indication (see wireless.c) ---- */
+/* ---- BLE pairing / discoverability indication (see wireless.c) ---- */
 
-/* Color of the indicator LEDs (#28a5cf), used for the pairing-confirm blink.
- * Written as literal RGB levels, not scaled by the matrix brightness, so the
- * prompt stays visible at any setting. */
-#ifndef ZSA_PAIR_COLOR_R
-#    define ZSA_PAIR_COLOR_R 0x28
-#endif
-#ifndef ZSA_PAIR_COLOR_G
-#    define ZSA_PAIR_COLOR_G 0xA5
-#endif
-#ifndef ZSA_PAIR_COLOR_B
-#    define ZSA_PAIR_COLOR_B 0xCF
-#endif
-
-/* The run of consecutive LEDs that carries the indication. Defaults to the
- * whole left half. */
-#ifndef ZSA_PAIR_LED_FIRST
-#    define ZSA_PAIR_LED_FIRST 0
-#endif
-#ifndef ZSA_PAIR_LED_COUNT
-#    define ZSA_PAIR_LED_COUNT 26
-#endif
-
-/* Matrix rows whose keys accept a pending pairing request. The first half of
- * the rows is the left half. */
-#ifndef ZSA_PAIR_ACCEPT_ROWS
-#    define ZSA_PAIR_ACCEPT_ROWS (MATRIX_ROWS / 2)
-#endif
-
-/* Full on/off cycle of the pairing-confirm blink. */
-#ifndef ZSA_PAIR_BLINK_MS
-#    define ZSA_PAIR_BLINK_MS 1000
-#endif
-
-/* Half-period of the green status LED blink: slow while advertising, fast
- * while a pairing request is waiting to be confirmed. */
+/* Half-period of the green status LED blink: slow while discoverable, fast
+ * while an SMP pairing is running. */
 #ifndef ZSA_PAIR_LED_SLOW_MS
 #    define ZSA_PAIR_LED_SLOW_MS 500
 #endif
@@ -130,7 +97,7 @@
 
 /* How long a reported pair state stays trusted. The nRF refreshes the level
  * every 1 s; past this the state is treated as IDLE, so a dead link can't leave
- * the indicators stuck on or keys swallowed. */
+ * the indicators stuck on. */
 #ifndef ZSA_PAIR_STATE_STALE_MS
 #    define ZSA_PAIR_STATE_STALE_MS 5000
 #endif
