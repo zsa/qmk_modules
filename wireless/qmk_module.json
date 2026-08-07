@@ -9,6 +9,10 @@
         {
             "key": "BLE_DISCONNECT",
             "aliases": ["BT_DISC"]
+        },
+        {
+            "key": "BLE_PAIR_MODE",
+            "aliases": ["BT_PAIR"]
         }
     ]
 }

@@ -79,52 +79,15 @@
 #    define ZSA_STATUS_BREATHE_FAST_MS 1400
 #endif
 
-/* ---- BLE pairing / advertising indication (see wireless.c) ---- */
+/* ---- BLE pairing / discoverability indication (see wireless.c) ---- */
 
-/* Color of the indicator LEDs (#28a5cf), used for both the advertising breathe
- * and the pairing-confirm blink. Written as literal RGB levels, not scaled by
- * the matrix brightness, so the prompt stays visible at any setting. */
-#ifndef ZSA_PAIR_COLOR_R
-#    define ZSA_PAIR_COLOR_R 0x28
+/* Half-period of the green status LED blink: slow while discoverable, fast
+ * while an SMP pairing is running. */
+#ifndef ZSA_PAIR_LED_SLOW_MS
+#    define ZSA_PAIR_LED_SLOW_MS 500
 #endif
-#ifndef ZSA_PAIR_COLOR_G
-#    define ZSA_PAIR_COLOR_G 0xA5
-#endif
-#ifndef ZSA_PAIR_COLOR_B
-#    define ZSA_PAIR_COLOR_B 0xCF
-#endif
-
-/* The run of consecutive LEDs that carries the indication, and the matrix
- * positions of the keys under them. Defaults are the left half's two thumb
- * keys, both on one row. Either key accepts a pending pairing request. */
-#ifndef ZSA_PAIR_LED_FIRST
-#    define ZSA_PAIR_LED_FIRST 24
-#endif
-#ifndef ZSA_PAIR_LED_COUNT
-#    define ZSA_PAIR_LED_COUNT 2
-#endif
-#ifndef ZSA_PAIR_KEY_ROW
-#    define ZSA_PAIR_KEY_ROW 5
-#endif
-#ifndef ZSA_PAIR_KEY_COL_A
-#    define ZSA_PAIR_KEY_COL_A 0
-#endif
-#ifndef ZSA_PAIR_KEY_COL_B
-#    define ZSA_PAIR_KEY_COL_B 1
-#endif
-
-/* Full on/off cycle of the pairing-confirm blink. */
-#ifndef ZSA_PAIR_BLINK_MS
-#    define ZSA_PAIR_BLINK_MS 1000
-#endif
-
-/* Full cycle of the advertising breathe, and the level it dips to at the
- * trough (0-255). */
-#ifndef ZSA_PAIR_BREATHE_MS
-#    define ZSA_PAIR_BREATHE_MS 2400
-#endif
-#ifndef ZSA_PAIR_BREATHE_MIN
-#    define ZSA_PAIR_BREATHE_MIN 20
+#ifndef ZSA_PAIR_LED_FAST_MS
+#    define ZSA_PAIR_LED_FAST_MS 125
 #endif
 
 /* How long BT_UNPR must be held before the bond-clearing command is sent. */
@@ -134,7 +97,7 @@
 
 /* How long a reported pair state stays trusted. The nRF refreshes the level
  * every 1 s; past this the state is treated as IDLE, so a dead link can't leave
- * the indicator stuck on or the thumb key swallowed. */
+ * the indicators stuck on. */
 #ifndef ZSA_PAIR_STATE_STALE_MS
 #    define ZSA_PAIR_STATE_STALE_MS 5000
 #endif

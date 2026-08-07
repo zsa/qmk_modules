@@ -56,7 +56,8 @@ enum zsa_msg_type {
 
     /* STM32 -> nRF: commands (0x20-0x2F) */
     ZSA_MSG_CMD_HIBERNATE    = 0x20,
-    ZSA_MSG_CMD_PAIR         = 0x21,
+    ZSA_MSG_CMD_PAIR         = 0x21,  /* 0 B: make the nRF discoverable for a
+                                       * bounded pairing window */
     ZSA_MSG_CMD_IDLE_STATE   = 0x22,
     ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=disconnected, 1=connected */
     ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: nav capability bitmask (ZSA_NAV_CAP_*);
@@ -73,8 +74,11 @@ enum zsa_msg_type {
                                        * drives that bus. Relayed onward by the
                                        * left over ESB as
                                        * WPP_REPLY_FLAG_BUS_GRANT. */
-    ZSA_MSG_CMD_PAIR_ACCEPT  = 0x28,  /* 0 B: user accepted the pending pairing
-                                       * request (any key tap on the keyboard) */
+    ZSA_MSG_CMD_PAIR_ACCEPT  = 0x28,  /* 0 B: confirm a held pairing request.
+                                       * Legacy: pairing is gated by
+                                       * discoverability now, so QMK never
+                                       * sends this. Handler kept for bench
+                                       * testing. */
     ZSA_MSG_CMD_BLE_DISCONNECT = 0x29,  /* 0 B: drop the active BLE link; the
                                          * nRF re-advertises afterwards */
     ZSA_MSG_CMD_BLE_UNPAIR   = 0x2A,  /* 0 B: clear all bonds, refresh the BLE
@@ -200,10 +204,12 @@ struct __attribute__((packed)) zsa_pair_state {
 
 enum zsa_pair_state_val {
     ZSA_PAIR_IDLE   = 0,
+    /* Discoverable: advertising inside a pairing window. */
     ZSA_PAIR_ACTIVE = 1,
     ZSA_PAIR_DONE   = 2,
     ZSA_PAIR_FAILED = 3,
-    /* A pairing request is held awaiting user confirmation (key tap). */
+    /* An SMP pairing is running. Excludes the encryption window a bonded
+     * reconnect passes through. */
     ZSA_PAIR_CONFIRM = 4,
 };
 
