@@ -140,6 +140,13 @@ enum zsa_msg_type {
                                        * relay). QMK blanks the keyboard to an
                                        * all-blue matrix while set. Sent on
                                        * every change and re-sent as a level. */
+    ZSA_MSG_EVT_LINK_STATE   = 0x8D,  /* 2 B: struct zsa_link_state — the two
+                                       * nRF halves' view of each other over
+                                       * ESB. Distinct from EVT_DFU_STATE: a
+                                       * protocol mismatch is a half-working
+                                       * keyboard, not an update in progress,
+                                       * and must not read as one. Sent as a
+                                       * level. */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -295,6 +302,22 @@ struct __attribute__((packed)) zsa_vbus_state { uint8_t present; };
  * mid-update instead of staying blanked forever. */
 struct __attribute__((packed)) zsa_dfu_progress {
     uint8_t active; /* 0 = idle, 1 = update in progress */
+};
+
+/* ZSA_MSG_EVT_LINK_STATE (2 bytes) — the ESB link between the two nRF halves.
+ * MISMATCH means a right half is present and reachable but running a different
+ * keyboard-protocol version, so neither half drives the other's keyboard state:
+ * keys, LEDs and the navigator are dead while the update channel still works.
+ * It needs its own indication, NOT the blue "updating" matrix. Sent as a level,
+ * re-sent every ZSA_STATUS_REFRESH cadence like the other events. */
+enum zsa_link_state_val {
+    ZSA_LINK_STATE_ABSENT   = 0, /* no right half heard */
+    ZSA_LINK_STATE_OK       = 1, /* present, versions agree */
+    ZSA_LINK_STATE_MISMATCH = 2, /* present, different protocol version */
+};
+struct __attribute__((packed)) zsa_link_state {
+    uint8_t state;        /* enum zsa_link_state_val */
+    uint8_t peer_version; /* right half's reported version, 0 when unknown */
 };
 
 /* ZSA_MSG_CMD_VBUS_ILIM (1 byte) — level, not raw mA: the actual current
