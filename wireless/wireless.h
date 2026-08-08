@@ -34,6 +34,13 @@ uint16_t zsa_wireless_power_budget_ma(void);
  * and once VBUS goes away. */
 bool zsa_wireless_vbus_present(void);
 
+/* True while a firmware update is running through the nRF (EVT_DFU_STATE),
+ * on either half. The module makes the keyboard inert for the duration: key
+ * events dropped in pre_process_record, pointer reports dropped, whole matrix
+ * painted blue. The nRF re-sends the level every second and the module ages
+ * it out after ZSA_DFU_STATE_STALE_MS, so a link lost mid-update recovers. */
+bool zsa_wireless_dfu_active(void);
+
 /* Weak hook: keyboards override this to react to VBUS present/absent
  * (EVT_VBUS_STATE), e.g. to drive their own USB D+ pullup. */
 void zsa_wireless_vbus_changed(bool present);

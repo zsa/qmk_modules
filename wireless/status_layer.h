@@ -32,3 +32,10 @@ void zsa_wireless_status_render(void);
  * want to place a gauge somewhere other than the two default rows. A soc of 0
  * means "unknown" and leaves the row on the background color. */
 void zsa_wireless_status_draw_gauge(uint8_t first_led, uint8_t soc);
+
+/* Firmware-update overlay: paints every LED on both halves ZSA_DFU_* from
+ * config.h. Unlike the status layer this is not keymap-selected — the module
+ * drives it from rgb_matrix_indicators_advanced_wireless() whenever the nRF
+ * reports an update in progress, which runs after the keymap's indicators and
+ * so paints over them. */
+void zsa_wireless_status_render_dfu(void);

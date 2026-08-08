@@ -52,6 +52,20 @@ static uint8_t  nrf_battery_flags;
 static uint8_t  nrf_led_state;
 static bool     nrf_vbus_present;
 
+/* ---- Firmware update in progress ---- *
+ *
+ * EVT_DFU_STATE mirrors the nRF's DFU lock, so it covers both the mcumgr SMP
+ * path and the STM32 relay. While it is set the keyboard is inert — no key
+ * output, no pointer, whole matrix blue — so a flash cannot be disturbed by
+ * typing. The nRF re-sends the level every second and last_dfu_state_ms ages
+ * it out, so a link that dies mid-update unblanks instead of leaving the
+ * keyboard dead. */
+static bool     nrf_dfu_active;
+static uint32_t last_dfu_state_ms;
+#ifdef RGB_MATRIX_ENABLE
+static bool     dfu_rgb_was_enabled;
+#endif
+
 /* ---- Adaptive charging ---- *
  *
  * The left nRF reports the USB source's CC-detected current budget
@@ -229,6 +243,50 @@ static void pair_confirm_wake(void) {
 #endif
 }
 
+bool zsa_wireless_dfu_active(void) {
+    return nrf_dfu_active;
+}
+
+/* Enter/leave the inert update state. Releases everything held on the way in
+ * and on the way out, so a key swallowed mid-press cannot leave a stuck
+ * report. Takes the matrix over from whatever the user's config was doing and
+ * hands it back on exit. */
+static void dfu_set_active(bool active) {
+    if (active == nrf_dfu_active) {
+        return;
+    }
+    nrf_dfu_active = active;
+    zsa_log("dfu: %s", active ? "active" : "idle");
+
+    if (active) {
+        /* The blue matrix has to survive a transfer with no keypresses. */
+        if (idle_step != ZSA_IDLE_ACTIVE) {
+            idle_power_wake();
+        }
+#ifdef RGB_MATRIX_ENABLE
+        dfu_rgb_was_enabled = rgb_matrix_is_enabled();
+        if (!dfu_rgb_was_enabled) {
+            rgb_matrix_enable_noeeprom();
+        }
+#endif
+    } else {
+#ifdef RGB_MATRIX_ENABLE
+        if (!dfu_rgb_was_enabled) {
+            rgb_matrix_disable_noeeprom();
+        }
+#endif
+    }
+
+    clear_keyboard();
+}
+
+/* Ages out a state that stopped being refreshed. */
+static void dfu_state_task(void) {
+    if (nrf_dfu_active && timer_elapsed32(last_dfu_state_ms) >= ZSA_DFU_STATE_STALE_MS) {
+        dfu_set_active(false);
+    }
+}
+
 static void handle_rx_frame(const struct zsa_frame *frame) {
     zsa_rtt_rx(frame->type); // TEMP DEBUG
     switch (frame->type) {
@@ -251,6 +309,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
              * until the nRF re-reports its real budget (sent right after
              * link-up). */
             nrf_power_budget_ma = ZSA_PWR_BUDGET_DEFAULT_MA;
+            /* An nRF that rebooted lost its DFU lock, so nothing is being
+             * flashed any more. send_nrf_state() re-asserts it right after
+             * this if the update is in fact still running. */
+            dfu_set_active(false);
             /* nrf_vbus_present is left alone: the nRF re-reports it right
              * after link-up via send_nrf_state(). */
             /* nRF rebooted (e.g. after ship mode) — clear ship flag */
@@ -372,6 +434,14 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                     nrf_vbus_present = present;
                     zsa_wireless_vbus_changed(present);
                 }
+            }
+            break;
+
+        case ZSA_MSG_EVT_DFU_STATE:
+            if (frame->len >= sizeof(struct zsa_dfu_progress)) {
+                const struct zsa_dfu_progress *d = (const struct zsa_dfu_progress *)frame->payload;
+                last_dfu_state_ms = timer_read32();
+                dfu_set_active(d->active != 0);
             }
             break;
 
@@ -594,6 +664,15 @@ static void idle_power_task(void) {
         return;
     }
 
+    /* An update produces no key activity, so the idle steps would power the
+     * matrix down mid-transfer and take the blue signal with it. */
+    if (zsa_wireless_dfu_active()) {
+        if (idle_step != ZSA_IDLE_ACTIVE) {
+            idle_power_wake();
+        }
+        return;
+    }
+
 #ifdef ZSA_DEV_NO_SLEEP
     /* Dev toggle: keep the USB/BT state sync above (the nRF relies on those
      * edges) but never step into DIM/LEDS_OFF/DEEP — the board stays fully
@@ -718,6 +797,43 @@ static void unpair_hold_task(void) {
     unpair_sent = true;
 }
 
+/* Auto-generated per-module hook, called from pre_process_record_quantum()
+ * before the tapping state machine and process_record_quantum() — returning
+ * false drops the event before any keycode handling at all. This is the
+ * lowest point a module can reach, and the only one that also covers held
+ * keys, tap-hold resolution, combos and mouse keys in one place. */
+bool pre_process_record_wireless(uint16_t keycode, keyrecord_t *record) {
+    if (zsa_wireless_dfu_active()) {
+        return false;
+    }
+    return pre_process_record_wireless_kb(keycode, record);
+}
+
+#ifdef POINTING_DEVICE_ENABLE
+/* Trackball motion and buttons, dropped at the report the module contributes
+ * to pointing_device_task_modules(). */
+report_mouse_t pointing_device_task_wireless(report_mouse_t mouse_report) {
+    if (zsa_wireless_dfu_active()) {
+        return (report_mouse_t){0};
+    }
+    return pointing_device_task_wireless_kb(mouse_report);
+}
+#endif
+
+#ifdef RGB_MATRIX_ENABLE
+/* Whole matrix blue while an update runs. rgb_matrix_indicators_advanced_*
+ * is the last thing rgb_matrix_task() calls before the flush, after the
+ * effect and after the keymap's rgb_matrix_indicators_user(), so this paints
+ * over the user's config without the keymap needing to know about it. */
+bool rgb_matrix_indicators_advanced_wireless(uint8_t led_min, uint8_t led_max) {
+    if (!zsa_wireless_dfu_active()) {
+        return rgb_matrix_indicators_advanced_wireless_kb(led_min, led_max);
+    }
+    zsa_wireless_status_render_dfu();
+    return false;
+}
+#endif
+
 /* Auto-generated per-module hook, called from process_record_modules() before
  * process_record_kb/_user — returning false swallows the key before the keymap
  * sees it. Both edges are swallowed so no unmatched release leaks through. */
@@ -820,6 +936,9 @@ void bluetooth_task(void) {
     /* Fire BT_UNPR once its hold completes */
     unpair_hold_task();
 
+    /* Unblank if the nRF stopped refreshing the update state */
+    dfu_state_task();
+
     /* Maintain the adaptive-charging raise while a high-budget source is up */
     bus_grant_task();
     power_budget_task();
@@ -884,6 +1003,9 @@ void bluetooth_send_mouse(report_mouse_t *report) {
  * above. Falls straight through to the real USB endpoint on USB so wired
  * behavior stays byte-identical. */
 void navigator_trackpad_output_touchpad(report_digitizer_touchpad_t *report) {
+    if (zsa_wireless_dfu_active()) {
+        return;
+    }
     if (usb_connected_state()) {
         send_digitizer_touchpad(report);
         return;
@@ -902,6 +1024,9 @@ void navigator_trackpad_output_touchpad(report_digitizer_touchpad_t *report) {
  * path (ZSA_MSG_HID_MOUSE / bluetooth_send_mouse() above), which already
  * carries trackball motion over BLE. */
 void navigator_trackpad_output_touchpad_mouse(report_digitizer_touchpad_mouse_t *report) {
+    if (zsa_wireless_dfu_active()) {
+        return;
+    }
     if (usb_connected_state()) {
         send_digitizer_touchpad_mouse(report);
         return;

@@ -79,6 +79,29 @@
 #    define ZSA_STATUS_BREATHE_FAST_MS 1400
 #endif
 
+/* ---- Firmware-update overlay (see status_layer.c) ---- */
+
+/* Color the whole matrix takes while the nRF reports a firmware update in
+ * progress (ZSA_MSG_EVT_DFU_STATE). Written as a literal RGB level, not scaled
+ * by the matrix brightness: the update signal must be unmistakable even with
+ * brightness turned right down. */
+#ifndef ZSA_DFU_R
+#    define ZSA_DFU_R 0
+#endif
+#ifndef ZSA_DFU_G
+#    define ZSA_DFU_G 0
+#endif
+#ifndef ZSA_DFU_B
+#    define ZSA_DFU_B 255
+#endif
+
+/* How long a reported DFU state stays trusted. The nRF re-sends the level
+ * every 1 s; past this the keyboard unblanks itself, so a link that dies
+ * mid-update cannot leave it permanently dead. */
+#ifndef ZSA_DFU_STATE_STALE_MS
+#    define ZSA_DFU_STATE_STALE_MS 5000
+#endif
+
 /* ---- BLE pairing / discoverability indication (see wireless.c) ---- */
 
 /* Half-period of the green status LED blink: slow while discoverable, fast

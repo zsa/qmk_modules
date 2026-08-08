@@ -30,7 +30,7 @@ static struct {
     uint32_t tx_mouse, tx_digi, tx_log, tx_other, tx_bytes;
     uint32_t tx_blk_max_us, tx_blk_sum_us;
     /* UART RX */
-    uint32_t rx_pair, rx_ble, rx_rail, rx_other;
+    uint32_t rx_pair, rx_ble, rx_rail, rx_dfu, rx_other;
     /* rgb driver flushes */
     uint32_t fl_n, fl_dur_max_us, fl_dur_sum_us, fl_gap_max_ms;
 } w;
@@ -67,6 +67,7 @@ void zsa_rtt_rx(uint8_t type) {
         case ZSA_MSG_EVT_PAIR_STATE: w.rx_pair++;  break;
         case ZSA_MSG_EVT_BLE_STATUS: w.rx_ble++;   break;
         case ZSA_MSG_EVT_LED_RAIL:   w.rx_rail++;  break;
+        case ZSA_MSG_EVT_DFU_STATE:  w.rx_dfu++;   break;
         default:                     w.rx_other++; break;
     }
 }
@@ -112,11 +113,12 @@ void zsa_rtt_loop_tick(void) {
 #ifdef ZSA_RTT_LOOP_STATS
     SEGGER_RTT_printf(0,
         "t=%u loops=%u dtmax=%uus | tx m=%u d=%u l=%u o=%u B=%u blkmax=%uus blksum=%uus"
-        " | rx ps=%u bs=%u lr=%u o=%u | is31 n=%u durmax=%uus duravg=%uus gapmax=%ums\n",
+        " | rx ps=%u bs=%u lr=%u df=%u o=%u | is31 n=%u durmax=%uus duravg=%uus gapmax=%ums\n",
         (unsigned)now, (unsigned)w.loops, (unsigned)w.dt_max_us,
         (unsigned)w.tx_mouse, (unsigned)w.tx_digi, (unsigned)w.tx_log, (unsigned)w.tx_other,
         (unsigned)w.tx_bytes, (unsigned)w.tx_blk_max_us, (unsigned)w.tx_blk_sum_us,
-        (unsigned)w.rx_pair, (unsigned)w.rx_ble, (unsigned)w.rx_rail, (unsigned)w.rx_other,
+        (unsigned)w.rx_pair, (unsigned)w.rx_ble, (unsigned)w.rx_rail, (unsigned)w.rx_dfu,
+        (unsigned)w.rx_other,
         (unsigned)w.fl_n, (unsigned)w.fl_dur_max_us,
         (unsigned)(w.fl_n ? w.fl_dur_sum_us / w.fl_n : 0),
         (unsigned)w.fl_gap_max_ms);

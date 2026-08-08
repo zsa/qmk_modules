@@ -134,6 +134,12 @@ enum zsa_msg_type {
                                        * VBUS presence. Gates the STM32's USB
                                        * D+ pullup (PA15). Sent on VBUS change
                                        * and at link-up. */
+    ZSA_MSG_EVT_DFU_STATE    = 0x8C,  /* 1 B: struct zsa_dfu_progress — a
+                                       * firmware update is running through
+                                       * this half (nRF SMP or the STM32
+                                       * relay). QMK blanks the keyboard to an
+                                       * all-blue matrix while set. Sent on
+                                       * every change and re-sent as a level. */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -281,6 +287,15 @@ struct __attribute__((packed)) zsa_pwr_budget {
 
 /* ZSA_MSG_EVT_VBUS_STATE (1 byte) */
 struct __attribute__((packed)) zsa_vbus_state { uint8_t present; };
+
+/* ZSA_MSG_EVT_DFU_STATE (1 byte) — mirrors the nRF's DFU lock, so it covers
+ * both the mcumgr SMP path and the STM32 relay. Named _progress because the
+ * zsa_dfu_state tag is taken by the DFU_STATUS enum below. Sent as a level:
+ * the nRF re-sends it every second, so QMK ages it out if the link dies
+ * mid-update instead of staying blanked forever. */
+struct __attribute__((packed)) zsa_dfu_progress {
+    uint8_t active; /* 0 = idle, 1 = update in progress */
+};
 
 /* ZSA_MSG_CMD_VBUS_ILIM (1 byte) — level, not raw mA: the actual current
  * values live in each half's devicetree (current-microamp). Lowering happens
