@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "zsa_uart_proto.h"
+#include "zsa_right_telemetry.h"
 
 enum zsa_idle_step {
     ZSA_IDLE_ACTIVE    = 0,
@@ -26,6 +27,16 @@ uint8_t zsa_wireless_battery_soc(void);
  * right half has never reported (e.g. powered down or not yet linked). */
 uint8_t zsa_wireless_battery_right_soc(void);
 uint8_t zsa_wireless_battery_flags(void);
+/* True while the nRF's battery report is recent enough to act on. The nRF
+ * re-sends the level every second, so a lapse means the link is gone and the
+ * cached soc/flags are last week's news. Without this a boot-time 0 and a flat
+ * battery are the same byte. */
+bool zsa_wireless_battery_fresh(void);
+/* The right half's own reading, taken over the TRRS I2C bus rather than
+ * relayed. Fills @p out and returns true only while the cable is plugged and
+ * the last read succeeded; false means fall back to the relayed value, or to
+ * nothing. See zsa_right_telemetry.h for why this path exists at all. */
+bool zsa_wireless_right_telemetry(struct zsa_right_telemetry *out);
 /* Detected USB source current budget in mA (EVT_PWR_BUDGET), between
  * ZSA_PWR_BUDGET_DEFAULT_MA and the source's advertised capability. Reads as
  * the default until a CC event reports otherwise. */
@@ -96,3 +107,30 @@ bool zsa_wireless_link_ready(void);
  * ZSA_MSG_HID_DIGITIZER in zsa_uart_proto.h and navigator_trackpad_ptp.c's
  * navigator_trackpad_output_touchpad() hook.) */
 uint8_t zsa_wireless_nav_device_type(void);  /* enum zsa_nav_device_type, 0 if none */
+/* True once an EVT_NAV_PRESENT has arrived, so 0 can be read as "nothing
+ * plugged in" rather than "never asked". */
+bool zsa_wireless_nav_device_seen(void);
+
+/* What the compiled-in nav driver found the last time it probed. The driver
+ * tries the real device address first — a chip on the STM32's own I2C bus —
+ * and only then the left nRF's mirror address, which exists solely to relay a
+ * right-plugged device while wireless. Which one answered is the only
+ * side-of-the-board signal QMK has.
+ *
+ * Note the ambiguity it does not resolve: the TRRS segments do not isolate, so
+ * a right-plugged device is on the same net and answers at the same real
+ * address whenever the cable is plugged. LOCAL means "on our bus", not "on the
+ * left half". */
+enum zsa_nav_probe {
+    ZSA_NAV_PROBE_UNSUPPORTED = 0, /* no nav driver in this build: nothing looked */
+    ZSA_NAV_PROBE_NONE,            /* looked, neither address answered */
+    ZSA_NAV_PROBE_LOCAL,           /* the real device address answered */
+    ZSA_NAV_PROBE_MIRROR,          /* only the left-nRF mirror answered */
+};
+
+/* Weak hook: the nav module compiled into this build overrides it. Returns
+ * enum zsa_nav_probe. */
+uint8_t zsa_nav_probe_state(void);
+/* Which device that driver drives (enum zsa_nav_device_type). Constant for a
+ * build — only one nav module ever links at a time. */
+uint8_t zsa_nav_probe_device(void);

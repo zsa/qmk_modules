@@ -39,6 +39,11 @@ enum Oryx_Command_Code {
     ORYX_UPDATE_BRIGHTNESS,
     ORYX_SET_RGB_LED_ALL,
     ORYX_STATUS_LED_CONTROL,
+    /* Ask the board about itself: battery per half, what nav this build
+     * supports, what nav is actually attached. Answered with
+     * ORYX_EVT_TELEMETRY carrying an oryx_telemetry_t. Unpaired-safe, like
+     * the version queries: it reads state, it changes nothing. */
+    ORYX_CMD_GET_TELEMETRY,
     ORYX_GET_PROTOCOL_VERSION = 0xFE,
 };
 
@@ -55,6 +60,9 @@ enum Oryx_Event_Code {
     ORYX_EVT_TOGGLE_SMART_LAYER,
     ORYX_EVT_TRIGGER_SMART_LAYER,
     ORYX_EVT_STATUS_LED_CONTROL,
+    /* Answer to ORYX_CMD_GET_TELEMETRY: an oryx_telemetry_t in bytes 1..31.
+     * Binary, so it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
+    ORYX_EVT_TELEMETRY,
     ORYX_EVT_GET_PROTOCOL_VERSION = 0XFE,
     ORYX_EVT_ERROR                = 0xFF,
 };

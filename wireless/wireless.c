@@ -49,6 +49,12 @@ static bool     pair_state_seen;      /* any EVT_PAIR_STATE received yet */
 static uint8_t  nrf_battery_soc;
 static uint8_t  nrf_battery_right_soc;
 static uint8_t  nrf_battery_flags;
+static uint32_t last_battery_ms;
+static bool     battery_seen;         /* any EVT_BATTERY received yet */
+/* The nRF re-sends the battery level every second (STATUS_UPDATE_INTERVAL_MS),
+ * so anything older than a few of those means the link stopped, not that the
+ * value stopped changing. */
+#define BATTERY_STALE_MS 5000
 static uint8_t  nrf_led_state;
 static bool     nrf_vbus_present;
 
@@ -118,6 +124,22 @@ static inline void update_right_led_address(void) {}
 #endif
 
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
+static bool    nav_device_seen;  /* any EVT_NAV_PRESENT received yet */
+
+/* ---- Right-half telemetry over the wired bus ---- *
+ *
+ * On USB the right half suspends ESB, so the SOC the left relays in
+ * EVT_BATTERY stops being refreshed and the last value sits there looking
+ * fresh. The right's TWIS slave stays live on the TRRS net though, and the
+ * STM32 masters that bus whenever the cable is plugged — so read it there.
+ * Polled slowly: it is a status field, and the bus is busy with the matrix. */
+static struct zsa_right_telemetry right_tlm;
+static bool     right_tlm_valid;
+static uint32_t last_right_tlm_ms;
+#define RIGHT_TLM_INTERVAL_MS 1000
+
+/* Board-provided (voyager_tng.c), like voyager_right_nrf_vbus_ilim_high(). */
+extern bool voyager_right_nrf_read_telemetry(struct zsa_right_telemetry *out);
 
 #ifdef DIGITIZER_MODE_TOUCHPAD
 /* ---- Digitizer/PTP report + input-mode routing ---- *
@@ -345,6 +367,8 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 nrf_battery_soc       = b->soc;
                 nrf_battery_right_soc = b->right_soc;
                 nrf_battery_flags     = b->flags;
+                last_battery_ms       = timer_read32();
+                battery_seen          = true;
             }
             break;
 
@@ -404,6 +428,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             if (frame->len >= sizeof(struct zsa_nav_present)) {
                 const struct zsa_nav_present *p = (const struct zsa_nav_present *)frame->payload;
                 nav_device_type = p->device_type;
+                nav_device_seen = true;
             }
             break;
 
@@ -476,6 +501,18 @@ uint8_t zsa_wireless_battery_flags(void) {
     return nrf_battery_flags;
 }
 
+bool zsa_wireless_battery_fresh(void) {
+    return link_ready && battery_seen && timer_elapsed32(last_battery_ms) < BATTERY_STALE_MS;
+}
+
+bool zsa_wireless_right_telemetry(struct zsa_right_telemetry *out) {
+    if (!right_tlm_valid) {
+        return false;
+    }
+    *out = right_tlm;
+    return true;
+}
+
 uint16_t zsa_wireless_power_budget_ma(void) {
     return nrf_power_budget_ma;
 }
@@ -515,6 +552,130 @@ bool zsa_wireless_link_ready(void) {
 uint8_t zsa_wireless_nav_device_type(void) {
     return nav_device_type;
 }
+
+bool zsa_wireless_nav_device_seen(void) {
+    return nav_device_seen;
+}
+
+/* Weak default: no nav driver linked into this build, so nothing has looked.
+ * Distinct from "looked and found nothing" — see enum zsa_nav_probe. */
+__attribute__((weak)) uint8_t zsa_nav_probe_state(void) {
+    return ZSA_NAV_PROBE_UNSUPPORTED;
+}
+
+__attribute__((weak)) uint8_t zsa_nav_probe_device(void) {
+    return ZSA_NAV_DEVICE_NONE;
+}
+
+/* ---- Telemetry (oryx raw-HID ORYX_CMD_GET_TELEMETRY) ---- */
+
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+#    include "oryx_telemetry.h"
+
+static uint8_t nav_mask(uint8_t device_type) {
+    switch (device_type) {
+        case ZSA_NAV_DEVICE_TRACKBALL:
+            return ORYX_TLM_NAV_TRACKBALL;
+        case ZSA_NAV_DEVICE_TOUCHPAD:
+            return ORYX_TLM_NAV_TRACKPAD;
+        default:
+            return 0;
+    }
+}
+
+/* Only ever called where both answers are actually known — the KNOWN bit is
+ * what stops a host reading a cleared bit as a confident "no". */
+static uint8_t bat_flags(bool charging, bool usb) {
+    return ORYX_TLM_BAT_KNOWN | (charging ? ORYX_TLM_BAT_CHARGING : 0) | (usb ? ORYX_TLM_BAT_USB : 0);
+}
+
+static void telemetry_battery(oryx_telemetry_t *tlm) {
+    /* Left: the nRF's own half, over UART. Only while it is still refreshing —
+     * a cached level from a link that died is not a reading. */
+    if (zsa_wireless_battery_fresh() && nrf_battery_soc <= 100) {
+        tlm->battery_left        = nrf_battery_soc;
+        tlm->battery_left_flags  = bat_flags(nrf_battery_flags & ZSA_BAT_FLAG_CHARGING, nrf_battery_flags & ZSA_BAT_FLAG_USB);
+        tlm->battery_left_source = ORYX_TLM_SRC_NRF;
+    }
+
+    /* Right: prefer the wired read, which is this half answering for itself
+     * right now. */
+    struct zsa_right_telemetry rt;
+    uint8_t                    flags;
+    if (zsa_wireless_right_telemetry(&rt)) {
+        int soc                   = zsa_right_telemetry_soc(&rt);
+        tlm->battery_right        = (soc < 0) ? ORYX_TLM_LEVEL_UNKNOWN : (uint8_t)soc;
+        tlm->battery_right_source = ORYX_TLM_SRC_WIRED;
+        if (zsa_right_telemetry_flags(&rt, &flags)) {
+            tlm->battery_right_flags = bat_flags(flags & ZSA_RIGHT_TLM_FLAG_CHARGING, flags & ZSA_RIGHT_TLM_FLAG_USB);
+        }
+        return;
+    }
+
+    /* Otherwise the ESB relay, which has no sentinel: the UART protocol sends
+     * 0 both for a right half that never reported and for a flat one. Report
+     * 0 as unknown — the wired path above is the one that can tell them
+     * apart. The relay carries no charging/USB bits for this half at all, so
+     * those stay unknown either way. */
+    if (zsa_wireless_battery_fresh() && nrf_battery_right_soc > 0 && nrf_battery_right_soc <= 100) {
+        tlm->battery_right        = nrf_battery_right_soc;
+        tlm->battery_right_source = ORYX_TLM_SRC_ESB;
+    }
+}
+
+static void telemetry_nav(oryx_telemetry_t *tlm) {
+    tlm->nav_build = nav_cap_mask;
+
+    uint8_t probe = zsa_nav_probe_state();
+    uint8_t found = nav_mask(zsa_nav_probe_device());
+    /* The right half sharing our I2C net is what makes a device at the real
+     * address ambiguous: the TRRS segments do not isolate, so a right-plugged
+     * device answers at exactly the address a left-plugged one would. */
+    bool right_on_bus = zsa_stm32_owns_right_bus();
+
+    /* A build that announced no nav capability told the nRF to stop detecting
+     * altogether (nav_announce_task), so its EVT_NAV_PRESENT of "none" is not
+     * evidence of an empty connector — and nothing probed our own bus either.
+     * Both halves stay unknown. */
+    if (nav_cap_mask == 0) {
+        return;
+    }
+
+    /* Right half. Its own nRF probes its nav connector and reports what it
+     * finds — but only while ESB is up. Wired it suspends the radio and stops
+     * looking, so the last value proves nothing and we fall back to what the
+     * shared bus shows. */
+    if (!right_on_bus) {
+        tlm->nav_right = zsa_wireless_nav_device_seen() ? nav_mask(nav_device_type) : ORYX_TLM_NAV_UNKNOWN;
+    } else if (probe == ZSA_NAV_PROBE_NONE) {
+        tlm->nav_right = 0; /* nothing answered on a net that reaches both halves */
+    }
+
+    /* Left half. Nothing on the bus is a real answer. A device on the bus is
+     * only the left's when the right half is not sharing the net; otherwise
+     * the side is genuinely undecidable from here and stays unknown. */
+    switch (probe) {
+        case ZSA_NAV_PROBE_NONE:
+        case ZSA_NAV_PROBE_MIRROR:
+            tlm->nav_left = 0;
+            break;
+        case ZSA_NAV_PROBE_LOCAL:
+            if (!right_on_bus) {
+                tlm->nav_left = found;
+            }
+            break;
+        default:
+            break; /* UNSUPPORTED: no driver probed, so we cannot say */
+    }
+}
+
+/* Strong override of oryx.c's weak hook. */
+void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
+    oryx_telemetry_reset(tlm);
+    telemetry_battery(tlm);
+    telemetry_nav(tlm);
+}
+#endif // COMMUNITY_MODULE_ORYX_ENABLE
 
 /* ---- Idle power management ---- */
 
@@ -913,6 +1074,28 @@ static void power_budget_task(void) {
     last_pwr_maintain_ms = timer_read32();
 }
 
+/* Refresh the right half's own reading while the STM32 masters its bus. Not
+ * attempted otherwise: the right's TWIS slave is only reachable over the TRRS
+ * net, and a read while the right owns that net would be two masters. Dropping
+ * the cached value on the way out is the point — a wireless board must not
+ * keep serving the last wired reading as if it were current. */
+static void right_telemetry_task(void) {
+    if (!zsa_stm32_owns_right_bus()) {
+        right_tlm_valid = false;
+        return;
+    }
+    if (last_right_tlm_ms != 0 && timer_elapsed32(last_right_tlm_ms) < RIGHT_TLM_INTERVAL_MS) {
+        return;
+    }
+    last_right_tlm_ms = timer_read32();
+
+    struct zsa_right_telemetry got;
+    right_tlm_valid = voyager_right_nrf_read_telemetry(&got) && zsa_right_telemetry_ok(&got);
+    if (right_tlm_valid) {
+        right_tlm = got;
+    }
+}
+
 void bluetooth_task(void) {
     zsa_rtt_loop_tick(); // TEMP DEBUG
 
@@ -942,6 +1125,9 @@ void bluetooth_task(void) {
     /* Maintain the adaptive-charging raise while a high-budget source is up */
     bus_grant_task();
     power_budget_task();
+
+    /* Wired-mode source for the right half's battery */
+    right_telemetry_task();
 
     pair_led_task();
 

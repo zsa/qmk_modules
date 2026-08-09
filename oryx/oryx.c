@@ -4,6 +4,7 @@
 #include QMK_KEYBOARD_H
 #include <string.h>
 #include "oryx.h"
+#include "oryx_telemetry.h"
 #include "action_util.h"
 
 ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 1);
@@ -107,6 +108,13 @@ void clear_webhid_effect(void) {
 #endif
 }
 
+/* Weak default: a board with nothing to report says so, rather than reporting
+ * zeroes. Overridden by whoever actually knows (Voyager 2: the wireless
+ * module, wireless.c). */
+__attribute__((weak)) void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
+    oryx_telemetry_reset(tlm);
+}
+
 void raw_hid_receive(uint8_t *data, uint8_t length) {
     uint8_t  command = data[0];
     uint8_t *param   = &data[1];
@@ -133,6 +141,18 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             event[1] = ORYX_PROTOCOL_VERSION;
             event[2] = ORYX_STOP_BIT;
 
+            raw_hid_send_oryx(event, RAW_EPSIZE);
+            break;
+        }
+
+        case ORYX_CMD_GET_TELEMETRY: {
+            uint8_t event[RAW_EPSIZE];
+            event[0] = ORYX_EVT_TELEMETRY;
+            /* No ORYX_STOP_BIT: the payload is binary and fills the report,
+             * so a terminator would be indistinguishable from a data byte.
+             * oryx_telemetry_reset() writes every byte, including the
+             * reserved tail. */
+            oryx_telemetry_fill((oryx_telemetry_t *)&event[1]);
             raw_hid_send_oryx(event, RAW_EPSIZE);
             break;
         }

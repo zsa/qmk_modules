@@ -21,6 +21,25 @@ bool            trackpad_init = false;
 // TODO: only use this mechanism when the wirless module is enabled.
 static uint8_t nav_addr = NAVIGATOR_TRACKPAD_ADDRESS;
 
+#ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
+#    include "wireless.h"
+
+// Strong overrides of the wireless module's weak probe hooks, so telemetry can
+// report what the last probe actually found rather than what this build can
+// drive. nav_addr says which of the two addresses answered, which is as close
+// to a side-of-the-board signal as the STM32 gets.
+uint8_t zsa_nav_probe_state(void) {
+    if (!trackpad_init) {
+        return ZSA_NAV_PROBE_NONE;
+    }
+    return (nav_addr == NAVIGATOR_TRACKPAD_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
+}
+
+uint8_t zsa_nav_probe_device(void) {
+    return ZSA_NAV_DEVICE_TOUCHPAD;
+}
+#endif
+
 // I2C communication functions
 i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
     i2c_status_t res = i2c_receive(nav_addr, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);

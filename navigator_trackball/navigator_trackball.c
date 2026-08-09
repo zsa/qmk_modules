@@ -185,6 +185,25 @@ uint32_t sci18is606_read_callback(uint32_t trigger_time, void *cb_arg) {
     return NAVIGATOR_TRACKBALL_READ;
 }
 
+#ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
+#    include "wireless.h"
+
+// Strong overrides of the wireless module's weak probe hooks, so telemetry can
+// report what the last probe actually found rather than what this build can
+// drive. nav_addr says which of the two addresses answered, which is as close
+// to a side-of-the-board signal as the STM32 gets.
+uint8_t zsa_nav_probe_state(void) {
+    if (!trackball_init) {
+        return ZSA_NAV_PROBE_NONE;
+    }
+    return (nav_addr == NAVIGATOR_TRACKBALL_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
+}
+
+uint8_t zsa_nav_probe_device(void) {
+    return ZSA_NAV_DEVICE_TRACKBALL;
+}
+#endif
+
 // Makes the next sci18is606_read_callback() tick re-run
 // pointing_device_driver_init(), re-probing the bridge and re-running
 // paw3805ek_configure(). The bridge keeps ACKing after a transport switch, so
