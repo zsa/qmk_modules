@@ -48,7 +48,7 @@ confident "no".
 #define ORYX_TLM_VERSION 1
 
 /* Defined bytes after the `len` byte itself. Grows as fields are appended. */
-#define ORYX_TLM_LEN 9
+#define ORYX_TLM_LEN 16
 
 /* Battery level we could not read. Never 0: that is a flat battery. */
 #define ORYX_TLM_LEVEL_UNKNOWN 0xFF
@@ -66,6 +66,20 @@ confident "no".
 #define ORYX_TLM_BAT_USB      0x02
 /* Clear means the other bits are unknown, not false. */
 #define ORYX_TLM_BAT_KNOWN 0x80
+
+/* What the charging policy is doing, as against what the cell is doing --
+ * battery_*_flags already says whether current is flowing. This says why. */
+#define ORYX_TLM_CHG_UNKNOWN  0xFF /* nothing has told us; e.g. no nRF link */
+#define ORYX_TLM_CHG_BATTERY  0    /* no source attached: running off the cells */
+#define ORYX_TLM_CHG_FLOOR    1    /* a source is attached but has not identified
+                                    * itself, so we are still holding at the
+                                    * pre-enumeration 100 mA */
+#define ORYX_TLM_CHG_CHARGING 2    /* charging at the rate the source allows */
+#define ORYX_TLM_CHG_FULL     3    /* source attached, charger has terminated */
+
+/* A current we could not find out. Zero, because no limit and no charge rate
+ * this board can be set to is zero -- the input floor alone is 100 mA. */
+#define ORYX_TLM_CURRENT_UNKNOWN 0
 
 /* Where a level came from, so a host can tell a live reading from a relayed
  * one. The distinction matters: the ESB relay keeps its last value when the
@@ -89,7 +103,14 @@ typedef struct __attribute__((packed)) {
     uint8_t nav_build;            /* ORYX_TLM_NAV_* this build can drive; compile-time, always known */
     uint8_t nav_left;             /* ORYX_TLM_NAV_* attached left, or ORYX_TLM_NAV_UNKNOWN */
     uint8_t nav_right;            /* ORYX_TLM_NAV_* attached right, or ORYX_TLM_NAV_UNKNOWN */
-    uint8_t reserved[20];         /* zero; room for twenty more one-byte fields */
+    /* Charging. LE16 rather than one byte each: these are milliamps up to
+     * 1500, and rounding them to fit a byte would hide exactly the difference
+     * between tiers this payload exists to show. */
+    uint16_t power_budget_ma;     /* what the source advertised; 0 = none/unidentified */
+    uint16_t charge_limit_ma;     /* input current limit in force, or ORYX_TLM_CURRENT_UNKNOWN */
+    uint16_t charge_current_ma;   /* charge current in force, or ORYX_TLM_CURRENT_UNKNOWN */
+    uint8_t  charge_state;        /* ORYX_TLM_CHG_* */
+    uint8_t reserved[13];         /* zero; room for thirteen more one-byte fields */
 } oryx_telemetry_t;
 
 _Static_assert(sizeof(oryx_telemetry_t) == RAW_EPSIZE - 1, "telemetry payload must fill the report");
@@ -108,6 +129,8 @@ static inline void oryx_telemetry_reset(oryx_telemetry_t *tlm) {
     tlm->battery_right_source = ORYX_TLM_SRC_UNKNOWN;
     tlm->nav_left             = ORYX_TLM_NAV_UNKNOWN;
     tlm->nav_right            = ORYX_TLM_NAV_UNKNOWN;
+    tlm->charge_state         = ORYX_TLM_CHG_UNKNOWN;
+    /* The three currents stay 0, which is already their "we do not know". */
 }
 
 /* Weak hook. The oryx module owns the wire format but knows none of the

@@ -75,22 +75,34 @@ static bool     dfu_rgb_was_enabled;
 /* ---- Adaptive charging ---- *
  *
  * The left nRF reports the USB source's CC-detected current budget
- * (EVT_PWR_BUDGET); this module owns the charging policy: on a high-budget
- * source it commands both halves to raise their VBUS input current limit
- * to their devicetree value — the left over UART (CMD_VBUS_ILIM), the
- * right over the TRRS I2C bus (voyager_right_nrf_vbus_ilim_high()).
- * The raise is re-sent every PWR_BUDGET_MAINTAIN_INTERVAL_MS while the
- * budget stays high: both commands are idempotent, and the resend covers
- * right-half TRRS hot-plug, right VBUS arriving late, and nRF reboots.
- * There is no explicit lower command — the nPM1300s auto-revert to their
- * startup limit on VBUS removal. */
-static uint16_t nrf_power_budget_ma = ZSA_PWR_BUDGET_DEFAULT_MA;
+ * (EVT_PWR_BUDGET); this module owns the charging policy and both halves
+ * execute it. zsa_charge_limits_for_budget() in the shared wire header turns
+ * that budget into the two currents to apply — how much we may draw from VBUS,
+ * and how much of it goes into each cell — and they are commanded to the left
+ * over UART (CMD_CHARGE_LIMITS) and to the right over the TRRS I2C bus
+ * (voyager_right_nrf_set_charge_limits()).
+ *
+ * Sent whenever the computed limits change, so a source that renegotiates
+ * downward is followed down and not only up, and re-sent every
+ * PWR_BUDGET_MAINTAIN_INTERVAL_MS otherwise: both commands are idempotent, and
+ * the resend covers right-half TRRS hot-plug, right VBUS arriving late, and
+ * nRF reboots. Nothing here has to lower the input limit on unplug — the
+ * nPM1300s revert to their startup limit by themselves when VBUS goes away.
+ *
+ * There is no user setting and no host command for any of this. The rate
+ * follows the source, and only the source. */
+static uint16_t nrf_power_budget_ma  = ZSA_PWR_BUDGET_UNKNOWN_MA;
+static bool     pwr_budget_seen;      /* any EVT_PWR_BUDGET received yet */
 static uint32_t last_pwr_maintain_ms = 0;
+/* What we last commanded, and whether we have commanded anything yet. Reported
+ * as telemetry, so it has to be what went out rather than what we would send. */
+static struct zsa_charge_limits commanded_limits;
+static bool                     limits_commanded;
 #define PWR_BUDGET_MAINTAIN_INTERVAL_MS 5000
 
-/* Board-provided (voyager_tng.c) right-half raise command; extern rather
+/* Board-provided (voyager_tng.c) right-half charge command; extern rather
  * than including the board header to keep the module decoupled. */
-extern bool voyager_right_nrf_vbus_ilim_high(void);
+extern bool voyager_right_nrf_set_charge_limits(uint16_t vbus_limit_ma, uint16_t charge_ma);
 extern bool is_transport_connected(void);
 /* Bus ownership decision, made in the keyboard's matrix.c by probing the real
  * expander. LED addressing and the grant must follow the same signal. */
@@ -138,7 +150,7 @@ static bool     right_tlm_valid;
 static uint32_t last_right_tlm_ms;
 #define RIGHT_TLM_INTERVAL_MS 1000
 
-/* Board-provided (voyager_tng.c), like voyager_right_nrf_vbus_ilim_high(). */
+/* Board-provided (voyager_tng.c), like voyager_right_nrf_set_charge_limits(). */
 extern bool voyager_right_nrf_read_telemetry(struct zsa_right_telemetry *out);
 
 #ifdef DIGITIZER_MODE_TOUCHPAD
@@ -327,10 +339,16 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
              * our nav capabilities immediately and wait for a fresh ack. */
             nav_announce_acked   = false;
             last_nav_announce_ms = 0;
-            /* Same reasoning for the power budget: drop any stale "high"
-             * until the nRF re-reports its real budget (sent right after
-             * link-up). */
-            nrf_power_budget_ma = ZSA_PWR_BUDGET_DEFAULT_MA;
+            /* Same reasoning for the power budget: forget what the old link
+             * said until the nRF re-reports its real budget (sent right after
+             * link-up). Back to UNKNOWN, not DEFAULT — an unidentified source
+             * is one we may take 100 mA from, and assuming 500 mA across a
+             * link that just came up is exactly the assumption the floor
+             * exists to prevent. An nRF that rebooted also lost its runtime
+             * input limit, so what we commanded is no longer in force. */
+            nrf_power_budget_ma = ZSA_PWR_BUDGET_UNKNOWN_MA;
+            pwr_budget_seen     = false;
+            limits_commanded    = false;
             /* An nRF that rebooted lost its DFU lock, so nothing is being
              * flashed any more. send_nrf_state() re-asserts it right after
              * this if the update is in fact still running. */
@@ -446,7 +464,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             if (frame->len >= sizeof(struct zsa_pwr_budget)) {
                 const struct zsa_pwr_budget *p = (const struct zsa_pwr_budget *)frame->payload;
                 nrf_power_budget_ma  = p->budget_ma;
-                /* Act on the next loop iteration, not the next 5 s tick. */
+                pwr_budget_seen      = true;
+                /* Re-derive on the next loop iteration, not the next 5 s
+                 * tick: this is the event that makes the rate change. */
                 last_pwr_maintain_ms = 0;
             }
             break;
@@ -457,6 +477,12 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 bool present = v->present != 0;
                 if (present != nrf_vbus_present) {
                     nrf_vbus_present = present;
+                    /* The PMICs dropped their input limit back to the startup
+                     * value when VBUS went away, so whatever we commanded is
+                     * no longer in force. Without this, replugging the same
+                     * source computes the same limits, sees no change, and
+                     * leaves the board at 100 mA until the next 5 s tick. */
+                    limits_commanded = false;
                     zsa_wireless_vbus_changed(present);
                 }
             }
@@ -669,11 +695,40 @@ static void telemetry_nav(oryx_telemetry_t *tlm) {
     }
 }
 
+/* What the charging policy decided and what came of it. Reports what was
+ * actually commanded, not what would be commanded now: until the link is up
+ * and something has gone out, the answer is that we do not know. */
+static void telemetry_charging(oryx_telemetry_t *tlm) {
+    if (!link_ready) {
+        return;
+    }
+
+    tlm->power_budget_ma = nrf_power_budget_ma;
+
+    if (limits_commanded) {
+        tlm->charge_limit_ma   = commanded_limits.vbus_limit_ma;
+        tlm->charge_current_ma = commanded_limits.charge_ma;
+    }
+
+    if (!nrf_vbus_present) {
+        tlm->charge_state = ORYX_TLM_CHG_BATTERY;
+    } else if (nrf_power_budget_ma == ZSA_PWR_BUDGET_UNKNOWN_MA) {
+        tlm->charge_state = ORYX_TLM_CHG_FLOOR;
+    } else if (zsa_wireless_battery_fresh() && !(nrf_battery_flags & ZSA_BAT_FLAG_CHARGING)) {
+        /* The nRF reports charging only while current is really flowing, so a
+         * source with the flag clear means the charger terminated. */
+        tlm->charge_state = ORYX_TLM_CHG_FULL;
+    } else if (zsa_wireless_battery_fresh()) {
+        tlm->charge_state = ORYX_TLM_CHG_CHARGING;
+    }
+}
+
 /* Strong override of oryx.c's weak hook. */
 void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
     oryx_telemetry_reset(tlm);
     telemetry_battery(tlm);
     telemetry_nav(tlm);
+    telemetry_charging(tlm);
 }
 #endif // COMMUNITY_MODULE_ORYX_ENABLE
 
@@ -1049,28 +1104,35 @@ void bluetooth_init(void) {
 #endif
 }
 
-/* Charging policy: while a high-budget source is attached (host or charger),
- * (re-)command both halves to raise their VBUS input limit. See the
- * adaptive-charging comment block at the top for the full rationale. */
+/* Charging policy: command both halves the rate the attached source allows.
+ * See the adaptive-charging comment block at the top for the full rationale. */
 static void power_budget_task(void) {
     /* Gated on the reported budget only, not usb_connected_state(): a wall
-     * charger supplies VBUS without ever enumerating. The nRF reports HIGH
+     * charger supplies VBUS without ever enumerating. The nRF reports a budget
      * only while VBUS is present, so the budget alone implies power. */
-    if (!link_ready) {
+    /* Nothing is commanded before the nRF has said what the source is. The
+     * PMICs are already sitting at the startup floor, so a guess made first
+     * could only be wrong, and it would stop and restart both chargers to
+     * apply a rate we are about to replace. */
+    if (!link_ready || !pwr_budget_seen) {
         return;
     }
-    if (nrf_power_budget_ma < ZSA_PWR_BUDGET_HIGH_MA) {
+
+    struct zsa_charge_limits want = zsa_charge_limits_for_budget(nrf_power_budget_ma);
+
+    /* A changed budget is acted on at once; an unchanged one on the maintain
+     * cadence. Both go out — the nRFs drop repeats, so the resend is free. */
+    bool changed = !limits_commanded || want.vbus_limit_ma != commanded_limits.vbus_limit_ma || want.charge_ma != commanded_limits.charge_ma;
+    if (!changed && timer_elapsed32(last_pwr_maintain_ms) < PWR_BUDGET_MAINTAIN_INTERVAL_MS) {
         return;
     }
-    if (last_pwr_maintain_ms != 0 &&
-        timer_elapsed32(last_pwr_maintain_ms) < PWR_BUDGET_MAINTAIN_INTERVAL_MS) {
-        return;
-    }
-    struct zsa_vbus_ilim payload = { .level = ZSA_VBUS_ILIM_HIGH };
-    zsa_wireless_send_frame(ZSA_MSG_CMD_VBUS_ILIM, (const uint8_t *)&payload, sizeof(payload));
+
+    zsa_wireless_send_frame(ZSA_MSG_CMD_CHARGE_LIMITS, (const uint8_t *)&want, sizeof(want));
     if (is_transport_connected()) {
-        (void)voyager_right_nrf_vbus_ilim_high();
+        (void)voyager_right_nrf_set_charge_limits(want.vbus_limit_ma, want.charge_ma);
     }
+    commanded_limits     = want;
+    limits_commanded     = true;
     last_pwr_maintain_ms = timer_read32();
 }
 

@@ -83,12 +83,15 @@ enum zsa_msg_type {
                                          * nRF re-advertises afterwards */
     ZSA_MSG_CMD_BLE_UNPAIR   = 0x2A,  /* 0 B: clear all bonds, refresh the BLE
                                        * identity and re-advertise */
-    ZSA_MSG_CMD_VBUS_ILIM    = 0x26,  /* 1 B: struct zsa_vbus_ilim — set the
-                                       * left half's VBUS input current limit.
+    ZSA_MSG_CMD_CHARGE_LIMITS = 0x26, /* 4 B: struct zsa_charge_limits — the
+                                       * VBUS input current limit and the
+                                       * charge current to apply, both in mA.
                                        * The STM32 is the charging policy
                                        * point; the left nRF only detects CC
                                        * capability (EVT_PWR_BUDGET) and
-                                       * executes this command. */
+                                       * executes this command. Was
+                                       * CMD_VBUS_ILIM (1 B level) — same ID,
+                                       * wider payload; see struct below. */
 
     /* nRF -> STM32: DFU commands (0x30-0x3F) */
     ZSA_MSG_DFU_ERASE        = 0x30,  /* 4 B: addr LE32 */
@@ -285,7 +288,13 @@ struct __attribute__((packed)) zsa_digitizer_mode {
 /* ZSA_MSG_EVT_PWR_BUDGET (2 bytes, LE) — detected USB source current budget.
  * Carries mA (not a bool) so 1.5 A vs 3 A differentiation or a dynamic
  * per-side split later needs no protocol change. Today the left's CC detect
- * only distinguishes default vs high class, so it sends DEFAULT or HIGH. */
+ * only distinguishes default vs high class, so it sends DEFAULT or HIGH.
+ *
+ * UNKNOWN is its own value rather than a low number: no source is attached, or
+ * one is but CC has not resolved yet. It must not read as DEFAULT — a source
+ * that really advertised 500 mA is a source we may draw 500 mA from, and one
+ * we have not identified is not. */
+#define ZSA_PWR_BUDGET_UNKNOWN_MA    0u
 #define ZSA_PWR_BUDGET_DEFAULT_MA  500u
 #define ZSA_PWR_BUDGET_HIGH_MA    1500u
 struct __attribute__((packed)) zsa_pwr_budget {
@@ -320,15 +329,112 @@ struct __attribute__((packed)) zsa_link_state {
     uint8_t peer_version; /* right half's reported version, 0 when unknown */
 };
 
-/* ZSA_MSG_CMD_VBUS_ILIM (1 byte) — level, not raw mA: the actual current
- * values live in each half's devicetree (current-microamp). Lowering happens
- * via the nPM1300's own auto-revert to the startup limit on VBUS removal;
- * DEFAULT exists for future policy and is a no-op today. */
-#define ZSA_VBUS_ILIM_DEFAULT 0
-#define ZSA_VBUS_ILIM_HIGH    1
-struct __attribute__((packed)) zsa_vbus_ilim {
-    uint8_t level;
+/* ---- Adaptive charging policy ----
+ *
+ * ZSA_MSG_CMD_CHARGE_LIMITS (4 bytes, LE) — the two currents to apply, in mA,
+ * following EVT_PWR_BUDGET's precedent of carrying a number rather than a
+ * class. It replaced a 1-byte {DEFAULT, HIGH} level, which could say nothing
+ * about a source between the two and nothing at all about charge rate.
+ *
+ *   vbus_limit_ma  how much this half may draw from VBUS (nPM1300 VBUSINILIM)
+ *   charge_ma      how much of that goes into the cell (nPM1300 ICHG)
+ *
+ * Absolute values, not levels: the STM32 is the policy point and must be able
+ * to name any rate the source allows, including ones no enum anticipated. Each
+ * half still clamps what it receives to its own devicetree bounds, so a half
+ * with a different cell or a different VBUS path is never talked past them. */
+struct __attribute__((packed)) zsa_charge_limits {
+    uint16_t vbus_limit_ma;
+    uint16_t charge_ma;
 };
+
+/* Input current limit bounds, in mA.
+ *
+ * FLOOR is what a USB device may draw before it is configured. It is the
+ * startup limit in both halves' devicetree (vbus-limit-microamp), where an
+ * unidentified source lands, and where the PMIC returns by itself on VBUS
+ * removal. Nothing may lower it further and nothing may skip past it.
+ *
+ * MAX and STEP are the nPM1300's VBUSINILIM register: 100 mA steps up to
+ * 1.5 A, which is also why a 3 A source buys nothing over a 1.5 A one. */
+#define ZSA_VBUS_LIMIT_FLOOR_MA  100u
+#define ZSA_VBUS_LIMIT_MAX_MA   1500u
+#define ZSA_VBUS_LIMIT_STEP_MA   100u
+
+/* One source, two halves. The right half's power is exported from the left
+ * over TRRS_Vo, so its budget is not a second one — the two divide the one
+ * they have, and the old 700 mA-per-side ceiling was that division in
+ * disguise. Split evenly, which is the only division that is safe whichever
+ * side of the left's own input gate TRRS_Vo turns out to be taken from: in
+ * series the pair draws half the budget, in parallel exactly the budget, and
+ * neither exceeds it. */
+#define ZSA_CHARGE_HALVES 2u
+
+/* Held back from each half's share for that half's own draw, before any of it
+ * is offered to its charger: its nRF, its LED rail at a brightness someone
+ * plugged in is likely to run, and on the left the STM32 as well. Counted
+ * amp-for-amp against the VBUS limit even though the PMIC's buck means an amp
+ * in is worth more than an amp out — the error is in the safe direction.
+ *
+ * Overcommitting is the expensive mistake: the nPM1300 does not back its
+ * charger off to fit the input limit, it lets VSYS droop and supplements from
+ * the pack, so a battery that is supposed to be charging discharges instead.
+ * Undercommitting only charges slower. An estimate until someone puts a meter
+ * on a half at a known brightness. */
+#define ZSA_SYSTEM_DRAW_MA 150u
+
+/* Charge current bounds, in mA. MAX is the pack's rated charge current and
+ * matches current-microamp in both halves' devicetree today; MIN is the
+ * nPM1300's smallest programmable ICHG. Policy's belief about the cell — each
+ * nRF clamps to the devicetree it was actually built with. */
+#define ZSA_CHARGE_CURRENT_MIN_MA  32u
+#define ZSA_CHARGE_CURRENT_MAX_MA 700u
+
+/* The whole policy: what a source advertising budget_ma entitles ONE HALF to.
+ * Both halves are sent the same answer, and between them they stay inside what
+ * the source offered.
+ *
+ * Derived rather than tabulated, so a source class nobody has written down yet
+ * still gets a sensible answer — the same reason EVT_PWR_BUDGET carries mA.
+ * The input limit is the largest step the PMIC can program at or below this
+ * half's share, never under the pre-enumeration floor and never over what the
+ * register can express. The charge current is whatever is left of that after
+ * the half has fed itself, inside the cell's own limits.
+ *
+ * ZSA_PWR_BUDGET_UNKNOWN_MA lands on the floor, which is the point: an
+ * unidentified source and a source that advertised nothing are the same source
+ * as far as what we are allowed to take from it. At the floor there is not
+ * even enough for the keyboard to run, let alone charge — both halves run
+ * partly off their packs until a source identifies itself, exactly as they do
+ * today — so the charge current there is simply the smallest the PMIC can be
+ * set to rather than a share of anything.
+ *
+ * Pure and total — every uint16_t is a valid input. Tested exhaustively in
+ * shared/tests/zsa_charge_policy_test.c. */
+static inline struct zsa_charge_limits zsa_charge_limits_for_budget(uint16_t budget_ma)
+{
+    struct zsa_charge_limits out;
+    uint16_t share = (uint16_t)(budget_ma / ZSA_CHARGE_HALVES);
+    uint16_t vbus  = (share > ZSA_VBUS_LIMIT_MAX_MA) ? ZSA_VBUS_LIMIT_MAX_MA : share;
+    uint16_t charge;
+
+    vbus = (uint16_t)(vbus - (vbus % ZSA_VBUS_LIMIT_STEP_MA));
+    if (vbus < ZSA_VBUS_LIMIT_FLOOR_MA) {
+        vbus = ZSA_VBUS_LIMIT_FLOOR_MA;
+    }
+
+    charge = (vbus > ZSA_SYSTEM_DRAW_MA) ? (uint16_t)(vbus - ZSA_SYSTEM_DRAW_MA) : 0u;
+    if (charge < ZSA_CHARGE_CURRENT_MIN_MA) {
+        charge = ZSA_CHARGE_CURRENT_MIN_MA;
+    }
+    if (charge > ZSA_CHARGE_CURRENT_MAX_MA) {
+        charge = ZSA_CHARGE_CURRENT_MAX_MA;
+    }
+
+    out.vbus_limit_ma = vbus;
+    out.charge_ma     = charge;
+    return out;
+}
 
 /* ZSA_MSG_CMD_BUS_GRANT (1 byte) — a lease, not a latch. QMK resends it on
  * every ownership re-evaluation; the right half releases the bus on its own if
