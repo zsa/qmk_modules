@@ -57,6 +57,11 @@ bool zsa_wireless_dfu_active(void);
  * (EVT_VBUS_STATE), e.g. to drive their own USB D+ pullup. */
 void zsa_wireless_vbus_changed(bool present);
 
+/* Weak hook: reboot into the keyboard's bootloader, invoked on
+ * ZSA_MSG_DFU_ENTER so a host can start an STM32 update over BLE. Does not
+ * return on a keyboard that implements it; the default is a no-op. */
+void zsa_wireless_enter_bootloader(void);
+
 /* State of the pairing status LED. RELEASE hands the pin back to whatever
  * else drives it. */
 enum zsa_pair_led_state {

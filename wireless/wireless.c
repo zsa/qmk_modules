@@ -496,6 +496,16 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 
+        case ZSA_MSG_DFU_ENTER:
+            /* Frames are dispatched from bluetooth_task(), so this resets
+             * inline rather than deferring. Releases any held key first — the
+             * nRF keeps reporting the last HID state, and the STM32 is about
+             * to stop sending. No ack: ignition announces DFU_READY itself. */
+            zsa_log("dfu: entering bootloader");
+            clear_keyboard();
+            zsa_wireless_enter_bootloader();
+            break;
+
         default:
             break;
     }
@@ -812,6 +822,9 @@ __attribute__((weak)) void zsa_nav_transport_changed(void) {}
 
 /* Keyboards override this to drive their own USB D+ pullup from VBUS state. */
 __attribute__((weak)) void zsa_wireless_vbus_changed(bool present) { (void)present; }
+
+/* Keyboards with a bootloader QMK can hand off to override this. */
+__attribute__((weak)) void zsa_wireless_enter_bootloader(void) {}
 
 /* ---- Pairing status LED ---- */
 

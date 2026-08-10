@@ -96,11 +96,22 @@ enum zsa_msg_type {
     /* nRF -> STM32: DFU commands (0x30-0x3F) */
     ZSA_MSG_DFU_ERASE        = 0x30,  /* 4 B: addr LE32 */
     ZSA_MSG_DFU_SETADDR      = 0x31,  /* 4 B: addr LE32 */
-    ZSA_MSG_DFU_DATA         = 0x32,  /* <=64 B: firmware chunk */
-    ZSA_MSG_DFU_MANIFEST     = 0x33,  /* 0 B: finalize + reset */
+    ZSA_MSG_DFU_DATA         = 0x32,  /* <=ZSA_MAX_PAYLOAD B: firmware chunk.
+                                       * Chunks concatenate into one byte
+                                       * stream; an odd-length chunk carries
+                                       * its trailing byte into the next one. */
+    ZSA_MSG_DFU_MANIFEST     = 0x33,  /* 0 B: finalize + reset.
+                                       * 8 B: struct zsa_dfu_manifest — verify
+                                       * the image before resetting. */
     ZSA_MSG_DFU_ABORT        = 0x34,  /* 0 B: abort transfer */
     ZSA_MSG_DFU_MASS_ERASE   = 0x35,  /* 4 B: end addr LE32 (0 = full app region) */
     ZSA_MSG_DFU_QUERY        = 0x36,  /* 0 B: nRF asks if STM32 is in DFU mode */
+    ZSA_MSG_DFU_ENTER        = 0x37,  /* 0 B: reboot into the bootloader. The
+                                       * running QMK app arms the backup
+                                       * register and resets; ignition, already
+                                       * in DFU, just answers DFU_READY. Either
+                                       * way the reply is DFU_READY, so the
+                                       * host sends this and waits for one. */
 
     /* nRF -> STM32: queries (0x70-0x7F) */
     ZSA_MSG_QUERY_USB_STATE  = 0x70,  /* 0 B: nRF asks STM32 for USB state */
@@ -468,6 +479,24 @@ enum zsa_dfu_error {
     ZSA_DFU_ERR_VERIFY     = 0x04,
     ZSA_DFU_ERR_UNKNOWN    = 0xFF,
 };
+
+/* ZSA_MSG_DFU_MANIFEST (8 bytes, optional — a 0-byte manifest skips the check)
+ *
+ * The DFU data characteristic is write-without-response and nothing acks a
+ * chunk, so a dropped write is invisible to both ends. This is the only
+ * end-to-end integrity check on the image: the STM32 reads back what it wrote
+ * and refuses to reset into it unless the CRC matches.
+ *
+ * crc32 is CRC-32/ISO-HDLC (poly 0xEDB88320 reflected, init 0xFFFFFFFF, final
+ * xor 0xFFFFFFFF) over the first `len` bytes at APP_ADDRESS — the same value
+ * Python's zlib.crc32 and Rust's crc32fast produce over the image file.
+ */
+struct __attribute__((packed)) zsa_dfu_manifest {
+    uint32_t len;    /* image length in bytes */
+    uint32_t crc32;
+};
+
+#define ZSA_DFU_MANIFEST_LEN 8u
 
 /* ZSA_MSG_LOG_LINE source tag */
 enum zsa_log_src {
