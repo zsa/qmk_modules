@@ -32,6 +32,66 @@
 /* keyboard.c — not in keyboard.h but we need it to reset the idle timer */
 void last_matrix_activity_trigger(void);
 
+/* ---- Independent watchdog ----
+ *
+ * A wedged main loop (unbounded UART drain, stuck blocking TX, a hung I2C
+ * transaction that escapes its timeout) leaves the keyboard dead until the
+ * battery is pulled — unacceptable for a sealed wireless product. The IWDG
+ * runs off the independent LSI (~40 kHz, keeps counting in sleep/Stop) and
+ * hard-resets the MCU if not kicked within ZSA_WATCHDOG_TIMEOUT_MS.
+ *
+ * Kick points cover every steady state of the firmware:
+ *   - bluetooth_task()        — every keyboard_task() pass, wired or not
+ *   - the slow-scan idle loop — bypasses keyboard_task() while idle
+ *
+ * USB suspend needs no kick of its own. This module sets BLUETOOTH_ENABLE,
+ * and common_features.mk forces NO_USB_STARTUP_CHECK with it, which compiles
+ * out the `while (USB_DRIVER.state == USB_SUSPENDED) { suspend_power_down(); }`
+ * loop in protocol_pre_task(). protocol_pre_task() then returns immediately
+ * and main() keeps running keyboard_task() — and so bluetooth_task() — every
+ * pass while suspended. suspend_power_down() has no caller left on ChibiOS,
+ * so a suspend_power_down_wireless() hook would be dead code.
+ *
+ * The IWDG is disabled by any MCU reset, so bootloader_jump's soft reset
+ * into Ignition (which arms its own watchdog) is unaffected. On battery
+ * DEEP idle, the nRF cuts the rail (ship mode) — the watchdog dies with
+ * the MCU, and if ship mode never engages the main loop keeps kicking.
+ *
+ * STM32-only: both boards that pull this module in are STM32F303, but the
+ * register access is guarded so a non-STM32 target still compiles.
+ */
+#if defined(MCU_STM32)
+#    include <hal.h>
+
+#    ifndef ZSA_WATCHDOG_TIMEOUT_MS
+#        define ZSA_WATCHDOG_TIMEOUT_MS 2000
+#    endif
+
+static void watchdog_start(void) {
+    /* Freeze the counter while a debugger has the core halted so
+     * breakpoints don't reboot the board mid-session. */
+    DBGMCU->APB1FZ |= DBGMCU_APB1_FZ_DBG_IWDG_STOP;
+    /* LSI/64 => 1.6 ms/tick at the nominal 40 kHz (F303 LSI spans
+     * 30-50 kHz; at 50 kHz a 2 s setting still gives 1.6 s — fine, the
+     * loop kicks every pass). First-ever configuration, so IWDG_SR is 0
+     * and PR/RLR are writable immediately (no PVU/RVU wait needed). */
+    uint32_t reload = (uint32_t)ZSA_WATCHDOG_TIMEOUT_MS * 40u / 64u;
+    if (reload > 0xFFFu) reload = 0xFFFu;
+    IWDG->KR  = 0x5555u; /* unlock PR/RLR */
+    IWDG->PR  = 4u;      /* prescaler /64 */
+    IWDG->RLR = reload;
+    IWDG->KR  = 0xAAAAu; /* load the reload value */
+    IWDG->KR  = 0xCCCCu; /* start — from here on it can't be stopped */
+}
+
+static inline void watchdog_kick(void) {
+    IWDG->KR = 0xAAAAu;
+}
+#else
+static inline void watchdog_start(void) {}
+static inline void watchdog_kick(void) {}
+#endif
+
 /* ---- Link state ---- */
 
 static bool     link_ready = false;
@@ -942,6 +1002,7 @@ static void idle_power_task(void) {
      * keystroke that wakes us will be processed on the next
      * keyboard_task() iteration after we return. */
     while (idle_step >= ZSA_IDLE_LEDS_OFF) {
+        watchdog_kick();
         wait_ms(ZSA_IDLE_SCAN_DELAY_MS);
 
         /* Service UART so nRF events (e.g. BLE wake) can reach us */
@@ -1115,6 +1176,7 @@ void bluetooth_init(void) {
     zsa_log_tap_init();
     zsa_log("zsa_wireless: init (ZSA_BLE_LOG=on)");
 #endif
+    watchdog_start();
 }
 
 /* Charging policy: command both halves the rate the attached source allows.
@@ -1172,6 +1234,8 @@ static void right_telemetry_task(void) {
 }
 
 void bluetooth_task(void) {
+    watchdog_kick();
+
     zsa_rtt_loop_tick(); // TEMP DEBUG
 
     /* Process incoming frames */
