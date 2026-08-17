@@ -113,6 +113,15 @@ enum zsa_msg_type {
                                        * way the reply is DFU_READY, so the
                                        * host sends this and waits for one. */
 
+    /* STM32 -> nRF: live-app confirm tunnel (0x38-0x39). Unlike the rest of
+     * this block it runs against the running application, not a bootloader:
+     * the STM32 asks the left nRF to confirm the image it is executing and the
+     * app answers. Nothing here reboots or reflashes anything. */
+    ZSA_MSG_CONFIRM_QUERY    = 0x38,  /* STM -> nRF, ZSA_CONFIRM_QUERY_LEN B:
+                                       * struct zsa_confirm_query */
+    ZSA_MSG_CONFIRM_REPLY    = 0x39,  /* nRF -> STM, ZSA_CONFIRM_REPLY_LEN B:
+                                       * struct zsa_confirm_reply */
+
     /* nRF -> STM32: queries (0x70-0x7F) */
     ZSA_MSG_QUERY_USB_STATE  = 0x70,  /* 0 B: nRF asks STM32 for USB state */
 
@@ -497,6 +506,40 @@ struct __attribute__((packed)) zsa_dfu_manifest {
 };
 
 #define ZSA_DFU_MANIFEST_LEN 8u
+
+/* ---- Live-app confirm tunnel ---- */
+
+/* The leading bytes of the running image's TLV hash — the same prefix
+ * img_mgmt's `sha` carries and the same length the halves' update session
+ * names, so a host compares one value everywhere. */
+#define ZSA_CONFIRM_HASH_LEN 32u
+
+/* ZSA_MSG_CONFIRM_QUERY: the hash the host expects the target to be running.
+ * The target confirms itself only if its own running hash matches, which is
+ * img_mgmt's STATE_WRITE rule. */
+struct __attribute__((packed)) zsa_confirm_query {
+    uint8_t hash[ZSA_CONFIRM_HASH_LEN];
+};
+
+#define ZSA_CONFIRM_QUERY_LEN 32u
+
+/* ZSA_MSG_CONFIRM_REPLY payload[0]. */
+enum zsa_confirm_status {
+    ZSA_CONFIRM_OK         = 0x00,  /* matched; the trailer is now confirmed */
+    ZSA_CONFIRM_ALREADY    = 0x01,  /* matched; it was already confirmed */
+    ZSA_CONFIRM_MISMATCH   = 0x02,  /* a different image is running; not written */
+    ZSA_CONFIRM_UNREADABLE = 0x03,  /* the running hash could not be read */
+    ZSA_CONFIRM_WRITE_FAIL = 0x04,  /* the trailer write itself failed */
+};
+
+/* ZSA_MSG_CONFIRM_REPLY: what the target did, and what it is actually
+ * running. `hash` is all zero when status is ZSA_CONFIRM_UNREADABLE. */
+struct __attribute__((packed)) zsa_confirm_reply {
+    uint8_t status;                     /* enum zsa_confirm_status */
+    uint8_t hash[ZSA_CONFIRM_HASH_LEN];
+};
+
+#define ZSA_CONFIRM_REPLY_LEN 33u
 
 /* ZSA_MSG_LOG_LINE source tag */
 enum zsa_log_src {
