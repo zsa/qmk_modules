@@ -514,22 +514,32 @@ struct __attribute__((packed)) zsa_dfu_manifest {
  * names, so a host compares one value everywhere. */
 #define ZSA_CONFIRM_HASH_LEN 32u
 
-/* ZSA_MSG_CONFIRM_QUERY: the hash the host expects the target to be running.
- * The target confirms itself only if its own running hash matches, which is
- * img_mgmt's STATE_WRITE rule. */
+/* ZSA_MSG_CONFIRM_QUERY mode. The host reads both halves' running hashes first
+ * and only sends COMMIT once both reads matched. */
+enum zsa_confirm_mode {
+    ZSA_CONFIRM_MODE_READ   = 0,  /* report the running hash + confirmed state; write nothing */
+    ZSA_CONFIRM_MODE_COMMIT = 1,  /* write the trailer if the running hash matches expect */
+};
+
+/* ZSA_MSG_CONFIRM_QUERY: the mode, then the hash the host expects the target to
+ * be running. READ reports the running hash and writes nothing. COMMIT writes
+ * MCUboot's trailer only if the running hash matches, which is img_mgmt's
+ * STATE_WRITE rule. */
 struct __attribute__((packed)) zsa_confirm_query {
+    uint8_t mode;                        /* enum zsa_confirm_mode */
     uint8_t hash[ZSA_CONFIRM_HASH_LEN];
 };
 
-#define ZSA_CONFIRM_QUERY_LEN 32u
+#define ZSA_CONFIRM_QUERY_LEN 33u
 
 /* ZSA_MSG_CONFIRM_REPLY payload[0]. */
 enum zsa_confirm_status {
-    ZSA_CONFIRM_OK         = 0x00,  /* matched; the trailer is now confirmed */
+    ZSA_CONFIRM_OK         = 0x00,  /* COMMIT: matched; the trailer is now confirmed */
     ZSA_CONFIRM_ALREADY    = 0x01,  /* matched; it was already confirmed */
-    ZSA_CONFIRM_MISMATCH   = 0x02,  /* a different image is running; not written */
+    ZSA_CONFIRM_MISMATCH   = 0x02,  /* COMMIT: a different image is running; not written */
     ZSA_CONFIRM_UNREADABLE = 0x03,  /* the running hash could not be read */
     ZSA_CONFIRM_WRITE_FAIL = 0x04,  /* the trailer write itself failed */
+    ZSA_CONFIRM_RUNNING    = 0x05,  /* READ: running the reported image, not confirmed; nothing written */
 };
 
 /* ZSA_MSG_CONFIRM_REPLY: what the target did, and what it is actually
