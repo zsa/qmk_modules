@@ -27,12 +27,8 @@ static uint8_t nav_addr = NAVIGATOR_TRACKBALL_ADDRESS;
 paw3805ek_reg_seq_t paw3805ek_configure_seq[] = {
     {0x06, 0x80},                 // Software reset
     {0x00, 0x00},                 // Request the sensor ID
-    {0x09 | WRITE_REG_BIT, 0x5A}, // Disable the write protection
-#ifdef MOUSE_EXTENDED_REPORT
-    {0x19 | WRITE_REG_BIT, 0x30}, // Set the sensor orientation, set motion data length to 16 bits
-#else
-    {0x19 | WRITE_REG_BIT, 0x34}, // Set the sensor orientation, set motion data length to 8 bits
-#endif
+    {0x09 | WRITE_REG_BIT, 0x5A},                                    // Disable the write protection
+    {PAW3805EK_REG_ORIENTATION | WRITE_REG_BIT, PAW3805EK_ORIENTATION}, // Sensor orientation and motion data length
     //{0x26 | WRITE_REG_BIT, 0x10}, // Enable burst mode
     {0x09 | WRITE_REG_BIT, 0x00}, // Enable the write protection
 };
@@ -136,15 +132,24 @@ static busdev_step_t nav_init_step(uint8_t addr, uint8_t step, uint16_t *delay_m
     return BUSDEV_STEP_DONE;
 }
 
-// Reads the sensor product ID through the bridge, exercising the whole path.
+// Reads the sensor product ID through the bridge, exercising the whole path,
+// then the orientation register, which a reset sensor no longer holds.
 static bool nav_verify(uint8_t addr) {
     nav_addr = addr;
 
-    uint8_t buf[3] = {NCS_PIN, 0x00, 0x00};
-    if (sci18is606_spi_tx(buf, 3, true) != I2C_STATUS_SUCCESS) {
+    uint8_t id[3] = {NCS_PIN, 0x00, 0x00};
+    if (sci18is606_spi_tx(id, 3, true) != I2C_STATUS_SUCCESS) {
         return false;
     }
-    return buf[1] == PAW3805EK_ID;
+    if (id[1] != PAW3805EK_ID) {
+        return false;
+    }
+
+    uint8_t orientation[3] = {NCS_PIN, PAW3805EK_REG_ORIENTATION, 0x00};
+    if (sci18is606_spi_tx(orientation, 3, true) != I2C_STATUS_SUCCESS) {
+        return false;
+    }
+    return orientation[1] == PAW3805EK_ORIENTATION;
 }
 
 static const busdev_desc_t nav_desc = {
@@ -172,22 +177,22 @@ bool paw3805ek_has_motion(void) {
 // Read the motion data from the paw3805ek sensor.
 void paw3804ek_read_motion(report_mouse_t *mouse_report) {
 #ifdef MOUSE_EXTENDED_REPORT
-    uint8_t delta_x_l[2] = {0x01, 0x03};
+    uint8_t delta_x_l[3] = {0x01, 0x03, 0x00};
     if (sci18is606_spi_tx(delta_x_l, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_y_l[2] = {0x01, 0x04};
+    uint8_t delta_y_l[3] = {0x01, 0x04, 0x00};
     if (sci18is606_spi_tx(delta_y_l, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_x_h[2] = {0x01, 0x11};
+    uint8_t delta_x_h[3] = {0x01, 0x11, 0x00};
     if (sci18is606_spi_tx(delta_x_h, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_y_h[2] = {0x01, 0x12};
+    uint8_t delta_y_h[3] = {0x01, 0x12, 0x00};
     if (sci18is606_spi_tx(delta_y_h, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
@@ -195,12 +200,12 @@ void paw3804ek_read_motion(report_mouse_t *mouse_report) {
     mouse_report->x = (int16_t)((delta_x_h[1] << 8) | delta_x_l[1]);
     mouse_report->y = (int16_t)((delta_y_h[1] << 8) | delta_y_l[1]);
 #else
-    uint8_t delta_x[2] = {0x01, 0x03};
+    uint8_t delta_x[3] = {0x01, 0x03, 0x00};
     if (sci18is606_spi_tx(delta_x, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_y[2] = {0x01, 0x04};
+    uint8_t delta_y[3] = {0x01, 0x04, 0x00};
     if (sci18is606_spi_tx(delta_y, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
