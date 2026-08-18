@@ -48,10 +48,15 @@ bool zsa_wireless_vbus_present(void);
 
 /* True while a firmware update is running through the nRF (EVT_DFU_STATE),
  * on either half. The module makes the keyboard inert for the duration: key
- * events dropped in pre_process_record, pointer reports dropped, whole matrix
- * painted blue. The nRF re-sends the level every second and the module ages
- * it out after ZSA_DFU_STATE_STALE_MS, so a link lost mid-update recovers. */
+ * events dropped in pre_process_record, pointer reports dropped, idle steps
+ * held off. The nRF re-sends the level every second and the module ages it
+ * out after ZSA_DFU_STATE_STALE_MS, so a link lost mid-update recovers. */
 bool zsa_wireless_dfu_active(void);
+
+/* True while the two nRF halves report mismatched keyboard-protocol versions
+ * (EVT_LINK_STATE / ZSA_LINK_STATE_MISMATCH). Freshness-gated like the pair
+ * state: the nRF re-sends the level every second. */
+bool zsa_wireless_link_mismatch(void);
 
 /* Weak hook: keyboards override this to react to VBUS present/absent
  * (EVT_VBUS_STATE), e.g. to drive their own USB D+ pullup. */
@@ -62,12 +67,12 @@ void zsa_wireless_vbus_changed(bool present);
  * return on a keyboard that implements it; the default is a no-op. */
 void zsa_wireless_enter_bootloader(void);
 
-/* State of the pairing status LED. RELEASE hands the pin back to whatever
- * else drives it. */
-enum zsa_pair_led_state {
-    ZSA_PAIR_LED_RELEASE = 0,
-    ZSA_PAIR_LED_OFF     = 1,
-    ZSA_PAIR_LED_ON      = 2,
+/* State of a driven status LED. RELEASE hands the pin back to whatever else
+ * drives it. */
+enum zsa_status_led_state {
+    ZSA_STATUS_LED_RELEASE = 0,
+    ZSA_STATUS_LED_OFF     = 1,
+    ZSA_STATUS_LED_ON      = 2,
 };
 
 /* Weak hook: keyboards override this to drive their own status LED pin. The
@@ -77,6 +82,19 @@ void zsa_wireless_pair_led(uint8_t state);
 /* True while the module is driving the pairing status LED. Keyboards check
  * this before writing that pin for any other purpose. */
 bool zsa_wireless_pair_led_active(void);
+
+/* Weak hook: the firmware-update indication on the half's two status LEDs,
+ * green and red (enum zsa_status_led_state each). Green fast-blinks while
+ * this half's image is being written and stays solid while it settles; red is
+ * solid on a failed update and slow-blinks on a protocol mismatch. The module
+ * owns the blink phase and only calls on a change. Outranks the pairing blink
+ * and the layer indicators — see the *_owned() accessors. */
+void zsa_wireless_dfu_led(uint8_t green, uint8_t red);
+
+/* True while the update indication drives that pin. Keyboards check these
+ * before writing either pin for any other purpose. */
+bool zsa_wireless_dfu_led_green_owned(void);
+bool zsa_wireless_dfu_led_red_owned(void);
 
 /* Send a query/command to the nRF */
 void zsa_wireless_query_ble_status(void);

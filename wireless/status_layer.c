@@ -99,14 +99,9 @@ void zsa_wireless_status_render(void) {
     zsa_wireless_status_draw_gauge(ZSA_STATUS_GAUGE_RIGHT_FIRST, zsa_wireless_battery_right_soc());
 }
 
-void zsa_wireless_status_render_dfu(void) {
-    rgb_matrix_set_color_all(ZSA_DFU_R, ZSA_DFU_G, ZSA_DFU_B);
-}
-
 #else /* !RGB_MATRIX_ENABLE */
 
 void zsa_wireless_status_render(void) {}
-void zsa_wireless_status_render_dfu(void) {}
 void zsa_wireless_status_draw_gauge(uint8_t first_led, uint8_t soc) {
     (void)first_led;
     (void)soc;

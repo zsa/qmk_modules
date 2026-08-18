@@ -9,7 +9,6 @@
 #include <stddef.h>
 #include "quantum.h"
 #include "wireless.h"
-#include "status_layer.h"
 #include "bluetooth.h"
 #include "report.h"
 #include "uart.h"
@@ -120,17 +119,32 @@ static bool     nrf_vbus_present;
 
 /* ---- Firmware update in progress ---- *
  *
- * EVT_DFU_STATE mirrors the nRF's DFU lock, so it covers both the mcumgr SMP
- * path and the STM32 relay. While it is set the keyboard is inert — no key
- * output, no pointer, whole matrix blue — so a flash cannot be disturbed by
- * typing. The nRF re-sends the level every second and last_dfu_state_ms ages
- * it out, so a link that dies mid-update unblanks instead of leaving the
- * keyboard dead. */
+ * EVT_DFU_STATE's `active` mirrors the nRF's DFU lock, so it covers both the
+ * mcumgr SMP path and the STM32 relay. While it is set the keyboard is inert —
+ * no key output, no pointer, no idle power-down — so a flash cannot be
+ * disturbed by typing. The nRF re-sends the level every second and
+ * last_dfu_state_ms ages it out, so a link that dies mid-update recovers
+ * instead of leaving the keyboard dead.
+ *
+ * `target`/`phase` describe the left half's own image and drive the status
+ * LEDs (dfu_led_task). They age out on their own, much slower: the left nRF
+ * reboots into the swap mid-update and re-asserts the phase when it returns. */
 static bool     nrf_dfu_active;
 static uint32_t last_dfu_state_ms;
-#ifdef RGB_MATRIX_ENABLE
-static bool     dfu_rgb_was_enabled;
-#endif
+static uint8_t  nrf_dfu_target;    /* enum zsa_dfu_target */
+static uint8_t  nrf_dfu_phase;     /* enum zsa_dfu_phase */
+static uint32_t last_dfu_phase_ms;
+static bool     dfu_phase_seen;    /* any 3-byte EVT_DFU_STATE received yet */
+
+/* ---- Inter-half link state ---- *
+ *
+ * EVT_LINK_STATE: the left nRF's view of the right half over ESB. MISMATCH
+ * means both halves are alive but running different keyboard protocols, so
+ * neither drives the other — indicated as a red slow blink. Level-refreshed
+ * every second like the pair state, hence the same staleness gate. */
+static uint8_t  nrf_link_state;    /* enum zsa_link_state_val */
+static uint32_t last_link_state_ms;
+static bool     link_state_seen;
 
 /* ---- Adaptive charging ---- *
  *
@@ -341,10 +355,15 @@ bool zsa_wireless_dfu_active(void) {
     return nrf_dfu_active;
 }
 
+bool zsa_wireless_link_mismatch(void) {
+    return link_ready && link_state_seen && nrf_link_state == ZSA_LINK_STATE_MISMATCH &&
+           timer_elapsed32(last_link_state_ms) < ZSA_LINK_STATE_STALE_MS;
+}
+
 /* Enter/leave the inert update state. Releases everything held on the way in
  * and on the way out, so a key swallowed mid-press cannot leave a stuck
- * report. Takes the matrix over from whatever the user's config was doing and
- * hands it back on exit. */
+ * report. The matrix is left alone — it keeps doing whatever the user's
+ * config was doing, including staying off. */
 static void dfu_set_active(bool active) {
     if (active == nrf_dfu_active) {
         return;
@@ -352,23 +371,10 @@ static void dfu_set_active(bool active) {
     nrf_dfu_active = active;
     zsa_log("dfu: %s", active ? "active" : "idle");
 
-    if (active) {
-        /* The blue matrix has to survive a transfer with no keypresses. */
-        if (idle_step != ZSA_IDLE_ACTIVE) {
-            idle_power_wake();
-        }
-#ifdef RGB_MATRIX_ENABLE
-        dfu_rgb_was_enabled = rgb_matrix_is_enabled();
-        if (!dfu_rgb_was_enabled) {
-            rgb_matrix_enable_noeeprom();
-        }
-#endif
-    } else {
-#ifdef RGB_MATRIX_ENABLE
-        if (!dfu_rgb_was_enabled) {
-            rgb_matrix_disable_noeeprom();
-        }
-#endif
+    /* An update produces no key activity, so hold the idle steps off rather
+     * than let the board power down mid-transfer. */
+    if (active && idle_step != ZSA_IDLE_ACTIVE) {
+        idle_power_wake();
     }
 
     clear_keyboard();
@@ -411,7 +417,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             limits_commanded    = false;
             /* An nRF that rebooted lost its DFU lock, so nothing is being
              * flashed any more. send_nrf_state() re-asserts it right after
-             * this if the update is in fact still running. */
+             * this if the update is in fact still running. The DFU phase is
+             * deliberately left alone: the reboot this link-up follows is
+             * usually the swap itself, and the new image re-asserts SETTLE. */
             dfu_set_active(false);
             /* nrf_vbus_present is left alone: the nRF re-reports it right
              * after link-up via send_nrf_state(). */
@@ -549,10 +557,29 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             break;
 
         case ZSA_MSG_EVT_DFU_STATE:
-            if (frame->len >= sizeof(struct zsa_dfu_progress)) {
+            if (frame->len >= 1) {
                 const struct zsa_dfu_progress *d = (const struct zsa_dfu_progress *)frame->payload;
                 last_dfu_state_ms = timer_read32();
                 dfu_set_active(d->active != 0);
+                /* Older senders carry `active` alone: no phase to show. */
+                if (frame->len >= sizeof(struct zsa_dfu_progress)) {
+                    nrf_dfu_target = d->target;
+                    nrf_dfu_phase  = d->phase;
+                } else {
+                    nrf_dfu_target = ZSA_DFU_TARGET_NONE;
+                    nrf_dfu_phase  = ZSA_DFU_PHASE_IDLE;
+                }
+                last_dfu_phase_ms = timer_read32();
+                dfu_phase_seen    = true;
+            }
+            break;
+
+        case ZSA_MSG_EVT_LINK_STATE:
+            if (frame->len >= sizeof(struct zsa_link_state)) {
+                const struct zsa_link_state *l = (const struct zsa_link_state *)frame->payload;
+                nrf_link_state     = l->state;
+                last_link_state_ms = timer_read32();
+                link_state_seen    = true;
             }
             break;
 
@@ -886,13 +913,90 @@ __attribute__((weak)) void zsa_wireless_vbus_changed(bool present) { (void)prese
 /* Keyboards with a bootloader QMK can hand off to override this. */
 __attribute__((weak)) void zsa_wireless_enter_bootloader(void) {}
 
+/* ---- Firmware-update status LEDs ---- */
+
+/* Keyboards override this to drive their own two status LED pins. */
+__attribute__((weak)) void zsa_wireless_dfu_led(uint8_t green, uint8_t red) {
+    (void)green;
+    (void)red;
+}
+
+static bool    dfu_led_green_owned;
+static bool    dfu_led_red_owned;
+static uint8_t dfu_led_green_last = ZSA_STATUS_LED_RELEASE;
+static uint8_t dfu_led_red_last   = ZSA_STATUS_LED_RELEASE;
+
+bool zsa_wireless_dfu_led_green_owned(void) {
+    return dfu_led_green_owned;
+}
+
+bool zsa_wireless_dfu_led_red_owned(void) {
+    return dfu_led_red_owned;
+}
+
+/* The reported phase is only about this half's own image: a relay to the
+ * right half, or no target at all, has nothing to show on these LEDs. Held
+ * for ZSA_DFU_PHASE_STALE_MS without a refresh, then released. */
+static uint8_t dfu_left_phase(void) {
+    if (!dfu_phase_seen || nrf_dfu_target != ZSA_DFU_TARGET_LEFT) {
+        return ZSA_DFU_PHASE_IDLE;
+    }
+    if (timer_elapsed32(last_dfu_phase_ms) >= ZSA_DFU_PHASE_STALE_MS) {
+        return ZSA_DFU_PHASE_IDLE;
+    }
+    return nrf_dfu_phase;
+}
+
+/* Renders the update vocabulary on the two left LEDs: green fast-blinks while
+ * the image is written and holds solid while it settles; red is solid on a
+ * failed update and slow-blinks on a protocol mismatch, which is orthogonal to
+ * the phase and shows whenever the phase is not FAILED. Blink phases come from
+ * the absolute clock like the pairing blink, so the rate does not depend on
+ * how often this runs. */
+static void dfu_led_task(void) {
+    uint32_t now   = timer_read32();
+    uint8_t  phase = dfu_left_phase();
+    uint8_t  green;
+    uint8_t  red;
+
+    switch (phase) {
+        case ZSA_DFU_PHASE_UPLOAD:
+            green = ((now / ZSA_DFU_LED_FAST_MS) & 1u) ? ZSA_STATUS_LED_ON : ZSA_STATUS_LED_OFF;
+            break;
+        case ZSA_DFU_PHASE_SETTLE:
+            green = ZSA_STATUS_LED_ON;
+            break;
+        default:
+            green = ZSA_STATUS_LED_RELEASE;
+            break;
+    }
+
+    if (phase == ZSA_DFU_PHASE_FAILED) {
+        red = ZSA_STATUS_LED_ON;
+    } else if (zsa_wireless_link_mismatch()) {
+        red = ((now / ZSA_DFU_LED_SLOW_MS) & 1u) ? ZSA_STATUS_LED_ON : ZSA_STATUS_LED_OFF;
+    } else {
+        red = ZSA_STATUS_LED_RELEASE;
+    }
+
+    dfu_led_green_owned = (green != ZSA_STATUS_LED_RELEASE);
+    dfu_led_red_owned   = (red != ZSA_STATUS_LED_RELEASE);
+
+    if (green != dfu_led_green_last || red != dfu_led_red_last) {
+        dfu_led_green_last = green;
+        dfu_led_red_last   = red;
+        zsa_wireless_dfu_led(green, red);
+    }
+}
+
 /* ---- Pairing status LED ---- */
 
 /* Keyboards override this to drive their own status LED pin. */
 __attribute__((weak)) void zsa_wireless_pair_led(uint8_t state) { (void)state; }
 
 static bool    pair_led_owned;
-static uint8_t pair_led_last = ZSA_PAIR_LED_RELEASE;
+static bool    pair_led_deferred; /* the update indication holds the pin */
+static uint8_t pair_led_last = ZSA_STATUS_LED_RELEASE;
 
 bool zsa_wireless_pair_led_active(void) {
     return pair_led_owned;
@@ -902,7 +1006,12 @@ bool zsa_wireless_pair_led_active(void) {
  * discoverable, released otherwise. The phase comes from the absolute clock
  * rather than elapsed-time toggling, so the blink rate is independent of how
  * often this runs — it is called both from bluetooth_task() and from inside
- * the idle slow-scan loop. */
+ * the idle slow-scan loop.
+ *
+ * Shares its pin with the update indication, which outranks it: while that
+ * owns the green LED nothing is written here, and the current state is
+ * re-issued as soon as it hands the pin back. pair_led_owned keeps tracking
+ * either way, so the layer indicator stays off the pin. */
 static void pair_led_task(void) {
     bool    pairing = zsa_wireless_pairing_active();
     bool    advert  = pair_advertising();
@@ -910,17 +1019,29 @@ static void pair_led_task(void) {
 
     if (pairing || advert) {
         uint32_t half  = pairing ? ZSA_PAIR_LED_FAST_MS : ZSA_PAIR_LED_SLOW_MS;
-        want           = ((timer_read32() / half) & 1u) ? ZSA_PAIR_LED_ON : ZSA_PAIR_LED_OFF;
+        want           = ((timer_read32() / half) & 1u) ? ZSA_STATUS_LED_ON : ZSA_STATUS_LED_OFF;
         pair_led_owned = true;
     } else {
-        want           = ZSA_PAIR_LED_RELEASE;
+        want           = ZSA_STATUS_LED_RELEASE;
         pair_led_owned = false;
     }
 
-    if (want != pair_led_last) {
-        pair_led_last = want;
+    if (zsa_wireless_dfu_led_green_owned()) {
+        pair_led_deferred = true;
+        return;
+    }
+
+    if (want != pair_led_last || pair_led_deferred) {
+        pair_led_deferred = false;
+        pair_led_last     = want;
         zsa_wireless_pair_led(want);
     }
+}
+
+/* Both LED engines, in arbitration order. */
+static void status_led_task(void) {
+    dfu_led_task();
+    pair_led_task();
 }
 
 static void idle_power_task(void) {
@@ -954,7 +1075,7 @@ static void idle_power_task(void) {
     }
 
     /* An update produces no key activity, so the idle steps would power the
-     * matrix down mid-transfer and take the blue signal with it. */
+     * board down mid-transfer. */
     if (zsa_wireless_dfu_active()) {
         if (idle_step != ZSA_IDLE_ACTIVE) {
             idle_power_wake();
@@ -1014,8 +1135,8 @@ static void idle_power_task(void) {
         }
 
         /* This loop never returns to the QMK task pipeline, so drive the
-         * status LED from here too. */
-        pair_led_task();
+         * status LEDs from here too. */
+        status_led_task();
 
         /* handle_rx_frame may have woken us (EVT_BLE_STATUS, or a
          * EVT_PAIR_STATE carrying CONFIRM) */
@@ -1107,20 +1228,6 @@ report_mouse_t pointing_device_task_wireless(report_mouse_t mouse_report) {
         return (report_mouse_t){0};
     }
     return pointing_device_task_wireless_kb(mouse_report);
-}
-#endif
-
-#ifdef RGB_MATRIX_ENABLE
-/* Whole matrix blue while an update runs. rgb_matrix_indicators_advanced_*
- * is the last thing rgb_matrix_task() calls before the flush, after the
- * effect and after the keymap's rgb_matrix_indicators_user(), so this paints
- * over the user's config without the keymap needing to know about it. */
-bool rgb_matrix_indicators_advanced_wireless(uint8_t led_min, uint8_t led_max) {
-    if (!zsa_wireless_dfu_active()) {
-        return rgb_matrix_indicators_advanced_wireless_kb(led_min, led_max);
-    }
-    zsa_wireless_status_render_dfu();
-    return false;
 }
 #endif
 
@@ -1268,7 +1375,7 @@ void bluetooth_task(void) {
     /* Wired-mode source for the right half's battery */
     right_telemetry_task();
 
-    pair_led_task();
+    status_led_task();
 
     idle_power_task();
 }
