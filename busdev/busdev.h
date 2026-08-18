@@ -69,6 +69,7 @@ enum {
     BUSDEV_REASON_IMPOSSIBLE_KEY,
     BUSDEV_REASON_BAD_ID,
     BUSDEV_REASON_BAD_REPORT_ID,
+    BUSDEV_REASON_PEER, // a device sharing the power rail was reset
     BUSDEV_REASON_SLEEP,
     BUSDEV_REASON_USER,
 };
