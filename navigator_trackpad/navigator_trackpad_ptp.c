@@ -346,7 +346,6 @@ static inline uint16_t scale_y(uint16_t raw) {
 // PTP task function - synchronous polling with timer-based throttling
 bool navigator_trackpad_ptp_task(void) {
     static uint32_t last_poll_time  = 0;
-    static uint32_t last_probe_time = 0;
     static uint8_t  prev_buttons = 0;
     // Slot-0 presence from last frame, for the mouse-mode fallback tap detector.
     static bool     prev_finger0_tip = false;
@@ -375,20 +374,10 @@ bool navigator_trackpad_ptp_task(void) {
     }
     last_poll_time = now;
 
-    // Handle disconnected/uninitialized state with slower probe interval
-    if (!trackpad_init) {
-        if (timer_elapsed32(last_probe_time) < NAVIGATOR_TRACKPAD_PROBE_INTERVAL_MS) {
-            return false;
-        }
-        last_probe_time = now;
-        navigator_trackpad_device_init();
-        return false;
-    }
-
     // Read the report data into local struct.
     //
-    // A failed read is one of two things: a genuine I2C/bus error (the read
-    // helper clears trackpad_init and the probe path re-inits next cycle), or a
+    // A failed read is one of two things: a genuine I2C/bus error (which the
+    // read helper reports to the supervisor, taking the device down), or a
     // successful transaction that returned no touch packet. The Cirque streams
     // reports continuously while any contact is present and goes quiet on
     // lift-off, so a *run* of empty reads means every finger has left the pad.
@@ -401,10 +390,17 @@ bool navigator_trackpad_ptp_task(void) {
     // sensor_report below carries no fingers, so falling through drives cur_n==0
     // and nt_reconcile_contacts emits the release.
     cgen6_report_t sensor_report = {0};
-    if (!cirque_gen_6_read_report(&sensor_report)) {
-        if (!trackpad_init) {
-            // Dead bus: let the probe/re-init path recover; don't synthesize
-            // lift-offs off a failed transaction.
+    if (!busdev_is_up(navigator_trackpad_dev)) {
+        // Off the bus: stay off it, but flush anything the host still tracks so
+        // no contact is stranded. The zeroed report drives cur_n == 0 below.
+        no_data_frames = 0;
+        if (host_contacts.count == 0 && !prev_finger0_tip) {
+            return false;
+        }
+    } else if (!cirque_gen_6_read_report(&sensor_report)) {
+        if (!busdev_is_up(navigator_trackpad_dev)) {
+            // Dead bus: let the supervisor recover; don't synthesize lift-offs
+            // off a failed transaction.
             no_data_frames = 0;
             return false;
         }
