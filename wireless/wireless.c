@@ -23,6 +23,7 @@
 #include "log_tap.h"
 /* rtt_debug.h resolves to no-op static inlines unless ZSA_RTT_DEBUG is set. */
 #include "rtt_debug.h"
+#include "busdev.h"
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
 #    include "is31fl3731.h"
@@ -179,8 +180,11 @@ static bool                     limits_commanded;
 extern bool voyager_right_nrf_set_charge_limits(uint16_t vbus_limit_ma, uint16_t charge_ma);
 extern bool is_transport_connected(void);
 /* Bus ownership decision, made in the keyboard's matrix.c by probing the real
- * expander. LED addressing and the grant must follow the same signal. */
+ * expander. The grant must follow the same signal. */
 extern bool zsa_stm32_owns_right_bus(void);
+/* Right LED driver, supervised by the keyboard (voyager_tng.c). */
+extern void voyager_right_led_resync(void);
+extern bool voyager_right_led_up(void);
 
 #ifdef RGB_MATRIX_ENABLE
 /* Tracks the last-reported left LED rail state so EVT_LED_RAIL only resyncs
@@ -198,15 +202,6 @@ static bool left_led_rail_on = true;
 #    define ZSA_LED_DRIVER_RIGHT 1
 
 static uint32_t last_right_led_flush_ms = 0;
-
-/* Point driver 1 at the real right-half chip while we own its bus, at the left
- * nRF's mirror otherwise. Must track the same signal the matrix uses, or we
- * would scan one device and light the other. */
-static void update_right_led_address(void) {
-    is31fl3731_set_i2c_address(ZSA_LED_DRIVER_RIGHT, zsa_stm32_owns_right_bus() ? IS31FL3731_I2C_ADDRESS_2 : ZSA_RIGHT_LED_MIRROR_ADDRESS);
-}
-#else
-static inline void update_right_led_address(void) {}
 #endif
 
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
@@ -489,14 +484,11 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 // idle_step), so only resync on the OFF->ON edge - rail power actually
                 // returning after LEDS_OFF idle. A repeated "on" report is a no-op.
                 if (rail_on && !left_led_rail_on && idle_step < ZSA_IDLE_LEDS_OFF) {
-                    zsa_rtt_event("LED_RAIL -> rgb_matrix_init"); // TEMP DEBUG
-                    rgb_matrix_init();
-                    // rgb_matrix_init() re-zeroes hardware PWM but not the driver's
-                    // software cache, so set_color() early-returns until a color
-                    // actually changes. Zero the cache too so it matches hardware and
-                    // the next rendered frame repaints every LED.
-                    rgb_matrix_set_color_all(0, 0, 0);
-                    rgb_matrix_driver.flush();
+                    zsa_rtt_event("LED_RAIL -> resync"); // TEMP DEBUG
+                    // The rail powers the left chip, which is not supervised:
+                    // resync it here. The right one goes through the supervisor.
+                    is31fl3731_resync(ZSA_LED_DRIVER_LEFT);
+                    voyager_right_led_resync();
                 }
                 left_led_rail_on = rail_on;
 #endif
@@ -680,14 +672,14 @@ bool zsa_wireless_nav_device_seen(void) {
     return nav_device_seen;
 }
 
-/* Weak default: no nav driver linked into this build, so nothing has looked.
- * Distinct from "looked and found nothing" — see enum zsa_nav_probe. */
-__attribute__((weak)) uint8_t zsa_nav_probe_state(void) {
+/* Weak defaults: that nav driver is not linked into this build, so it has not
+ * looked. Distinct from "looked and found nothing" — see enum zsa_nav_probe. */
+__attribute__((weak)) uint8_t zsa_nav_trackball_probe_state(void) {
     return ZSA_NAV_PROBE_UNSUPPORTED;
 }
 
-__attribute__((weak)) uint8_t zsa_nav_probe_device(void) {
-    return ZSA_NAV_DEVICE_NONE;
+__attribute__((weak)) uint8_t zsa_nav_trackpad_probe_state(void) {
+    return ZSA_NAV_PROBE_UNSUPPORTED;
 }
 
 /* ---- Telemetry (oryx raw-HID ORYX_CMD_GET_TELEMETRY) ---- */
@@ -749,8 +741,21 @@ static void telemetry_battery(oryx_telemetry_t *tlm) {
 static void telemetry_nav(oryx_telemetry_t *tlm) {
     tlm->nav_build = nav_cap_mask;
 
-    uint8_t probe = zsa_nav_probe_state();
-    uint8_t found = nav_mask(zsa_nav_probe_device());
+    /* Combine the per-device probes: LOCAL wins over MIRROR over NONE over
+     * UNSUPPORTED, and `found` collects every device answering locally. */
+    uint8_t tb    = zsa_nav_trackball_probe_state();
+    uint8_t tp    = zsa_nav_trackpad_probe_state();
+    uint8_t probe = ZSA_NAV_PROBE_UNSUPPORTED;
+    uint8_t found = 0;
+    if (tb == ZSA_NAV_PROBE_LOCAL) found |= ORYX_TLM_NAV_TRACKBALL;
+    if (tp == ZSA_NAV_PROBE_LOCAL) found |= ORYX_TLM_NAV_TRACKPAD;
+    if (found) {
+        probe = ZSA_NAV_PROBE_LOCAL;
+    } else if (tb == ZSA_NAV_PROBE_MIRROR || tp == ZSA_NAV_PROBE_MIRROR) {
+        probe = ZSA_NAV_PROBE_MIRROR;
+    } else if (tb == ZSA_NAV_PROBE_NONE || tp == ZSA_NAV_PROBE_NONE) {
+        probe = ZSA_NAV_PROBE_NONE;
+    }
     /* The right half sharing our I2C net is what makes a device at the real
      * address ambiguous: the TRRS segments do not isolate, so a right-plugged
      * device answers at exactly the address a left-plugged one would. */
@@ -858,9 +863,6 @@ static void bus_grant_task(void) {
     if (primed && granted == last_granted && timer_elapsed32(last_sent_ms) < ZSA_BUS_GRANT_INTERVAL_MS) {
         return;
     }
-    if (granted != last_granted || !primed) {
-        update_right_led_address();
-    }
 
     struct zsa_bus_grant payload = { .granted = granted ? 1 : 0 };
     zsa_wireless_send_frame(ZSA_MSG_CMD_BUS_GRANT, (const uint8_t *)&payload, sizeof(payload));
@@ -888,9 +890,8 @@ static void idle_power_enter_step(enum zsa_idle_step step) {
 }
 
 static void idle_power_wake(void) {
-    /* Note: when waking from LEDS_OFF, the LED driver (IS31FL3731)
-     * is reprogrammed via rgb_matrix_init() when the nRF sends
-     * EVT_LED_RAIL after re-enabling BUCK1. */
+    /* Note: when waking from LEDS_OFF, the LED drivers (IS31FL3731) are
+     * resynced when the nRF sends EVT_LED_RAIL after re-enabling BUCK1. */
     zsa_log("idle: wake from step %u", (unsigned)idle_step);
     idle_step = ZSA_IDLE_ACTIVE;
     send_idle_state(ZSA_IDLE_ACTIVE);
@@ -906,6 +907,15 @@ static void idle_power_wake(void) {
  * re-init their sensor: the transport switch resets the shared i2c bus, which
  * leaves the sensor unconfigured without raising an i2c error. */
 __attribute__((weak)) void zsa_nav_transport_changed(void) {}
+
+#ifdef ZSA_RTT_DEBUG
+/* Strong override of busdev's weak transition hook: every device state change
+ * on the shared bus, with its reason and the address in use, onto the RTT
+ * trace. */
+void busdev_on_transition(busdev_id_t id, busdev_state_t old_state, busdev_state_t new_state, uint8_t reason) {
+    zsa_rtt_event3(busdev_name(id), ((int)old_state << 8) | (int)new_state, reason, busdev_addr(id));
+}
+#endif
 
 /* Keyboards override this to drive their own USB D+ pullup from VBUS state. */
 __attribute__((weak)) void zsa_wireless_vbus_changed(bool present) { (void)present; }
@@ -1177,6 +1187,9 @@ static void idle_power_task(void) {
  * buffer stays dirty and the next permitted flush still sends the latest
  * colors - nothing is lost, just delayed. */
 bool is31fl3731_should_flush(uint8_t index) {
+    if (index == ZSA_LED_DRIVER_RIGHT && !voyager_right_led_up()) {
+        return false;
+    }
     if (index != ZSA_LED_DRIVER_RIGHT || usb_connected_state()) {
         return true;
     }
@@ -1275,9 +1288,6 @@ void bluetooth_init(void) {
     zsa_parser_init(&rx_parser);
     link_ready = false;
     last_link_up_ms = timer_read32();
-    /* Before rgb_matrix_init(), so a wireless cold boot never writes to the
-     * real 0x77 across the bus. */
-    update_right_led_address();
     zsa_rtt_init(); // TEMP DEBUG
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();

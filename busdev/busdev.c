@@ -125,9 +125,10 @@ static void bus_note(i2c_status_t status) {
     if (bus_timeout_streak < UINT8_MAX) {
         bus_timeout_streak++;
     }
-    if (!bus_suspect && bus_timeout_streak >= BUSDEV_BUS_TIMEOUT_STREAK) {
+    // Devices come down one by one through their own failed transactions; the
+    // suspect flag only arms the bus clear and informs ownership decisions.
+    if (bus_timeout_streak >= BUSDEV_BUS_TIMEOUT_STREAK) {
         bus_suspect = true;
-        busdev_force_down_all(BUSDEV_REASON_BUS_DEAD);
     }
 }
 
@@ -367,8 +368,23 @@ static bool device_due(const busdev_dev_t *d, uint32_t now) {
     }
 }
 
+static uint32_t hold_until;
+static bool     hold_active;
+
+void busdev_hold(uint16_t ms) {
+    hold_until  = timer_read32() + ms;
+    hold_active = true;
+}
+
 void busdev_task(void) {
     uint32_t now = timer_read32();
+
+    if (hold_active) {
+        if (!timer_expired32(now, hold_until)) {
+            return;
+        }
+        hold_active = false;
+    }
 
     // Bookkeeping only: no bus access, so it does not consume the action slot.
     for (uint8_t i = 0; i < device_count; i++) {

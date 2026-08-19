@@ -127,6 +127,8 @@ void busdev_force_down_all(uint8_t reason);
 
 // One bus action per call. Driven by housekeeping_task_busdev().
 void busdev_task(void);
+// Pauses every bus action (probe, init, verify) for ms; drivers are unaffected.
+void busdev_hold(uint16_t ms);
 
 // Weak, empty by default (dprintf on CONSOLE builds).
 void busdev_on_transition(busdev_id_t id, busdev_state_t old_state, busdev_state_t new_state, uint8_t reason);

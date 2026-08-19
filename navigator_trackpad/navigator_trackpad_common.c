@@ -23,19 +23,15 @@ static uint8_t trackpad_addr = NAVIGATOR_TRACKPAD_ADDRESS;
 #ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
 #    include "wireless.h"
 
-// Strong overrides of the wireless module's weak probe hooks, so telemetry can
+// Strong override of the wireless module's weak probe hook, so telemetry can
 // report what the last probe actually found rather than what this build can
 // drive. The latched address says which of the two answered, which is as close
 // to a side-of-the-board signal as the STM32 gets.
-uint8_t zsa_nav_probe_state(void) {
+uint8_t zsa_nav_trackpad_probe_state(void) {
     if (!busdev_is_up(navigator_trackpad_dev)) {
         return ZSA_NAV_PROBE_NONE;
     }
     return (busdev_addr(navigator_trackpad_dev) == NAVIGATOR_TRACKPAD_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
-}
-
-uint8_t zsa_nav_probe_device(void) {
-    return ZSA_NAV_DEVICE_TOUCHPAD;
 }
 #endif
 

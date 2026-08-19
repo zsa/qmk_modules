@@ -97,8 +97,18 @@ static i2c_status_t nav_probe(uint8_t addr) {
 // Bridge SPI configuration, then one paw3805ek configuration entry per step,
 // then the CPI restore. Self-sufficient: reached without a probe after a verify
 // mismatch or a suspect.
+// The mirror relays motion and CPI only; the sensor behind it is configured by
+// the half it is plugged into, and it answers no other register.
+static bool nav_on_mirror(uint8_t addr) {
+    return addr != NAVIGATOR_TRACKBALL_ADDRESS;
+}
+
 static busdev_step_t nav_init_step(uint8_t addr, uint8_t step, uint16_t *delay_ms) {
     nav_addr = addr;
+
+    if (nav_on_mirror(addr)) {
+        return paw3805ek_set_cpi() ? BUSDEV_STEP_DONE : BUSDEV_STEP_FAIL;
+    }
 
     if (step == 0) {
         uint8_t spi_conf[2] = {SCI18IS606_CONF_SPI, SCI18IS606_CONF};
@@ -137,6 +147,10 @@ static busdev_step_t nav_init_step(uint8_t addr, uint8_t step, uint16_t *delay_m
 // then the orientation register, which a reset sensor no longer holds.
 static bool nav_verify(uint8_t addr) {
     nav_addr = addr;
+
+    if (nav_on_mirror(addr)) {
+        return true;
+    }
 
     uint8_t id[3] = {NCS_PIN, 0x00, 0x00};
     if (sci18is606_spi_tx(id, 3, true) != I2C_STATUS_SUCCESS) {
@@ -228,19 +242,15 @@ uint32_t sci18is606_read_callback(uint32_t trigger_time, void *cb_arg) {
 #ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
 #    include "wireless.h"
 
-// Strong overrides of the wireless module's weak probe hooks, so telemetry can
+// Strong override of the wireless module's weak probe hook, so telemetry can
 // report what the last probe actually found rather than what this build can
 // drive. The latched address says which of the two answered, which is as close
 // to a side-of-the-board signal as the STM32 gets.
-uint8_t zsa_nav_probe_state(void) {
+uint8_t zsa_nav_trackball_probe_state(void) {
     if (!busdev_is_up(nav_dev)) {
         return ZSA_NAV_PROBE_NONE;
     }
     return (busdev_addr(nav_dev) == NAVIGATOR_TRACKBALL_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
-}
-
-uint8_t zsa_nav_probe_device(void) {
-    return ZSA_NAV_DEVICE_TRACKBALL;
 }
 #endif
 

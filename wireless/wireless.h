@@ -152,9 +152,7 @@ enum zsa_nav_probe {
     ZSA_NAV_PROBE_MIRROR,          /* only the left-nRF mirror answered */
 };
 
-/* Weak hook: the nav module compiled into this build overrides it. Returns
- * enum zsa_nav_probe. */
-uint8_t zsa_nav_probe_state(void);
-/* Which device that driver drives (enum zsa_nav_device_type). Constant for a
- * build — only one nav module ever links at a time. */
-uint8_t zsa_nav_probe_device(void);
+/* Weak hooks, one per nav module; each module compiled into the build
+ * overrides its own. Return enum zsa_nav_probe. */
+uint8_t zsa_nav_trackball_probe_state(void);
+uint8_t zsa_nav_trackpad_probe_state(void);
