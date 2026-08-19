@@ -208,6 +208,11 @@ busdev_state_t busdev_state(busdev_id_t id) {
     return d != NULL ? d->state : BUSDEV_ABSENT;
 }
 
+const char *busdev_name(busdev_id_t id) {
+    busdev_dev_t *d = dev_of(id);
+    return d != NULL ? d->desc->name : "?";
+}
+
 // -- transitions -------------------------------------------------------------
 
 __attribute__((weak)) void busdev_on_transition(busdev_id_t id, busdev_state_t old_state, busdev_state_t new_state, uint8_t reason) {

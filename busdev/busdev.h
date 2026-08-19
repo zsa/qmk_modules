@@ -110,6 +110,8 @@ bool busdev_is_up(busdev_id_t id);
 // address handed to init_step() and verify().
 uint8_t        busdev_addr(busdev_id_t id);
 busdev_state_t busdev_state(busdev_id_t id);
+// Descriptor name, "?" for BUSDEV_NONE. For logging.
+const char *busdev_name(busdev_id_t id);
 
 // Bus layer state: true once BUSDEV_BUS_TIMEOUT_STREAK transactions in a row
 // timed out, cleared by the next successful one.
