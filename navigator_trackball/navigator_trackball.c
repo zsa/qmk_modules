@@ -156,6 +156,7 @@ static bool nav_verify(uint8_t addr) {
 static const busdev_desc_t nav_desc = {
     .name               = "nav_trackball",
     .addr               = NAVIGATOR_TRACKBALL_ADDRESS,
+    .addr_alt           = NAVIGATOR_TRACKBALL_MIRROR_ADDRESS,
     .settle_ms          = 10,
     .verify_interval_ms = 500,
     .probe_timeout_ms   = NAVIGATOR_TRACKBALL_PROBE_TIMEOUT,

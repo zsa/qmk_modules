@@ -373,6 +373,7 @@ static bool trackpad_verify(uint8_t addr) {
 static const busdev_desc_t trackpad_desc = {
     .name               = "nav_trackpad",
     .addr               = NAVIGATOR_TRACKPAD_ADDRESS,
+    .addr_alt           = NAVIGATOR_TRACKPAD_MIRROR_ADDRESS,
     .settle_ms          = 20,
     .verify_interval_ms = 1000,
     .probe_timeout_ms   = NAVIGATOR_TRACKPAD_PROBE_TIMEOUT,

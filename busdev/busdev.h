@@ -71,6 +71,7 @@ enum {
     BUSDEV_REASON_BAD_REPORT_ID,
     BUSDEV_REASON_PEER,             // a device sharing the power rail was reset
     BUSDEV_REASON_TRANSPORT_SWITCH, // USB <-> BLE; the device may have moved
+    BUSDEV_REASON_OWNERSHIP,        // the half of the bus this device sits on changed hands
     BUSDEV_REASON_SLEEP,
     BUSDEV_REASON_USER,
 };
@@ -78,11 +79,15 @@ enum {
 typedef struct {
     const char *name;
     uint8_t     addr;               // 8-bit QMK address (7-bit << 1)
+    uint8_t     addr_alt;           // second address to probe, 0 = none
     uint16_t    settle_ms;          // wait after the first ACK before configuring
     uint16_t    verify_interval_ms; // 0 = never verify while up
     uint16_t    probe_timeout_ms;   // used by the default probe
     uint8_t     max_err_streak;     // consecutive report_error() before ABSENT
 
+    // The address to probe now, overriding the addr/addr_alt alternation. For
+    // devices whose address is decided elsewhere, e.g. by bus ownership.
+    uint8_t (*select_addr)(void);
     // NULL => default: i2c_ping_address(addr, probe_timeout_ms).
     i2c_status_t (*probe)(uint8_t addr);
     // Called with step = 0, 1, 2, ... until DONE/FAIL. *delay_ms (default 0)
@@ -100,9 +105,16 @@ typedef struct {
 busdev_id_t busdev_register(const busdev_desc_t *desc);
 
 // All id-taking calls accept BUSDEV_NONE and do nothing.
-bool           busdev_is_up(busdev_id_t id);
+bool busdev_is_up(busdev_id_t id);
+// The address that last ACKed, or desc->addr if none ever did. Also the
+// address handed to init_step() and verify().
 uint8_t        busdev_addr(busdev_id_t id);
 busdev_state_t busdev_state(busdev_id_t id);
+
+// Bus layer state: true once BUSDEV_BUS_TIMEOUT_STREAK transactions in a row
+// timed out, cleared by the next successful one.
+bool    busdev_bus_suspect(void);
+uint8_t busdev_bus_timeout_streak(void);
 
 void busdev_report_error(busdev_id_t id, i2c_status_t status);
 // Data plausibility failure. Ignored while the device is already being

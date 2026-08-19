@@ -43,6 +43,8 @@
 typedef struct {
     const busdev_desc_t *desc;
     busdev_state_t       state;
+    uint8_t              addr;         // address that last ACKed, 0 = none yet
+    bool                 probe_alt;    // next probe uses desc->addr_alt
     uint8_t              step;         // init_step index
     uint8_t              err_streak;   // consecutive report_error()
     uint8_t              probe_fails;  // consecutive failed probes, for backoff
@@ -129,6 +131,14 @@ static void bus_note(i2c_status_t status) {
     }
 }
 
+bool busdev_bus_suspect(void) {
+    return bus_suspect;
+}
+
+uint8_t busdev_bus_timeout_streak(void) {
+    return bus_timeout_streak;
+}
+
 static void bus_clear_if_stuck(uint32_t now) {
     if (!bus_suspect || !bus_sda_low()) {
         return;
@@ -160,6 +170,8 @@ busdev_id_t busdev_register(const busdev_desc_t *desc) {
     busdev_dev_t *d     = &devices[id];
     d->desc             = desc;
     d->state            = BUSDEV_ABSENT;
+    d->addr             = 0;
+    d->probe_alt        = false;
     d->step             = 0;
     d->err_streak       = 0;
     d->probe_fails      = 0;
@@ -182,9 +194,13 @@ bool busdev_is_up(busdev_id_t id) {
     return d != NULL && d->state == BUSDEV_UP;
 }
 
+static uint8_t dev_addr(const busdev_dev_t *d) {
+    return d->addr != 0 ? d->addr : d->desc->addr;
+}
+
 uint8_t busdev_addr(busdev_id_t id) {
     busdev_dev_t *d = dev_of(id);
-    return d != NULL ? d->desc->addr : 0;
+    return d != NULL ? dev_addr(d) : 0;
 }
 
 busdev_state_t busdev_state(busdev_id_t id) {
@@ -218,6 +234,7 @@ static void to_absent(uint8_t index, uint8_t reason, uint32_t now) {
     d->err_streak   = 0;
     d->verify_fails = 0;
     d->suspects     = 0;
+    d->probe_alt    = false;
     d->deadline     = now + BUSDEV_PROBE_INTERVAL_MS;
     set_state(index, BUSDEV_ABSENT, reason);
 }
@@ -233,14 +250,30 @@ static void to_configuring(uint8_t index, uint8_t reason, uint32_t now) {
 
 // -- scheduling --------------------------------------------------------------
 
+// One address per probe: whatever select_addr() names, otherwise the real
+// address and the alternate in turn.
+static uint8_t probe_addr(busdev_dev_t *d) {
+    if (d->desc->select_addr != NULL) {
+        return d->desc->select_addr();
+    }
+    if (d->desc->addr_alt != 0 && d->probe_alt) {
+        return d->desc->addr_alt;
+    }
+    return d->desc->addr;
+}
+
 static void do_probe(uint8_t index, uint32_t now) {
     busdev_dev_t        *d    = &devices[index];
     const busdev_desc_t *desc = d->desc;
+    uint8_t              addr = probe_addr(d);
 
-    i2c_status_t status = desc->probe != NULL ? desc->probe(desc->addr) : i2c_ping_address(desc->addr, desc->probe_timeout_ms);
+    d->probe_alt = !d->probe_alt;
+
+    i2c_status_t status = desc->probe != NULL ? desc->probe(addr) : i2c_ping_address(addr, desc->probe_timeout_ms);
     bus_note(status);
 
     if (status == I2C_STATUS_SUCCESS) {
+        d->addr        = addr;
         d->probe_fails = 0;
         d->deadline    = now + desc->settle_ms;
         set_state(index, BUSDEV_SETTLING, BUSDEV_REASON_PROBE_ACK);
@@ -260,7 +293,7 @@ static void do_init_step(uint8_t index, uint32_t now) {
     busdev_dev_t *d     = &devices[index];
     uint16_t      delay = 0;
 
-    busdev_step_t result = d->desc->init_step != NULL ? d->desc->init_step(d->desc->addr, d->step, &delay) : BUSDEV_STEP_DONE;
+    busdev_step_t result = d->desc->init_step != NULL ? d->desc->init_step(dev_addr(d), d->step, &delay) : BUSDEV_STEP_DONE;
 
     // The callback may have reported an error that already took the device down.
     if (d->state != BUSDEV_CONFIGURING) {
@@ -289,7 +322,7 @@ static void do_verify(uint8_t index, uint32_t now) {
     busdev_dev_t  *d    = &devices[index];
     busdev_state_t from = d->state;
 
-    bool ok = d->desc->verify != NULL ? d->desc->verify(d->desc->addr) : true;
+    bool ok = d->desc->verify != NULL ? d->desc->verify(dev_addr(d)) : true;
 
     if (d->state != from) {
         return;
