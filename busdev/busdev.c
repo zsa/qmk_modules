@@ -140,8 +140,11 @@ uint8_t busdev_bus_timeout_streak(void) {
     return bus_timeout_streak;
 }
 
+// SDA low while no transaction of ours is in flight is direct evidence of a
+// slave wedged mid-transaction, whatever the error code of the failed
+// transfer was (a held-low SDA surfaces as arbitration-lost, not timeout).
 static void bus_clear_if_stuck(uint32_t now) {
-    if (!bus_suspect || !bus_sda_low()) {
+    if (!bus_sda_low()) {
         return;
     }
     if (bus_cleared_once && !timer_expired32(now, bus_clear_time + BUSDEV_BUS_CLEAR_INTERVAL_MS)) {
@@ -150,6 +153,7 @@ static void bus_clear_if_stuck(uint32_t now) {
     bus_clear_time   = now;
     bus_cleared_once = true;
     bus_clear();
+    busdev_on_transition(BUSDEV_NONE, BUSDEV_ABSENT, BUSDEV_ABSENT, bus_sda_low() ? 0x71u : 0x70u);
 }
 
 // -- registry ----------------------------------------------------------------
@@ -211,7 +215,7 @@ busdev_state_t busdev_state(busdev_id_t id) {
 
 const char *busdev_name(busdev_id_t id) {
     busdev_dev_t *d = dev_of(id);
-    return d != NULL ? d->desc->name : "?";
+    return d != NULL ? d->desc->name : "bus_clear";
 }
 
 // -- transitions -------------------------------------------------------------
@@ -286,7 +290,7 @@ static void do_probe(uint8_t index, uint32_t now) {
         return;
     }
 
-    if (status == I2C_STATUS_TIMEOUT) {
+    if (status != I2C_STATUS_SUCCESS) {
         bus_clear_if_stuck(now);
     }
     if (d->probe_fails < UINT8_MAX) {
