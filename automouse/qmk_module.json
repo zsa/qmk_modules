@@ -9,6 +9,14 @@
         {
             "key": "KC_AUTOMOUSE_TOGGLE",
             "aliases": ["AM_TOGG"]
+        },
+        {
+            "key": "KC_AUTOMOUSE_TOGGLE_TRACKBALL",
+            "aliases": ["AM_TBAL"]
+        },
+        {
+            "key": "KC_AUTOMOUSE_TOGGLE_TRACKPAD",
+            "aliases": ["AM_TPAD"]
         }
     ]
 }

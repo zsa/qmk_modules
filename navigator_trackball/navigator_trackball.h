@@ -4,6 +4,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include "i2c_master.h"
 #include "pointing_device.h"
 
 #ifndef NAVIGATOR_TRACKBALL_ADDRESS
@@ -18,6 +19,10 @@
 // and trackpad mirrors must not collide on the shared emulated-I2C bus.
 #ifndef NAVIGATOR_TRACKBALL_MIRROR_ADDRESS
 #    define NAVIGATOR_TRACKBALL_MIRROR_ADDRESS 0x5A
+#endif
+
+#ifndef NAVIGATOR_TRACKBALL_PROBE_TIMEOUT
+#    define NAVIGATOR_TRACKBALL_PROBE_TIMEOUT 5
 #endif
 
 #ifndef NAVIGATOR_TRACKBALL_CPI
@@ -35,10 +40,18 @@
 #endif
 
 #define NAVIGATOR_TRACKBALL_READ 7
-#define NAVIGATOR_TRACKBALL_PROBE 1000
 
 #define NCS_PIN 0x01
 #define PAW3805EK_ID 0x31
+
+// Sensor orientation / motion data length, register 0x19. Written by the
+// configure sequence and read back by the verify.
+#ifdef MOUSE_EXTENDED_REPORT
+#    define PAW3805EK_ORIENTATION 0x30 // 16-bit motion data
+#else
+#    define PAW3805EK_ORIENTATION 0x34 // 8-bit motion data
+#endif
+#define PAW3805EK_REG_ORIENTATION 0x19
 
 #define SCI18IS606_CONF 0xDC //00001110b // MSB first, Mode 3, 155kHz
 
@@ -53,3 +66,7 @@ typedef struct {
     uint8_t reg;
     uint8_t data;
 } paw3805ek_reg_seq_t;
+
+// Writes a bridge SPI transaction and optionally reads the response back into
+// the same buffer, which must be at least `length` bytes.
+i2c_status_t sci18is606_spi_tx(uint8_t *data, uint8_t length, bool read);

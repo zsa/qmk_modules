@@ -3,7 +3,7 @@
 
 #include QMK_KEYBOARD_H
 
-#if COMMUNITY_MODULE_ORYX_ENABLE == TRUE
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
 #include <oryx.h>
 #endif
 
@@ -34,7 +34,7 @@ static void keycolors_set_layer_color(int layer) {
 }
 
 bool rgb_matrix_indicators_user(void) {
-#if COMMUNITY_MODULE_ORYX_ENABLE == TRUE
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
   if (rawhid_state.rgb_control) {
       return false;
   }

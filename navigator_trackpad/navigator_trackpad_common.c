@@ -8,31 +8,30 @@
 #include <sys/types.h>
 #include "navigator_trackpad_common.h"
 #include "i2c_master.h"
+#include "busdev.h"
 #include "quantum.h"
 #include "timer.h"
 
 // Shared globals
-static uint16_t current_cpi  = DEFAULT_CPI_TICK;
-bool            trackpad_init = false;
+static uint16_t current_cpi = DEFAULT_CPI_TICK;
 
-// I2C address currently in use. Defaults to the real trackpad; falls back to
-// the left-nRF wireless mirror (NAVIGATOR_TRACKPAD_MIRROR_ADDRESS) at probe
-// time in navigator_trackpad_device_init() if the real bridge doesn't ACK.
-// TODO: only use this mechanism when the wirless module is enabled.
-static uint8_t nav_addr = NAVIGATOR_TRACKPAD_ADDRESS;
+busdev_id_t navigator_trackpad_dev = BUSDEV_NONE;
+// Address the supervisor is currently using for this device: the real trackpad
+// (0x58, left-plugged) or the left-nRF wireless mirror (0x5C, right-plugged).
+static uint8_t trackpad_addr = NAVIGATOR_TRACKPAD_ADDRESS;
 
 #ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
 #    include "wireless.h"
 
 // Strong overrides of the wireless module's weak probe hooks, so telemetry can
 // report what the last probe actually found rather than what this build can
-// drive. nav_addr says which of the two addresses answered, which is as close
+// drive. The latched address says which of the two answered, which is as close
 // to a side-of-the-board signal as the STM32 gets.
 uint8_t zsa_nav_probe_state(void) {
-    if (!trackpad_init) {
+    if (!busdev_is_up(navigator_trackpad_dev)) {
         return ZSA_NAV_PROBE_NONE;
     }
-    return (nav_addr == NAVIGATOR_TRACKPAD_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
+    return (busdev_addr(navigator_trackpad_dev) == NAVIGATOR_TRACKPAD_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
 }
 
 uint8_t zsa_nav_probe_device(void) {
@@ -42,8 +41,9 @@ uint8_t zsa_nav_probe_device(void) {
 
 // I2C communication functions
 i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
-    i2c_status_t res = i2c_receive(nav_addr, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);
+    i2c_status_t res = i2c_receive(trackpad_addr, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);
     if (res != I2C_STATUS_SUCCESS) {
+        busdev_report_error(navigator_trackpad_dev, res);
         return res;
     }
     wait_us(cnt * 15);
@@ -71,9 +71,10 @@ uint8_t cirque_gen6_read_memory(uint32_t addr, uint8_t *data, uint16_t cnt, bool
     // Read the length of the data + 3 bytes (first 2 bytes for the length and the last byte for the checksum)
     // Create a buffer to store the data
     uint8_t buf[cnt + 3];
-    if (i2c_transmit_and_receive(nav_addr, preamble, 8, buf, cnt + 3, NAVIGATOR_TRACKPAD_TIMEOUT) != I2C_STATUS_SUCCESS) {
+    i2c_status_t status = i2c_transmit_and_receive(trackpad_addr, preamble, 8, buf, cnt + 3, NAVIGATOR_TRACKPAD_TIMEOUT);
+    if (status != I2C_STATUS_SUCCESS) {
         res |= CGEN6_I2C_FAILED;
-        trackpad_init = false;
+        busdev_report_error(navigator_trackpad_dev, status);
     }
 
     // Read the data length
@@ -124,9 +125,10 @@ uint8_t cirque_gen6_write_memory(uint32_t addr, uint8_t *data, uint16_t cnt) {
 
     buf[cnt + 8] = cksum;
 
-    if (i2c_transmit(nav_addr, buf, cnt + 9, NAVIGATOR_TRACKPAD_TIMEOUT) != I2C_STATUS_SUCCESS) {
+    i2c_status_t status = i2c_transmit(trackpad_addr, buf, cnt + 9, NAVIGATOR_TRACKPAD_TIMEOUT);
+    if (status != I2C_STATUS_SUCCESS) {
         res |= CGEN6_I2C_FAILED;
-        trackpad_init = false;
+        busdev_report_error(navigator_trackpad_dev, status);
     }
 
     wait_ms(1);
@@ -238,7 +240,6 @@ bool cirque_gen6_has_motion(void) {
     uint8_t data;
     uint8_t res = cirque_gen6_read_memory(CGEN6_I2C_DR, &data, 1, true);
     if (res != CGEN6_SUCCESS) {
-        trackpad_init = false;
         return false;
     }
     return data != 0;
@@ -248,7 +249,6 @@ bool cirque_gen6_has_motion(void) {
 bool cirque_gen_6_read_report(cgen6_report_t *report) {
     uint8_t packet[CGEN6_MAX_PACKET_SIZE];
     if (cirque_gen6_read_report(packet, CGEN6_MAX_PACKET_SIZE) != I2C_STATUS_SUCCESS) {
-        trackpad_init = false;
         return false;
     }
 
@@ -272,8 +272,10 @@ bool cirque_gen_6_read_report(cgen6_report_t *report) {
 
         return true;
     }
-    // Mouse/relative mode report
+    // Mouse/relative mode report. The pad is always configured for PTP, so a
+    // mouse report means it lost its configuration.
     else if (report_id == CGEN6_MOUSE_REPORT_ID) {
+        busdev_report_suspect(navigator_trackpad_dev, BUSDEV_REASON_BAD_REPORT_ID);
         report->buttons     = packet[3];
         report->xDelta      = packet[4];
         report->yDelta      = packet[5];
@@ -286,29 +288,9 @@ bool cirque_gen_6_read_report(cgen6_report_t *report) {
     return false;
 }
 
-// Device initialization - returns true on success, false on failure
-void navigator_trackpad_device_init(void) {
-    i2c_init();
-
-    // Probe the real trackpad first (0x58, left-plugged); if it doesn't ACK,
-    // fall back to the left-nRF wireless mirror (0x5C, right-plugged). Re-runs
-    // on every re-probe (see the 1 s retry in navigator_trackpad_ptp_task()),
-    // so a trackpad moved between halves at runtime is picked back up.
-    nav_addr = NAVIGATOR_TRACKPAD_ADDRESS;
-    i2c_status_t status = i2c_ping_address(nav_addr, NAVIGATOR_TRACKPAD_TIMEOUT);
-    if (status != I2C_STATUS_SUCCESS) {
-        nav_addr = NAVIGATOR_TRACKPAD_MIRROR_ADDRESS;
-        status   = i2c_ping_address(nav_addr, NAVIGATOR_TRACKPAD_TIMEOUT);
-    }
-    if (status != I2C_STATUS_SUCCESS) {
-        trackpad_init = false;
-        return;
-    }
-    cirque_gen6_clear();
-    wait_ms(50);
-
-    // Dump sensor info to the console if needed, just set NAVIGATOR_TRACKPAD_DEBUG to 1 in your config.h
- #if defined(NAVIGATOR_TRACKPAD_DEBUG)
+// Dumps sensor identification to the console. Enable with NAVIGATOR_TRACKPAD_DEBUG.
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+static void trackpad_dump_info(void) {
     uint8_t  hardwareId  = cirque_gen6_read_reg(CGEN6_HARDWARE_ID, false);
     uint8_t  firmwareId  = cirque_gen6_read_reg(CGEN6_FIRMWARE_ID, false);
     uint16_t vendorId    = cirque_gen6_read_reg_16(CGEN6_VENDOR_ID);
@@ -331,22 +313,84 @@ void navigator_trackpad_device_init(void) {
     printf("Touchpad Uncommitted Version: %s\n", uncommittedVersion ? "true" : "false");
     printf("Touchpad Branch Version: %s\n", branchVersion ? "true" : "false");
     printf("Touchpad Developer ID: %d\n", developerId);
+}
 #endif
 
-    uint8_t res = CGEN6_SUCCESS;
-    res = cirque_gen6_set_ptp_mode();
+// Feed mode written by trackpad_init_step() and expected back by
+// trackpad_verify().
+#define CGEN6_FEED_CONFIG4_MODE_MASK 0x0C
+#define CGEN6_FEED_CONFIG4_PTP 0x04
 
-    if (res != CGEN6_SUCCESS) {
-        trackpad_init = false;
-        return;
+static busdev_step_t trackpad_init_step(uint8_t addr, uint8_t step, uint16_t *delay_ms) {
+    trackpad_addr = addr;
+
+    switch (step) {
+        case 0:
+            cirque_gen6_clear();
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+            trackpad_dump_info();
+#endif
+            // Matches the post-clear settle the blocking init used to do.
+            *delay_ms = 50;
+            return BUSDEV_STEP_MORE;
+
+        case 1:
+            if (cirque_gen6_set_ptp_mode() != CGEN6_SUCCESS) {
+                return BUSDEV_STEP_FAIL;
+            }
+            return BUSDEV_STEP_MORE;
+
+        default:
+            if (cirque_gen6_swap_xy(true) != CGEN6_SUCCESS) {
+                return BUSDEV_STEP_FAIL;
+            }
+            if (cirque_gen6_invert_x(true) != CGEN6_SUCCESS) {
+                return BUSDEV_STEP_FAIL;
+            }
+            if (cirque_gen6_invert_y(true) != CGEN6_SUCCESS) {
+                return BUSDEV_STEP_FAIL;
+            }
+            // Disable scaling for raw coordinates
+            if (cirque_gen6_enable_logical_scaling(false) != CGEN6_SUCCESS) {
+                return BUSDEV_STEP_FAIL;
+            }
+            return BUSDEV_STEP_DONE;
     }
+}
 
-    cirque_gen6_swap_xy(true);
-    cirque_gen6_invert_x(true);
-    cirque_gen6_invert_y(true);
-    cirque_gen6_enable_logical_scaling(false);  // Disable scaling for raw coordinates
+// XY_CONFIG is not adjacent to FEED_CONFIG4, so reading it costs a second
+// transaction, and it cannot be lost without the feed mode being lost too.
+static bool trackpad_verify(uint8_t addr) {
+    trackpad_addr = addr;
 
-    trackpad_init = true;
+    uint8_t feed_config4;
+    if (cirque_gen6_read_memory(CGEN6_FEED_CONFIG4, &feed_config4, 1, false) != CGEN6_SUCCESS) {
+        return false;
+    }
+    return (feed_config4 & CGEN6_FEED_CONFIG4_MODE_MASK) == CGEN6_FEED_CONFIG4_PTP;
+}
+
+static const busdev_desc_t trackpad_desc = {
+    .name               = "nav_trackpad",
+    .addr               = NAVIGATOR_TRACKPAD_ADDRESS,
+    .settle_ms          = 20,
+    .verify_interval_ms = 1000,
+    .probe_timeout_ms   = NAVIGATOR_TRACKPAD_PROBE_TIMEOUT,
+    .max_err_streak     = 1,
+    .probe              = NULL,
+    .init_step          = trackpad_init_step,
+    .verify             = trackpad_verify,
+    .on_state           = NULL,
+};
+
+// Hands the pad over to the bus supervisor; presence and configuration are its
+// job from here on.
+void navigator_trackpad_device_init(void) {
+    i2c_init();
+
+    if (navigator_trackpad_dev == BUSDEV_NONE) {
+        navigator_trackpad_dev = busdev_register(&trackpad_desc);
+    }
 }
 
 // CPI management

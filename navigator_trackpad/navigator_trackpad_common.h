@@ -5,10 +5,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "i2c_master.h"
+#include "busdev.h"
 
 // Polling intervals (in ms)
 #define NAVIGATOR_TRACKPAD_POLL_INTERVAL_MS 5    // Minimum interval between sensor queries
-#define NAVIGATOR_TRACKPAD_PROBE_INTERVAL_MS 1000 // Interval for probing disconnected device
 
 #ifndef NAVIGATOR_TRACKPAD_ADDRESS
 #    define NAVIGATOR_TRACKPAD_ADDRESS 0x58
@@ -24,6 +24,10 @@
 
 #ifndef NAVIGATOR_TRACKPAD_TIMEOUT
 #    define NAVIGATOR_TRACKPAD_TIMEOUT 100
+#endif
+
+#ifndef NAVIGATOR_TRACKPAD_PROBE_TIMEOUT
+#    define NAVIGATOR_TRACKPAD_PROBE_TIMEOUT 5
 #endif
 
 // Packet and report IDs
@@ -181,7 +185,7 @@ uint16_t navigator_trackpad_get_cpi(void);
 void     navigator_trackpad_set_cpi(uint16_t cpi);
 
 // Shared globals
-extern bool           trackpad_init;
+extern busdev_id_t navigator_trackpad_dev;
 
 // Helper functions
 uint8_t cirque_gen6_finger_count(cgen6_report_t *report);

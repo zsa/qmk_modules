@@ -7,6 +7,10 @@
 #include "oryx_telemetry.h"
 #include "action_util.h"
 
+#ifdef COMMUNITY_MODULE_AUTOMOUSE_ENABLE
+#    include <automouse.h>
+#endif
+
 ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 1);
 
 uint8_t current_layer = 0;
@@ -304,6 +308,28 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             raw_hid_send_oryx(event, RAW_EPSIZE);
             break;
         }
+        case ORYX_SET_AUTOMOUSE: // param[0] = device index, param[1] = enabled
+#ifdef COMMUNITY_MODULE_AUTOMOUSE_ENABLE
+            automouse_set_device_enabled(param[0], param[1]);
+            // fall through to report the resulting state
+#else
+            oryx_error(ORYX_ERR_UNKNOWN_COMMAND);
+            break;
+#endif
+        case ORYX_GET_AUTOMOUSE:
+#ifdef COMMUNITY_MODULE_AUTOMOUSE_ENABLE
+        {
+            uint8_t event[RAW_EPSIZE];
+            event[0] = ORYX_EVT_AUTOMOUSE;
+            event[1] = automouse_get_device_enabled(AUTOMOUSE_DEVICE_TRACKBALL);
+            event[2] = automouse_get_device_enabled(AUTOMOUSE_DEVICE_TRACKPAD);
+            event[3] = ORYX_STOP_BIT;
+            raw_hid_send_oryx(event, RAW_EPSIZE);
+        }
+#else
+            oryx_error(ORYX_ERR_UNKNOWN_COMMAND);
+#endif
+            break;
         default:
             oryx_error(ORYX_ERR_UNKNOWN_COMMAND);
     }

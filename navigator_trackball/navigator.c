@@ -18,6 +18,7 @@
  * - NAVIGATOR_SCROLL_THRESHOLD: Minimum to scroll (default: 0f)
  * - NAVIGATOR_SCROLL_ACCELERATION: Speed multiplier (default: 1.5f)
  * - NAVIGATOR_SCROLL_MAX_SPEED: Maximum speed limit (default: 8.0f)
+ * - NAVIGATOR_TRACKBALL_SCROLL_ONLY: Always scroll, never move the cursor
  *
  * Algorithm:
  * 1. Accumulate input as floating-point values
@@ -127,6 +128,10 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
     bool scroll_active = set_scrolling;
 #ifdef _NAVIGATOR_DRAG_SCROLL_HAS_LAYERS
     scroll_active = scroll_active || navigator_drag_scroll_layer_active();
+#endif
+#ifdef NAVIGATOR_TRACKBALL_SCROLL_ONLY
+    // Scroll-only mode: the trackball always scrolls, no cursor movement.
+    scroll_active = true;
 #endif
     if (scroll_active) {
         // Accumulate scroll movement

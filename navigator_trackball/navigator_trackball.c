@@ -8,6 +8,7 @@
 
 #include "i2c_master.h"
 #include "navigator_trackball.h"
+#include "busdev.h"
 #include <stdint.h>
 #include <stdio.h>
 #include "quantum.h"
@@ -16,32 +17,26 @@ static uint8_t current_cpi = NAVIGATOR_TRACKBALL_CPI;
 
 uint8_t has_motion = 0;
 
-uint8_t trackball_init = 0;
-
 deferred_token callback_token = 0;
 
-// The address currently in use for the bridge chip: real bridge (0x50) or
-// left-nRF wireless mirror (0x58). Selected by the dual probe in
-// pointing_device_driver_init() and re-selected on every re-probe, so runtime
-// side swaps (trackball moved between halves) are handled transparently.
+static busdev_id_t nav_dev = BUSDEV_NONE;
+// Address the supervisor is currently using for this device: the real bridge
+// (0x50, left-plugged) or the left-nRF wireless mirror (0x5A, right-plugged).
 static uint8_t nav_addr = NAVIGATOR_TRACKBALL_ADDRESS;
-
-// Forward declaration for restore_cpi (defined later, called from pointing_device_driver_init)
-static void restore_cpi(uint8_t cpi);
 
 // The sequence of commands to configure and boot the paw3805ek sensor.
 paw3805ek_reg_seq_t paw3805ek_configure_seq[] = {
     {0x06, 0x80},                 // Software reset
     {0x00, 0x00},                 // Request the sensor ID
-    {0x09 | WRITE_REG_BIT, 0x5A}, // Disable the write protection
-#ifdef MOUSE_EXTENDED_REPORT
-    {0x19 | WRITE_REG_BIT, 0x30}, // Set the sensor orientation, set motion data length to 16 bits
-#else
-    {0x19 | WRITE_REG_BIT, 0x34}, // Set the sensor orientation, set motion data length to 8 bits
-#endif
+    {0x09 | WRITE_REG_BIT, 0x5A},                                    // Disable the write protection
+    {PAW3805EK_REG_ORIENTATION | WRITE_REG_BIT, PAW3805EK_ORIENTATION}, // Sensor orientation and motion data length
     //{0x26 | WRITE_REG_BIT, 0x10}, // Enable burst mode
     {0x09 | WRITE_REG_BIT, 0x00}, // Enable the write protection
 };
+
+#define PAW3805EK_SEQ_LEN (sizeof(paw3805ek_configure_seq) / sizeof(paw3805ek_reg_seq_t))
+// Index in the sequence whose response carries the sensor ID.
+#define PAW3805EK_ID_STEP 1
 
 // A wrapper function for i2c_transmit that adds the address of the bridge chip to the data.
 i2c_status_t sci18is606_write(uint8_t *data, uint8_t length) {
@@ -58,22 +53,11 @@ i2c_status_t sci18is606_spi_tx(uint8_t *data, uint8_t length, bool read) {
     i2c_status_t status = sci18is606_write(data, length);
     wait_us(length * 15);
     // Read the SPI response if the command expects it
-    if (read) {
+    if (read && status == I2C_STATUS_SUCCESS) {
         status = sci18is606_read(data, length);
     }
     if (status != I2C_STATUS_SUCCESS) {
-        trackball_init = 0;
-    }
-    return status;
-}
-
-// Configure the bridge chip to enable SPI mode.
-i2c_status_t sci18is606_configure(void) {
-    uint8_t      spi_conf[2] = {SCI18IS606_CONF_SPI, SCI18IS606_CONF};
-    i2c_status_t status      = sci18is606_write(spi_conf, 2);
-    wait_ms(10);
-    if (status != I2C_STATUS_SUCCESS) {
-        trackball_init = 0;
+        busdev_report_error(nav_dev, status);
     }
     return status;
 }
@@ -101,27 +85,86 @@ bool paw3805ek_set_cpi(void) {
     return true;
 }
 
-// Run the paw3805ek configuration sequence.
-bool paw3805ek_configure(void) {
-    for (uint8_t i = 0; i < sizeof(paw3805ek_configure_seq) / sizeof(paw3805ek_reg_seq_t); i++) {
-        uint8_t buf[3];
-        buf[0] = NCS_PIN;
-        buf[1] = paw3805ek_configure_seq[i].reg;
-        buf[2] = paw3805ek_configure_seq[i].data;
-        if (sci18is606_spi_tx(buf, 3, true) != I2C_STATUS_SUCCESS) {
-            return false;
-        }
-        // Wait for the sensor to restart after the software reset cmd
-        wait_ms(1);
+// Presence test: the bridge SPI configuration write, which is also the first
+// thing the device needs. A NAK means no bridge on that address.
+static i2c_status_t nav_probe(uint8_t addr) {
+    nav_addr = addr;
 
-        // Check the sensor ID to validate the spi link after the reset
-        if (i == 1 && buf[1] != PAW3805EK_ID) {
-            return false;
+    uint8_t spi_conf[2] = {SCI18IS606_CONF_SPI, SCI18IS606_CONF};
+    return i2c_transmit(addr, spi_conf, 2, NAVIGATOR_TRACKBALL_PROBE_TIMEOUT);
+}
+
+// Bridge SPI configuration, then one paw3805ek configuration entry per step,
+// then the CPI restore. Self-sufficient: reached without a probe after a verify
+// mismatch or a suspect.
+static busdev_step_t nav_init_step(uint8_t addr, uint8_t step, uint16_t *delay_ms) {
+    nav_addr = addr;
+
+    if (step == 0) {
+        uint8_t spi_conf[2] = {SCI18IS606_CONF_SPI, SCI18IS606_CONF};
+        if (i2c_transmit(addr, spi_conf, 2, NAVIGATOR_TRACKBALL_TIMEOUT) != I2C_STATUS_SUCCESS) {
+            return BUSDEV_STEP_FAIL;
         }
+        *delay_ms = 10;
+        return BUSDEV_STEP_MORE;
     }
 
-    return true;
+    uint8_t seq = step - 1;
+    if (seq < PAW3805EK_SEQ_LEN) {
+        uint8_t buf[3];
+        buf[0] = NCS_PIN;
+        buf[1] = paw3805ek_configure_seq[seq].reg;
+        buf[2] = paw3805ek_configure_seq[seq].data;
+        if (sci18is606_spi_tx(buf, 3, true) != I2C_STATUS_SUCCESS) {
+            return BUSDEV_STEP_FAIL;
+        }
+        // Validate the spi link with the sensor ID after the software reset.
+        if (seq == PAW3805EK_ID_STEP && buf[1] != PAW3805EK_ID) {
+            return BUSDEV_STEP_FAIL;
+        }
+        // Let the sensor restart after the software reset cmd.
+        *delay_ms = 1;
+        return BUSDEV_STEP_MORE;
+    }
+
+    if (!paw3805ek_set_cpi()) {
+        return BUSDEV_STEP_FAIL;
+    }
+    return BUSDEV_STEP_DONE;
 }
+
+// Reads the sensor product ID through the bridge, exercising the whole path,
+// then the orientation register, which a reset sensor no longer holds.
+static bool nav_verify(uint8_t addr) {
+    nav_addr = addr;
+
+    uint8_t id[3] = {NCS_PIN, 0x00, 0x00};
+    if (sci18is606_spi_tx(id, 3, true) != I2C_STATUS_SUCCESS) {
+        return false;
+    }
+    if (id[1] != PAW3805EK_ID) {
+        return false;
+    }
+
+    uint8_t orientation[3] = {NCS_PIN, PAW3805EK_REG_ORIENTATION, 0x00};
+    if (sci18is606_spi_tx(orientation, 3, true) != I2C_STATUS_SUCCESS) {
+        return false;
+    }
+    return orientation[1] == PAW3805EK_ORIENTATION;
+}
+
+static const busdev_desc_t nav_desc = {
+    .name               = "nav_trackball",
+    .addr               = NAVIGATOR_TRACKBALL_ADDRESS,
+    .settle_ms          = 10,
+    .verify_interval_ms = 500,
+    .probe_timeout_ms   = NAVIGATOR_TRACKBALL_PROBE_TIMEOUT,
+    .max_err_streak     = 1,
+    .probe              = nav_probe,
+    .init_step          = nav_init_step,
+    .verify             = nav_verify,
+    .on_state           = NULL,
+};
 
 // Assert the CS pin to read the motion register.
 bool paw3805ek_has_motion(void) {
@@ -135,22 +178,22 @@ bool paw3805ek_has_motion(void) {
 // Read the motion data from the paw3805ek sensor.
 void paw3804ek_read_motion(report_mouse_t *mouse_report) {
 #ifdef MOUSE_EXTENDED_REPORT
-    uint8_t delta_x_l[2] = {0x01, 0x03};
+    uint8_t delta_x_l[3] = {0x01, 0x03, 0x00};
     if (sci18is606_spi_tx(delta_x_l, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_y_l[2] = {0x01, 0x04};
+    uint8_t delta_y_l[3] = {0x01, 0x04, 0x00};
     if (sci18is606_spi_tx(delta_y_l, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_x_h[2] = {0x01, 0x11};
+    uint8_t delta_x_h[3] = {0x01, 0x11, 0x00};
     if (sci18is606_spi_tx(delta_x_h, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_y_h[2] = {0x01, 0x12};
+    uint8_t delta_y_h[3] = {0x01, 0x12, 0x00};
     if (sci18is606_spi_tx(delta_y_h, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
@@ -158,12 +201,12 @@ void paw3804ek_read_motion(report_mouse_t *mouse_report) {
     mouse_report->x = (int16_t)((delta_x_h[1] << 8) | delta_x_l[1]);
     mouse_report->y = (int16_t)((delta_y_h[1] << 8) | delta_y_l[1]);
 #else
-    uint8_t delta_x[2] = {0x01, 0x03};
+    uint8_t delta_x[3] = {0x01, 0x03, 0x00};
     if (sci18is606_spi_tx(delta_x, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
 
-    uint8_t delta_y[2] = {0x01, 0x04};
+    uint8_t delta_y[3] = {0x01, 0x04, 0x00};
     if (sci18is606_spi_tx(delta_y, 3, true) != I2C_STATUS_SUCCESS) {
         return;
     }
@@ -175,11 +218,7 @@ void paw3804ek_read_motion(report_mouse_t *mouse_report) {
 
 // Deffered execution callback that periodically checks for motion.
 uint32_t sci18is606_read_callback(uint32_t trigger_time, void *cb_arg) {
-    if (!trackball_init) {
-        pointing_device_driver_init();
-        return NAVIGATOR_TRACKBALL_PROBE;
-    }
-    if (paw3805ek_has_motion()) {
+    if (busdev_is_up(nav_dev) && paw3805ek_has_motion()) {
         has_motion = 1;
     }
     return NAVIGATOR_TRACKBALL_READ;
@@ -190,13 +229,13 @@ uint32_t sci18is606_read_callback(uint32_t trigger_time, void *cb_arg) {
 
 // Strong overrides of the wireless module's weak probe hooks, so telemetry can
 // report what the last probe actually found rather than what this build can
-// drive. nav_addr says which of the two addresses answered, which is as close
+// drive. The latched address says which of the two answered, which is as close
 // to a side-of-the-board signal as the STM32 gets.
 uint8_t zsa_nav_probe_state(void) {
-    if (!trackball_init) {
+    if (!busdev_is_up(nav_dev)) {
         return ZSA_NAV_PROBE_NONE;
     }
-    return (nav_addr == NAVIGATOR_TRACKBALL_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
+    return (busdev_addr(nav_dev) == NAVIGATOR_TRACKBALL_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
 }
 
 uint8_t zsa_nav_probe_device(void) {
@@ -204,44 +243,27 @@ uint8_t zsa_nav_probe_device(void) {
 }
 #endif
 
-// Makes the next sci18is606_read_callback() tick re-run
-// pointing_device_driver_init(), re-probing the bridge and re-running
-// paw3805ek_configure(). The bridge keeps ACKing after a transport switch, so
-// nothing else clears trackball_init.
+// The bridge keeps ACKing across a transport switch, so only an explicit
+// take-down makes the supervisor re-probe both addresses.
 void zsa_nav_transport_changed(void) {
-    trackball_init = 0;
+    busdev_force_down(nav_dev, BUSDEV_REASON_TRANSPORT_SWITCH);
 }
 
 // Override the weak custom driver functions
 void pointing_device_driver_init(void) {
     i2c_init();
 
-    // Probe the real bridge first (0x50, left-plugged); if it doesn't ACK,
-    // fall back to the left-nRF wireless mirror (0x58, right-plugged). Re-runs
-    // on every re-probe (see sci18is606_read_callback), so a trackball moved
-    // between halves at runtime is picked back up.
-    nav_addr = NAVIGATOR_TRACKBALL_ADDRESS;
-    i2c_status_t bridge = sci18is606_configure();
-    if (bridge != I2C_STATUS_SUCCESS) {
-        nav_addr = NAVIGATOR_TRACKBALL_MIRROR_ADDRESS;
-        bridge = sci18is606_configure();
-    }
-    if (bridge == I2C_STATUS_SUCCESS) {
-        paw3805ek_configure();
-        trackball_init = 1;
-        restore_cpi(current_cpi);
+    if (nav_dev == BUSDEV_NONE) {
+        nav_dev = busdev_register(&nav_desc);
     }
 
-    // Always arm the periodic probe/read callback, even on failure, so a
-    // board that booted without a trackball keeps probing at
-    // NAVIGATOR_TRACKBALL_PROBE cadence and picks one up on hot-plug.
     if (!callback_token) {
         callback_token = defer_exec(NAVIGATOR_TRACKBALL_READ, sci18is606_read_callback, NULL);
     }
 }
 
 report_mouse_t pointing_device_driver_get_report(report_mouse_t mouse_report) {
-    if (!trackball_init) {
+    if (!busdev_is_up(nav_dev)) {
         return mouse_report;
     }
 
@@ -256,21 +278,22 @@ uint16_t pointing_device_driver_get_cpi(void) {
     return current_cpi;
 }
 
-static void restore_cpi(uint8_t cpi) {
-    current_cpi = cpi;
-    paw3805ek_set_cpi();
-}
-
 void pointing_device_driver_set_cpi(uint16_t cpi) {
     if (cpi == 0) { // Decrease one tick
         if (current_cpi > NAVIGATOR_TRACKBALL_CPI_TICK) {
             current_cpi -= NAVIGATOR_TRACKBALL_CPI_TICK;
-            paw3805ek_set_cpi();
+        } else {
+            return;
         }
     } else {
         if (current_cpi <= NAVIGATOR_TRACKBALL_CPI_MAX - NAVIGATOR_TRACKBALL_CPI_TICK) {
             current_cpi += NAVIGATOR_TRACKBALL_CPI_TICK;
-            paw3805ek_set_cpi();
+        } else {
+            return;
         }
+    }
+
+    if (busdev_is_up(nav_dev)) {
+        paw3805ek_set_cpi();
     }
 }
