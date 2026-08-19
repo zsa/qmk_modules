@@ -296,12 +296,10 @@ static void trackpad_dump_info(void) {
 }
 #endif
 
-// Configuration written by trackpad_init_step(), and expected back by
-// trackpad_verify(): PTP feed mode, swapped/inverted axes, no logical scaling.
+// Feed mode written by trackpad_init_step() and expected back by
+// trackpad_verify().
 #define CGEN6_FEED_CONFIG4_MODE_MASK 0x0C
 #define CGEN6_FEED_CONFIG4_PTP 0x04
-#define CGEN6_XY_CONFIG_MASK 0x0F
-#define CGEN6_XY_CONFIG_EXPECTED 0x0F
 
 static busdev_step_t trackpad_init_step(uint8_t addr, uint8_t step, uint16_t *delay_ms) {
     trackpad_addr = addr;
@@ -340,6 +338,8 @@ static busdev_step_t trackpad_init_step(uint8_t addr, uint8_t step, uint16_t *de
     }
 }
 
+// XY_CONFIG is not adjacent to FEED_CONFIG4, so reading it costs a second
+// transaction, and it cannot be lost without the feed mode being lost too.
 static bool trackpad_verify(uint8_t addr) {
     trackpad_addr = addr;
 
@@ -347,22 +347,14 @@ static bool trackpad_verify(uint8_t addr) {
     if (cirque_gen6_read_memory(CGEN6_FEED_CONFIG4, &feed_config4, 1, false) != CGEN6_SUCCESS) {
         return false;
     }
-    if ((feed_config4 & CGEN6_FEED_CONFIG4_MODE_MASK) != CGEN6_FEED_CONFIG4_PTP) {
-        return false;
-    }
-
-    uint8_t xy_config;
-    if (cirque_gen6_read_memory(CGEN6_XY_CONFIG, &xy_config, 1, false) != CGEN6_SUCCESS) {
-        return false;
-    }
-    return (xy_config & CGEN6_XY_CONFIG_MASK) == CGEN6_XY_CONFIG_EXPECTED;
+    return (feed_config4 & CGEN6_FEED_CONFIG4_MODE_MASK) == CGEN6_FEED_CONFIG4_PTP;
 }
 
 static const busdev_desc_t trackpad_desc = {
     .name               = "nav_trackpad",
     .addr               = NAVIGATOR_TRACKPAD_ADDRESS,
     .settle_ms          = 20,
-    .verify_interval_ms = 500,
+    .verify_interval_ms = 1000,
     .probe_timeout_ms   = NAVIGATOR_TRACKPAD_PROBE_TIMEOUT,
     .max_err_streak     = 1,
     .probe              = NULL,
