@@ -1343,11 +1343,16 @@ static void right_telemetry_task(void) {
     }
     last_right_tlm_ms = timer_read32();
 
+    /* TEMP DEBUG: 1 Hz read from 0x54 disabled to isolate the periodic I2C error. */
+#if 0
     struct zsa_right_telemetry got;
     right_tlm_valid = voyager_right_nrf_read_telemetry(&got) && zsa_right_telemetry_ok(&got);
     if (right_tlm_valid) {
         right_tlm = got;
     }
+#else
+    right_tlm_valid = false;
+#endif
 }
 
 void bluetooth_task(void) {
