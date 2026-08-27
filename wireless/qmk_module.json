@@ -13,6 +13,10 @@
         {
             "key": "BLE_PAIR_MODE",
             "aliases": ["BT_PAIR"]
+        },
+        {
+            "key": "BLE_SWITCH_HOST",
+            "aliases": ["BT_HOST"]
         }
     ]
 }

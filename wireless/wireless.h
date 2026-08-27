@@ -108,6 +108,8 @@ void zsa_wireless_cmd_ble_disconnect(void);
 /* Clear every BLE bond and refresh the identity. Sent by BT_UNPR after a
  * ZSA_UNPAIR_HOLD_MS hold. */
 void zsa_wireless_cmd_ble_unpair(void);
+/* Hand over to the next remembered host. Sent by BLE_SWITCH_HOST. */
+void zsa_wireless_cmd_ble_switch_host(void);
 
 /* Idle power management */
 enum zsa_idle_step zsa_wireless_idle_step(void);

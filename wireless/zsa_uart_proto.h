@@ -83,6 +83,12 @@ enum zsa_msg_type {
                                          * nRF re-advertises afterwards */
     ZSA_MSG_CMD_BLE_UNPAIR   = 0x2A,  /* 0 B: clear all bonds, refresh the BLE
                                        * identity and re-advertise */
+    ZSA_MSG_CMD_BLE_SWITCH_HOST = 0x2B, /* 0 B: hand over to the next remembered
+                                         * host. The nRF drops the current link
+                                         * and advertises each occupied host
+                                         * slot in turn for a short window. Sent
+                                         * again mid-cycle it skips to the next
+                                         * slot. */
     ZSA_MSG_CMD_CHARGE_LIMITS = 0x26, /* 4 B: struct zsa_charge_limits — the
                                        * VBUS input current limit and the
                                        * charge current to apply, both in mA.

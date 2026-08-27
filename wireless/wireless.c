@@ -660,6 +660,10 @@ void zsa_wireless_cmd_ble_unpair(void) {
     send_command(ZSA_MSG_CMD_BLE_UNPAIR);
 }
 
+void zsa_wireless_cmd_ble_switch_host(void) {
+    send_command(ZSA_MSG_CMD_BLE_SWITCH_HOST);
+}
+
 bool zsa_wireless_link_ready(void) {
     return link_ready;
 }
@@ -1262,6 +1266,13 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
         case BLE_PAIR_MODE:
             if (record->event.pressed) {
                 zsa_wireless_cmd_pair();
+            }
+            return false;
+        /* Drops the current host and cycles through the remembered ones until
+         * one answers. */
+        case BLE_SWITCH_HOST:
+            if (record->event.pressed) {
+                zsa_wireless_cmd_ble_switch_host();
             }
             return false;
         /* Core's BT_UNPR, left an unimplemented stub by process_connection().
