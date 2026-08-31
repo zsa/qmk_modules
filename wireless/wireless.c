@@ -1275,6 +1275,12 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
                 zsa_wireless_cmd_ble_switch_host();
             }
             return false;
+        /* Powers both halves off. The nRF refuses while USB is connected. */
+        case ZSA_SHIP_MODE:
+            if (record->event.pressed) {
+                zsa_wireless_cmd_hibernate();
+            }
+            return false;
         /* Core's BT_UNPR, left an unimplemented stub by process_connection().
          * Modules run first, so this arm owns it. Destructive:
          * unpair_hold_task() fires it after the hold. */

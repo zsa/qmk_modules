@@ -17,6 +17,10 @@
         {
             "key": "BLE_SWITCH_HOST",
             "aliases": ["BT_HOST"]
+        },
+        {
+            "key": "ZSA_SHIP_MODE",
+            "aliases": ["ZSA_SHP"]
         }
     ]
 }
