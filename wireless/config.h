@@ -102,6 +102,34 @@
 #    define ZSA_LINK_STATE_STALE_MS 5000
 #endif
 
+/* ---- Low-battery boot guard (see wireless.c) ---- */
+
+/* How long the boot power gate waits for the nRF's EVT_POWER_VERDICT before
+ * lighting the matrix anyway: an nRF that is dead, in serial recovery, or
+ * running a build that never sends one must not leave the keyboard dark. */
+#ifndef ZSA_POWER_GATE_TIMEOUT_MS
+#    define ZSA_POWER_GATE_TIMEOUT_MS 5000
+#endif
+
+/* Red status LED cadence on a critical verdict: ZSA_POWER_LED_PULSES long
+ * pulses, then dark. Deliberately unlike the 500 ms protocol-mismatch blink. */
+#ifndef ZSA_POWER_LED_ON_MS
+#    define ZSA_POWER_LED_ON_MS 1000
+#endif
+#ifndef ZSA_POWER_LED_OFF_MS
+#    define ZSA_POWER_LED_OFF_MS 500
+#endif
+#ifndef ZSA_POWER_LED_PULSES
+#    define ZSA_POWER_LED_PULSES 5
+#endif
+
+/* Spacing of the CMD_HIBERNATE resend once the pulses are done, covering a
+ * lost first frame. The nRF refuses to ship while USB is present, so a repeat
+ * costs nothing. */
+#ifndef ZSA_POWER_HIBERNATE_RETRY_MS
+#    define ZSA_POWER_HIBERNATE_RETRY_MS 3000
+#endif
+
 /* ---- BLE pairing / discoverability indication (see wireless.c) ---- */
 
 /* Half-period of the green status LED blink: slow while discoverable, fast

@@ -177,6 +177,11 @@ enum zsa_msg_type {
                                        * keyboard, not an update in progress,
                                        * and must not read as one. Sent as a
                                        * level. */
+    ZSA_MSG_EVT_POWER_VERDICT = 0x8E, /* 1 B: struct zsa_power_verdict — the
+                                       * nRF's boot-time power verdict; the
+                                       * STM32 keeps the key matrix dark until
+                                       * it arrives. Re-sent when it changes
+                                       * (VBUS attach). Not known to ignition. */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -377,6 +382,13 @@ enum zsa_link_state_val {
 struct __attribute__((packed)) zsa_link_state {
     uint8_t state;        /* enum zsa_link_state_val */
     uint8_t peer_version; /* right half's reported version, 0 when unknown */
+};
+
+/* ZSA_MSG_EVT_POWER_VERDICT (1 byte) */
+#define ZSA_POWER_CRITICAL      (1u << 0) /* do not light the matrix; request ship mode */
+#define ZSA_POWER_VSYSLOW_RESET (1u << 1) /* last PMIC reset was a VSYS brownout */
+struct __attribute__((packed)) zsa_power_verdict {
+    uint8_t flags;
 };
 
 /* ---- Adaptive charging policy ----

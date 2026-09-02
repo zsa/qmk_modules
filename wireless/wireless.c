@@ -277,6 +277,122 @@ static enum zsa_idle_step idle_step       = ZSA_IDLE_ACTIVE;
 static uint32_t           nrf_wake_time  = 0;
 static bool               nrf_ship_mode  = false;
 
+/* ---- Boot power gate ---- *
+ *
+ * The STM32 shares the PMIC's rail with the left nRF and boots first, so after
+ * a brownout it would light the matrix and flatten the cell again before the
+ * nRF could read RSTCAUSE. keyboard_post_init_kb() therefore leaves the matrix
+ * disabled and this gate decides.
+ *
+ * The nRF pushes EVT_POWER_VERDICT on every link-up. ZSA_POWER_CRITICAL means
+ * the last PMIC reset was a brownout and there is no USB power: keep the matrix
+ * dark, pulse the red status LED, then ask the nRF for ship mode. A verdict
+ * without the flag — including the one re-sent when USB is plugged in mid
+ * sequence — boots normally.
+ *
+ * Transitions:
+ *   PG_WAIT     -> PG_CRITICAL  verdict with ZSA_POWER_CRITICAL
+ *   PG_WAIT     -> PG_OK        verdict without it, or ZSA_POWER_GATE_TIMEOUT_MS
+ *   PG_CRITICAL -> PG_DONE      pulse sequence finished
+ *   PG_CRITICAL -> PG_OK        verdict without ZSA_POWER_CRITICAL
+ *   PG_DONE     -> PG_OK        verdict without ZSA_POWER_CRITICAL
+ */
+enum zsa_power_gate {
+    PG_WAIT = 0, /* no verdict yet, matrix held off */
+    PG_OK,       /* matrix enabled, terminal until the next boot */
+    PG_CRITICAL, /* running the red pulse sequence */
+    PG_DONE,     /* dark, asking the nRF to ship */
+};
+
+#define POWER_PULSE_PERIOD_MS (ZSA_POWER_LED_ON_MS + ZSA_POWER_LED_OFF_MS)
+#define POWER_PULSE_TOTAL_MS  (POWER_PULSE_PERIOD_MS * ZSA_POWER_LED_PULSES)
+
+static enum zsa_power_gate power_gate       = PG_WAIT;
+static uint32_t            power_gate_ms;       /* when the current state was entered */
+static uint32_t            power_hibernate_ms;  /* last CMD_HIBERNATE sent in PG_DONE */
+
+/* False while the gate holds the matrix off, so the other paths that enable it
+ * cannot undo the hold. */
+static inline bool power_gate_allows_rgb(void) {
+    return power_gate == PG_OK;
+}
+
+static void power_gate_enter(enum zsa_power_gate next) {
+    if (power_gate == next) {
+        return;
+    }
+    power_gate    = next;
+    power_gate_ms = timer_read32();
+    zsa_log("power: gate -> %u", (unsigned)next);
+
+#ifdef RGB_MATRIX_ENABLE
+    if (next == PG_OK) {
+        rgb_matrix_enable_noeeprom();
+    }
+#endif
+}
+
+/* CRITICAL only decides while nothing else has, so a late verdict cannot dark
+ * a running keyboard. OK always wins, which is how USB plugged in during the
+ * pulses gets back to a normal boot. */
+static void power_gate_verdict(uint8_t flags) {
+    if (power_gate == PG_OK) {
+        return;
+    }
+    if (!(flags & ZSA_POWER_CRITICAL)) {
+        power_gate_enter(PG_OK);
+    } else if (power_gate == PG_WAIT) {
+        power_gate_enter(PG_CRITICAL);
+    }
+}
+
+/* Red channel of the pulse sequence, phase taken from the absolute clock since
+ * PG_CRITICAL was entered so the cadence does not depend on the tick rate. */
+static uint8_t power_gate_red(void) {
+    uint32_t t = timer_elapsed32(power_gate_ms);
+    if (t >= POWER_PULSE_TOTAL_MS) {
+        return ZSA_STATUS_LED_OFF;
+    }
+    return (t % POWER_PULSE_PERIOD_MS) < ZSA_POWER_LED_ON_MS ? ZSA_STATUS_LED_ON : ZSA_STATUS_LED_OFF;
+}
+
+static void power_gate_task(void) {
+#ifdef RGB_MATRIX_ENABLE
+    /* Re-assert the hold, so a runtime enable cannot lift it before the verdict. */
+    if (power_gate != PG_OK && rgb_matrix_is_enabled()) {
+        rgb_matrix_disable_noeeprom();
+    }
+#endif
+
+    switch (power_gate) {
+        case PG_WAIT:
+            /* No verdict in time: the nRF is dead, in serial recovery, or on a
+             * build that does not send one. Light the matrix. */
+            if (timer_elapsed32(power_gate_ms) >= ZSA_POWER_GATE_TIMEOUT_MS) {
+                power_gate_enter(PG_OK);
+            }
+            break;
+
+        case PG_CRITICAL:
+            if (timer_elapsed32(power_gate_ms) >= POWER_PULSE_TOTAL_MS) {
+                power_gate_enter(PG_DONE);
+                zsa_wireless_cmd_hibernate();
+                power_hibernate_ms = timer_read32();
+            }
+            break;
+
+        case PG_DONE:
+            if (timer_elapsed32(power_hibernate_ms) >= ZSA_POWER_HIBERNATE_RETRY_MS) {
+                zsa_wireless_cmd_hibernate();
+                power_hibernate_ms = timer_read32();
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
 /* ---- Helpers ---- */
 
 void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len) {
@@ -342,7 +458,9 @@ static void pair_confirm_wake(void) {
         idle_power_wake();
     }
 #ifdef RGB_MATRIX_ENABLE
-    rgb_matrix_enable_noeeprom();
+    if (power_gate_allows_rgb()) {
+        rgb_matrix_enable_noeeprom();
+    }
 #endif
 }
 
@@ -483,7 +601,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 // The nRF also reports this on unrelated transitions (usb_connected,
                 // idle_step), so only resync on the OFF->ON edge - rail power actually
                 // returning after LEDS_OFF idle. A repeated "on" report is a no-op.
-                if (rail_on && !left_led_rail_on && idle_step < ZSA_IDLE_LEDS_OFF) {
+                if (rail_on && !left_led_rail_on && idle_step < ZSA_IDLE_LEDS_OFF && power_gate_allows_rgb()) {
                     zsa_rtt_event("LED_RAIL -> resync"); // TEMP DEBUG
                     // The rail powers the left chip, which is not supervised:
                     // resync it here. The right one goes through the supervisor.
@@ -492,6 +610,13 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 }
                 left_led_rail_on = rail_on;
 #endif
+            }
+            break;
+
+        case ZSA_MSG_EVT_POWER_VERDICT:
+            if (frame->len >= sizeof(struct zsa_power_verdict)) {
+                const struct zsa_power_verdict *v = (const struct zsa_power_verdict *)frame->payload;
+                power_gate_verdict(v->flags);
             }
             break;
 
@@ -985,7 +1110,11 @@ static void dfu_led_task(void) {
             break;
     }
 
-    if (phase == ZSA_DFU_PHASE_FAILED) {
+    /* The boot power gate outranks both red indications: it only ever runs in
+     * the first seconds after boot, where no update can be in flight. */
+    if (power_gate == PG_CRITICAL) {
+        red = power_gate_red();
+    } else if (phase == ZSA_DFU_PHASE_FAILED) {
         red = ZSA_STATUS_LED_ON;
     } else if (zsa_wireless_link_mismatch()) {
         red = ((now / ZSA_DFU_LED_SLOW_MS) & 1u) ? ZSA_STATUS_LED_ON : ZSA_STATUS_LED_OFF;
@@ -1305,6 +1434,7 @@ void bluetooth_init(void) {
     zsa_parser_init(&rx_parser);
     link_ready = false;
     last_link_up_ms = timer_read32();
+    power_gate_ms   = timer_read32();
     zsa_rtt_init(); // TEMP DEBUG
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();
@@ -1394,6 +1524,9 @@ void bluetooth_task(void) {
 
     /* Unblank if the nRF stopped refreshing the update state */
     dfu_state_task();
+
+    /* Decide whether the matrix may come on after a brownout */
+    power_gate_task();
 
     /* Maintain the adaptive-charging raise while a high-budget source is up */
     bus_grant_task();
