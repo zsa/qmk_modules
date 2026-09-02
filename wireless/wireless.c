@@ -7,7 +7,9 @@
  */
 
 #include <stddef.h>
+#include <hal.h>
 #include "quantum.h"
+#include "usb_main.h"
 #include "wireless.h"
 #include "bluetooth.h"
 #include "report.h"
@@ -182,6 +184,9 @@ extern bool is_transport_connected(void);
 /* Bus ownership decision, made in the keyboard's matrix.c by probing the real
  * expander. The grant must follow the same signal. */
 extern bool zsa_stm32_owns_right_bus(void);
+/* TRRS cable presence, from the same probe: an ACK from the real right-half
+ * expander is the only evidence the cable is plugged. */
+extern bool zsa_trrs_plugged(void);
 /* Right LED driver, supervised by the keyboard (voyager_tng.c). */
 extern void voyager_right_led_resync(void);
 extern bool voyager_right_led_up(void);
@@ -412,11 +417,22 @@ static void send_command(uint8_t type) {
 
 static void idle_power_wake(void);
 static void send_usb_state(bool connected);
+static void send_trrs_state(bool plugged);
 static void send_idle_state(enum zsa_idle_step step);
+
+/* A USB host, as opposed to a wall charger or an unplugged cable. VBUS alone
+ * is a charger; the driver alone can linger in USB_SUSPENDED after unplug
+ * because the STM32 has no VBUS pin. Both together is a host, suspended or
+ * not. VBUS comes from the nRF as EVT_VBUS_STATE. */
+static bool usb_host_present(void) {
+    usbstate_t state = usbGetDriverStateI(&USB_DRIVER);
+    return nrf_vbus_present && (state == USB_ACTIVE || state == USB_SUSPENDED);
+}
 
 /* Send all current STM32 state to nRF — called on link establishment */
 static void send_full_state(void) {
-    send_usb_state(usb_connected_state());
+    send_usb_state(usb_host_present());
+    send_trrs_state(zsa_trrs_plugged());
     send_idle_state(idle_step);
 }
 
@@ -621,7 +637,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             break;
 
         case ZSA_MSG_QUERY_USB_STATE:
-            send_usb_state(usb_connected_state());
+            send_usb_state(usb_host_present());
             break;
 
         case ZSA_MSG_EVT_NAV_PRESENT:
@@ -979,6 +995,11 @@ static void send_usb_state(bool connected) {
     zsa_wireless_send_frame(ZSA_MSG_CMD_USB_STATE, (const uint8_t *)&payload, sizeof(payload));
 }
 
+static void send_trrs_state(bool plugged) {
+    struct zsa_trrs_state payload = { .plugged = plugged ? 1 : 0 };
+    zsa_wireless_send_frame(ZSA_MSG_CMD_TRRS_STATE, (const uint8_t *)&payload, sizeof(payload));
+}
+
 /* Bus lease renewal. Resent unconditionally rather than on change: the right
  * half releases the bus when grants stop arriving, so a dropped frame costs a
  * brief stall, never two masters. Also re-syncs a left half that rebooted. */
@@ -997,6 +1018,25 @@ static void bus_grant_task(void) {
     zsa_wireless_send_frame(ZSA_MSG_CMD_BUS_GRANT, (const uint8_t *)&payload, sizeof(payload));
     last_sent_ms = timer_read32();
     last_granted = granted;
+    primed       = true;
+}
+
+/* Cable presence as a level: sent on every edge and refreshed on a slow tick,
+ * so a left half that rebooted picks it up without waiting for an unplug. */
+static void trrs_state_task(void) {
+    static uint32_t last_sent_ms;
+    static bool     last_plugged;
+    static bool     primed;
+
+    bool plugged = zsa_trrs_plugged();
+
+    if (primed && plugged == last_plugged && timer_elapsed32(last_sent_ms) < ZSA_TRRS_STATE_INTERVAL_MS) {
+        return;
+    }
+
+    send_trrs_state(plugged);
+    last_sent_ms = timer_read32();
+    last_plugged = plugged;
     primed       = true;
 }
 
@@ -1192,7 +1232,7 @@ static void idle_power_task(void) {
     static uint32_t bt_switch_time = 0;
 
     /* Only manage idle power when running wirelessly */
-    if (usb_connected_state()) {
+    if (usb_host_present()) {
         if (was_bluetooth) {
             was_bluetooth = false;
             send_usb_state(true);
@@ -1278,8 +1318,9 @@ static void idle_power_task(void) {
         }
 
         /* This loop never returns to the QMK task pipeline, so drive the
-         * status LEDs from here too. */
+         * status LEDs and the cable level from here too. */
         status_led_task();
+        trrs_state_task();
 
         /* handle_rx_frame may have woken us (EVT_BLE_STATUS, or a
          * EVT_PAIR_STATE carrying CONFIRM) */
@@ -1308,11 +1349,11 @@ static void idle_power_task(void) {
 /* ---- LED flush rate limiting ---- */
 
 /* Strong override of is31fl3731.c's weak is31fl3731_should_flush() hook.
- * Wired is exempt unconditionally, keeping that path byte-for-byte
- * unchanged - the right driver is a real chip on a real bus there, cheap to
- * flush at full rate like the left one. Wireless keeps the left (real,
- * local) driver at full rate too, but caps the right (emulated 0x77, relayed
- * over ESB) driver to ZSA_RIGHT_LED_INTERVAL_MS: every flush it answers
+ * The cap is skipped only while the STM32 drives the real right chip over the
+ * cable - a real chip on a real bus, cheap to flush at full rate like the left
+ * one. Otherwise the left (real, local) driver still runs at full rate, but the
+ * right (emulated 0x77, relayed over ESB) driver is capped to
+ * ZSA_RIGHT_LED_INTERVAL_MS: every flush it answers
  * blocks on a clock-stretched I2C write (~9 ms vs ~0.65 ms for the left chip
  * alone), and the right half doesn't need matrix-scan-rate refresh.
  * Skipping a flush here does not clear pwm_buffer_dirty (only
@@ -1323,7 +1364,7 @@ bool is31fl3731_should_flush(uint8_t index) {
     if (index == ZSA_LED_DRIVER_RIGHT && !voyager_right_led_up()) {
         return false;
     }
-    if (index != ZSA_LED_DRIVER_RIGHT || usb_connected_state()) {
+    if (index != ZSA_LED_DRIVER_RIGHT || zsa_stm32_owns_right_bus()) {
         return true;
     }
     if (timer_elapsed32(last_right_led_flush_ms) < ZSA_RIGHT_LED_INTERVAL_MS) {
@@ -1530,6 +1571,7 @@ void bluetooth_task(void) {
 
     /* Maintain the adaptive-charging raise while a high-budget source is up */
     bus_grant_task();
+    trrs_state_task();
     power_budget_task();
 
     /* Wired-mode source for the right half's battery */

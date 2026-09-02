@@ -59,7 +59,7 @@ enum zsa_msg_type {
     ZSA_MSG_CMD_PAIR         = 0x21,  /* 0 B: make the nRF discoverable for a
                                        * bounded pairing window */
     ZSA_MSG_CMD_IDLE_STATE   = 0x22,
-    ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=disconnected, 1=connected */
+    ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=no host, 1=USB host (active or suspended) */
     ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: nav capability bitmask (ZSA_NAV_CAP_*);
                                        * 0 = no nav support in this QMK build */
     /* 0x25 reserved — was ZSA_MSG_CMD_NAV_CPI (removed 2026-07). Wireless
@@ -89,6 +89,16 @@ enum zsa_msg_type {
                                          * slot in turn for a short window. Sent
                                          * again mid-cycle it skips to the next
                                          * slot. */
+    ZSA_MSG_CMD_TRRS_STATE   = 0x2D,  /* 1 B: struct zsa_trrs_state — level,
+                                       * not a lease: the TRRS cable between
+                                       * the halves is plugged (the STM32 got
+                                       * an ACK from the real right expander).
+                                       * Sent on every edge, at link-up, and
+                                       * refreshed every ZSA_TRRS_STATE_INTERVAL_MS.
+                                       * The left runs ESB only while unplugged.
+                                       * Not in ignition's copy of this header
+                                       * (frozen at voyager2-2.0.1; ignition
+                                       * never sends it). */
     ZSA_MSG_CMD_CHARGE_LIMITS = 0x26, /* 4 B: struct zsa_charge_limits — the
                                        * VBUS input current limit and the
                                        * charge current to apply, both in mA.
@@ -280,7 +290,7 @@ struct __attribute__((packed)) zsa_idle_state {
 
 /* ZSA_MSG_CMD_USB_STATE (1 byte) */
 struct __attribute__((packed)) zsa_usb_state {
-    uint8_t connected; /* 0 = disconnected, 1 = connected */
+    uint8_t connected; /* 0 = no USB host, 1 = USB host present (enumerated, active or suspended, VBUS present) */
 };
 
 /* ZSA_MSG_CMD_NAV_ENABLE (1 byte) — QMK announces its compiled-in nav
@@ -510,6 +520,13 @@ struct __attribute__((packed)) zsa_bus_grant {
  * leave the grant latched and the right on the bus forever. */
 #define ZSA_BUS_GRANT_INTERVAL_MS 100u
 #define ZSA_BUS_GRANT_TIMEOUT_MS  500u
+
+/* ZSA_MSG_CMD_TRRS_STATE (1 byte) */
+struct __attribute__((packed)) zsa_trrs_state {
+    uint8_t plugged; /* 0 = cable unplugged, 1 = plugged */
+};
+/* Refresh cadence for the level while it is unchanged. */
+#define ZSA_TRRS_STATE_INTERVAL_MS 1000
 
 /* ---- DFU state / error codes ---- */
 
