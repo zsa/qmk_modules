@@ -419,6 +419,7 @@ static void idle_power_wake(void);
 static void send_usb_state(bool connected);
 static void send_trrs_state(bool plugged);
 static void send_idle_state(enum zsa_idle_step step);
+static void right_telemetry_task(void);
 
 /* A USB host, as opposed to a wall charger or an unplugged cable. VBUS alone
  * is a charger; the driver alone can linger in USB_SUSPENDED after unplug
@@ -1318,9 +1319,11 @@ static void idle_power_task(void) {
         }
 
         /* This loop never returns to the QMK task pipeline, so drive the
-         * status LEDs and the cable level from here too. */
+         * status LEDs, the cable level and the right-half telemetry read from
+         * here too. */
         status_led_task();
         trrs_state_task();
+        right_telemetry_task();
 
         /* handle_rx_frame may have woken us (EVT_BLE_STATUS, or a
          * EVT_PAIR_STATE carrying CONFIRM) */
