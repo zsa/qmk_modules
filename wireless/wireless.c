@@ -1319,10 +1319,11 @@ static void idle_power_task(void) {
         }
 
         /* This loop never returns to the QMK task pipeline, so drive the
-         * status LEDs, the cable level and the right-half telemetry read from
-         * here too. */
+         * status LEDs, the cable level, the bus grant refresh and the
+         * right-half telemetry read from here too. */
         status_led_task();
         trrs_state_task();
+        bus_grant_task();
         right_telemetry_task();
 
         /* handle_rx_frame may have woken us (EVT_BLE_STATUS, or a
