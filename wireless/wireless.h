@@ -38,9 +38,8 @@ bool zsa_wireless_battery_fresh(void);
  * nothing. See zsa_right_telemetry.h for why this path exists at all. */
 bool zsa_wireless_right_telemetry(struct zsa_right_telemetry *out);
 /* Detected USB source current budget in mA (EVT_PWR_BUDGET): what the attached
- * source advertised over CC. ZSA_PWR_BUDGET_UNKNOWN_MA until one says — no
- * source attached, or the link has not reported yet — which is deliberately
- * not the same as the 500 mA default class. */
+ * source advertised over CC. ZSA_PWR_BUDGET_DEFAULT_MA until the nRF says
+ * otherwise, which is also what it reports with no source attached. */
 uint16_t zsa_wireless_power_budget_ma(void);
 /* True while the nRF reports VBUS present (EVT_VBUS_STATE), false at boot
  * and once VBUS goes away. */

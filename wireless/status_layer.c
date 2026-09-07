@@ -93,10 +93,24 @@ void zsa_wireless_status_draw_gauge(uint8_t first_led, uint8_t soc) {
     }
 }
 
+/* The gauge has no unknown appearance, so an unknown half gets no gauge at
+ * all: its row stays at the background color. A level from a link that stopped
+ * reporting is unknown, not a reading. */
 void zsa_wireless_status_render(void) {
     rgb_matrix_set_color_all(ZSA_STATUS_BG_R, ZSA_STATUS_BG_G, ZSA_STATUS_BG_B);
-    zsa_wireless_status_draw_gauge(ZSA_STATUS_GAUGE_LEFT_FIRST, zsa_wireless_battery_soc());
-    zsa_wireless_status_draw_gauge(ZSA_STATUS_GAUGE_RIGHT_FIRST, zsa_wireless_battery_right_soc());
+
+    if (!zsa_wireless_battery_fresh()) return;
+
+    uint8_t left  = zsa_wireless_battery_soc();
+    uint8_t right = zsa_wireless_battery_right_soc();
+
+    if (left <= 100) {
+        zsa_wireless_status_draw_gauge(ZSA_STATUS_GAUGE_LEFT_FIRST, left);
+    }
+    /* 0 is unknown here too — see telemetry_battery(). */
+    if (right > 0 && right <= 100) {
+        zsa_wireless_status_draw_gauge(ZSA_STATUS_GAUGE_RIGHT_FIRST, right);
+    }
 }
 
 #else /* !RGB_MATRIX_ENABLE */

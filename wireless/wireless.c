@@ -111,6 +111,8 @@ static bool     pair_state_seen;      /* any EVT_PAIR_STATE received yet */
 static uint8_t  nrf_battery_soc;
 static uint8_t  nrf_battery_right_soc;
 static uint8_t  nrf_battery_flags;
+static uint8_t  nrf_battery_right_flags;
+static bool     nrf_battery_right_flags_known; /* the report carried the field */
 static uint32_t last_battery_ms;
 static bool     battery_seen;         /* any EVT_BATTERY received yet */
 /* The nRF re-sends the battery level every second (STATUS_UPDATE_INTERVAL_MS),
@@ -590,13 +592,18 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             break;
 
         case ZSA_MSG_EVT_BATTERY:
-            if (frame->len >= sizeof(struct zsa_battery_status)) {
+            /* Left firmware that predates right_flags sends only three bytes. */
+            if (frame->len >= ZSA_BATTERY_STATUS_LEN_V1) {
                 const struct zsa_battery_status *b = (const struct zsa_battery_status *)frame->payload;
                 nrf_battery_soc       = b->soc;
                 nrf_battery_right_soc = b->right_soc;
                 nrf_battery_flags     = b->flags;
-                last_battery_ms       = timer_read32();
-                battery_seen          = true;
+
+                nrf_battery_right_flags_known = frame->len >= sizeof(struct zsa_battery_status);
+                nrf_battery_right_flags       = nrf_battery_right_flags_known ? b->right_flags : 0;
+
+                last_battery_ms = timer_read32();
+                battery_seen    = true;
             }
             break;
 
@@ -889,14 +896,17 @@ static void telemetry_battery(oryx_telemetry_t *tlm) {
         return;
     }
 
-    /* Otherwise the ESB relay, which has no sentinel: the UART protocol sends
-     * 0 both for a right half that never reported and for a flat one. Report
-     * 0 as unknown — the wired path above is the one that can tell them
-     * apart. The relay carries no charging/USB bits for this half at all, so
-     * those stay unknown either way. */
+    /* Otherwise the ESB relay. Anything outside 0-100 is the unknown sentinel;
+     * 0 is treated as unknown too, for left firmware that predates it and sent
+     * 0 both for a right half that never reported and for a flat one. The
+     * charging/USB bits ride the same report, but only newer left firmware
+     * carries them. */
     if (zsa_wireless_battery_fresh() && nrf_battery_right_soc > 0 && nrf_battery_right_soc <= 100) {
         tlm->battery_right        = nrf_battery_right_soc;
         tlm->battery_right_source = ORYX_TLM_SRC_ESB;
+        if (nrf_battery_right_flags_known) {
+            tlm->battery_right_flags = bat_flags(nrf_battery_right_flags & ZSA_BAT_FLAG_CHARGING, nrf_battery_right_flags & ZSA_BAT_FLAG_USB);
+        }
     }
 }
 
@@ -976,8 +986,6 @@ static void telemetry_charging(oryx_telemetry_t *tlm) {
 
     if (!nrf_vbus_present) {
         tlm->charge_state = ORYX_TLM_CHG_BATTERY;
-    } else if (nrf_power_budget_ma == ZSA_PWR_BUDGET_UNKNOWN_MA) {
-        tlm->charge_state = ORYX_TLM_CHG_FLOOR;
     } else if (zsa_wireless_battery_fresh() && !(nrf_battery_flags & ZSA_BAT_FLAG_CHARGING)) {
         /* The nRF reports charging only while current is really flowing, so a
          * source with the flag clear means the charger terminated. */

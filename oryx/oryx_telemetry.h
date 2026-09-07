@@ -71,14 +71,13 @@ confident "no".
  * battery_*_flags already says whether current is flowing. This says why. */
 #define ORYX_TLM_CHG_UNKNOWN  0xFF /* nothing has told us; e.g. no nRF link */
 #define ORYX_TLM_CHG_BATTERY  0    /* no source attached: running off the cells */
-#define ORYX_TLM_CHG_FLOOR    1    /* a source is attached but has not identified
-                                    * itself, so we are still holding at the
-                                    * pre-enumeration 100 mA */
+#define ORYX_TLM_CHG_FLOOR    1    /* no longer emitted; the number stays taken so
+                                    * the rest keep their values */
 #define ORYX_TLM_CHG_CHARGING 2    /* charging at the rate the source allows */
 #define ORYX_TLM_CHG_FULL     3    /* source attached, charger has terminated */
 
 /* A current we could not find out. Zero, because no limit and no charge rate
- * this board can be set to is zero -- the input floor alone is 100 mA. */
+ * this board can be set to is zero -- the input floor alone is 300 mA. */
 #define ORYX_TLM_CURRENT_UNKNOWN 0
 
 /* Where a level came from, so a host can tell a live reading from a relayed
@@ -106,7 +105,8 @@ typedef struct __attribute__((packed)) {
     /* Charging. LE16 rather than one byte each: these are milliamps up to
      * 1500, and rounding them to fit a byte would hide exactly the difference
      * between tiers this payload exists to show. */
-    uint16_t power_budget_ma;     /* what the source advertised; 0 = none/unidentified */
+    uint16_t power_budget_ma;     /* what the source advertised; ZSA_PWR_BUDGET_DEFAULT_MA
+                                   * with no source, or before the nRF link reports */
     uint16_t charge_limit_ma;     /* input current limit in force, or ORYX_TLM_CURRENT_UNKNOWN */
     uint16_t charge_current_ma;   /* charge current in force, or ORYX_TLM_CURRENT_UNKNOWN */
     uint8_t  charge_state;        /* ORYX_TLM_CHG_* */
