@@ -167,8 +167,10 @@ enum zsa_msg_type {
                                         * emulation. See struct
                                         * zsa_digitizer_mode below. */
     ZSA_MSG_EVT_PWR_BUDGET   = 0x8A,  /* 2 B: struct zsa_pwr_budget — detected
-                                       * USB source current budget from CC1/CC2.
-                                       * Sent on CC/VBUS change and at link-up. */
+                                       * USB source current budget from CC1/CC2,
+                                       * DEFAULT or HIGH. Sent on CC/VBUS change
+                                       * and at link-up, and refreshed every
+                                       * second. */
     ZSA_MSG_EVT_VBUS_STATE   = 0x8B,  /* 1 B: struct zsa_vbus_state — nPM1300
                                        * VBUS presence. Gates the STM32's USB
                                        * D+ pullup (PA15). Sent on VBUS change
@@ -245,11 +247,22 @@ struct __attribute__((packed)) zsa_ble_status {
     uint8_t device_idx;  /* BLE slot (0-based) */
 };
 
-/* ZSA_MSG_EVT_BATTERY (3 bytes) */
+/* No usable state of charge: the fuel gauge has not converged, or the half was
+ * never heard from. Never send 0 for that -- it reads as a flat battery.
+ * Applies to both SOC fields below. */
+#define ZSA_BAT_SOC_UNKNOWN 0xFFu
+
+/* Payload length before `right_flags` was appended. Left firmware that
+ * predates it sends this; a reader must accept both lengths. */
+#define ZSA_BATTERY_STATUS_LEN_V1 3u
+
+/* ZSA_MSG_EVT_BATTERY (4 bytes) */
 struct __attribute__((packed)) zsa_battery_status {
-    uint8_t soc;       /* state of charge, 0-100 */
-    uint8_t flags;     /* bit 0: charging, bit 1: USB present */
-    uint8_t right_soc; /* right half SOC, 0-100 */
+    uint8_t soc;         /* left half SOC, 0-100, or ZSA_BAT_SOC_UNKNOWN */
+    uint8_t flags;       /* left half; bit 0: charging, bit 1: USB present */
+    uint8_t right_soc;   /* right half SOC, 0-100, or ZSA_BAT_SOC_UNKNOWN */
+    uint8_t right_flags; /* right half, same bits as `flags`; meaningful only
+                          * while right_soc is known */
 };
 
 #define ZSA_BAT_FLAG_CHARGING 0x01
@@ -329,14 +342,12 @@ struct __attribute__((packed)) zsa_digitizer_mode {
 
 /* ZSA_MSG_EVT_PWR_BUDGET (2 bytes, LE) — detected USB source current budget.
  * Carries mA (not a bool) so 1.5 A vs 3 A differentiation or a dynamic
- * per-side split later needs no protocol change. Today the left's CC detect
- * only distinguishes default vs high class, so it sends DEFAULT or HIGH.
+ * per-side split later needs no protocol change. The left's CC detect
+ * distinguishes default vs high class, so it sends DEFAULT or HIGH.
  *
- * UNKNOWN is its own value rather than a low number: no source is attached, or
- * one is but CC has not resolved yet. It must not read as DEFAULT — a source
- * that really advertised 500 mA is a source we may draw 500 mA from, and one
- * we have not identified is not. */
-#define ZSA_PWR_BUDGET_UNKNOWN_MA    0u
+ * "No source" is not a budget value. With nothing attached the left reports
+ * DEFAULT, which is the default charging profile; VBUS presence travels in
+ * EVT_VBUS_STATE. */
 #define ZSA_PWR_BUDGET_DEFAULT_MA  500u
 #define ZSA_PWR_BUDGET_HIGH_MA    1500u
 struct __attribute__((packed)) zsa_pwr_budget {
@@ -422,14 +433,19 @@ struct __attribute__((packed)) zsa_charge_limits {
 
 /* Input current limit bounds, in mA.
  *
- * FLOOR is what a USB device may draw before it is configured. It is the
- * startup limit in both halves' devicetree (vbus-limit-microamp), where an
- * unidentified source lands, and where the PMIC returns by itself on VBUS
- * removal. Nothing may lower it further and nothing may skip past it.
+ * FLOOR is the default per-half profile: the startup limit in both halves'
+ * devicetree (vbus-limit-microamp), where the PMIC returns by itself on VBUS
+ * removal, and what a default 500 mA-class or unidentified source gets.
+ * Nothing may lower it further and nothing may skip past it.
+ *
+ * Two halves at the floor add up to 600 mA of limit, more than a 500 mA-class
+ * source advertises. A limit is not a draw: each half takes charge plus system,
+ * about 150 mA plus up to 150 mA, and a bench measurement on a laptop port read
+ * 300 to 458 mA for the pair.
  *
  * MAX and STEP are the nPM1300's VBUSINILIM register: 100 mA steps up to
  * 1.5 A, which is also why a 3 A source buys nothing over a 1.5 A one. */
-#define ZSA_VBUS_LIMIT_FLOOR_MA  100u
+#define ZSA_VBUS_LIMIT_FLOOR_MA  300u
 #define ZSA_VBUS_LIMIT_MAX_MA   1500u
 #define ZSA_VBUS_LIMIT_STEP_MA   100u
 
@@ -448,38 +464,52 @@ struct __attribute__((packed)) zsa_charge_limits {
  * amp-for-amp against the VBUS limit even though the PMIC's buck means an amp
  * in is worth more than an amp out — the error is in the safe direction.
  *
- * Overcommitting is the expensive mistake: the nPM1300 does not back its
- * charger off to fit the input limit, it lets VSYS droop and supplements from
- * the pack, so a battery that is supposed to be charging discharges instead.
- * Undercommitting only charges slower. An estimate until someone puts a meter
- * on a half at a known brightness. */
+ * At the input limit the nPM1300 feeds the system first and reduces the charge
+ * current to stay inside it (datasheet §6.2.10); only once the charger is at
+ * zero does it supplement the system from the pack. So the input limit, not
+ * this reserve, is what actually bounds a half, and overcommitting the reserve
+ * costs charge current rather than draining the cell. */
 #define ZSA_SYSTEM_DRAW_MA 150u
 
 /* Charge current bounds, in mA. MAX is the pack's rated charge current and
- * matches current-microamp in both halves' devicetree today; MIN is the
- * nPM1300's smallest programmable ICHG. Policy's belief about the cell — each
- * nRF clamps to the devicetree it was actually built with. */
+ * matches zsa,charge-max-microamp in both halves' devicetree; MIN is the
+ * nPM1300's smallest programmable ICHG. current-microamp is a different
+ * number, the startup charge current, which is FLOOR minus SYSTEM_DRAW.
+ * Policy's belief about the cell — each nRF clamps to the devicetree it was
+ * actually built with. */
 #define ZSA_CHARGE_CURRENT_MIN_MA  32u
 #define ZSA_CHARGE_CURRENT_MAX_MA 700u
 
+/* Right-half ceilings, in mA. The right is fed from the left over the TRRS
+ * cable, a path measured at about 1 ohm on 2026-09-04: 0.6 V lost at 0.6 A for
+ * the pair, leaving the right PMIC 4.28 V at 490 mA, below the ~4.3 V it needs
+ * before it drops to trickle. These caps keep the right's total draw near the
+ * 0.5 A the cable can carry. The left, wired straight to VBUS, is not capped. */
+#define ZSA_RIGHT_VBUS_LIMIT_MAX_MA 500u
+#define ZSA_RIGHT_CHARGE_MAX_MA     300u
+
+/* Which half an answer is for. The two are no longer interchangeable. */
+enum zsa_charge_half {
+    ZSA_CHARGE_HALF_LEFT  = 0,
+    ZSA_CHARGE_HALF_RIGHT = 1,
+};
+
 /* The whole policy: what a source advertising budget_ma entitles ONE HALF to.
- * Both halves are sent the same answer, and between them they stay inside what
- * the source offered.
+ * This is the left's answer, and the generic one; the right's is this capped
+ * by zsa_charge_limits_for_half() below.
  *
  * Derived rather than tabulated, so a source class nobody has written down yet
  * still gets a sensible answer — the same reason EVT_PWR_BUDGET carries mA.
  * The input limit is the largest step the PMIC can program at or below this
- * half's share, never under the pre-enumeration floor and never over what the
- * register can express. The charge current is whatever is left of that after
- * the half has fed itself, inside the cell's own limits.
+ * half's share, never under the floor and never over what the register can
+ * express. The charge current is whatever is left of that after the half has
+ * fed itself, inside the cell's own limits.
  *
- * ZSA_PWR_BUDGET_UNKNOWN_MA lands on the floor, which is the point: an
- * unidentified source and a source that advertised nothing are the same source
- * as far as what we are allowed to take from it. At the floor there is not
- * even enough for the keyboard to run, let alone charge — both halves run
- * partly off their packs until a source identifies itself, exactly as they do
- * today — so the charge current there is simply the smallest the PMIC can be
- * set to rather than a share of anything.
+ * Two profiles come out of it in practice, and they now differ per half. A
+ * default 500 mA-class source, or one that has not identified itself, lands on
+ * the floor: 300 mA in, 150 mA into the cell, on both halves. A source
+ * advertising 1.5 A or more gets the left 700 mA in and 550 mA into the cell,
+ * and the right 500 mA in and 300 mA into the cell.
  *
  * Pure and total — every uint16_t is a valid input. Tested exhaustively in
  * shared/tests/zsa_charge_policy_test.c. */
@@ -505,6 +535,36 @@ static inline struct zsa_charge_limits zsa_charge_limits_for_budget(uint16_t bud
 
     out.vbus_limit_ma = vbus;
     out.charge_ma     = charge;
+    return out;
+}
+
+/* The same policy, narrowed to the half it is for: the derivation above, then
+ * the right half's cable ceilings. Never below the floor or the PMIC's minimum
+ * charge current, so a capped answer is still one the hardware can be set to.
+ *
+ * Pure and total like the derivation it wraps, and exhaustively tested
+ * alongside it. */
+static inline struct zsa_charge_limits zsa_charge_limits_for_half(uint16_t budget_ma,
+                                                                 enum zsa_charge_half half)
+{
+    struct zsa_charge_limits out = zsa_charge_limits_for_budget(budget_ma);
+
+    if (half != ZSA_CHARGE_HALF_RIGHT) {
+        return out;
+    }
+
+    if (out.vbus_limit_ma > ZSA_RIGHT_VBUS_LIMIT_MAX_MA) {
+        out.vbus_limit_ma = ZSA_RIGHT_VBUS_LIMIT_MAX_MA;
+    }
+    if (out.vbus_limit_ma < ZSA_VBUS_LIMIT_FLOOR_MA) {
+        out.vbus_limit_ma = ZSA_VBUS_LIMIT_FLOOR_MA;
+    }
+    if (out.charge_ma > ZSA_RIGHT_CHARGE_MAX_MA) {
+        out.charge_ma = ZSA_RIGHT_CHARGE_MAX_MA;
+    }
+    if (out.charge_ma < ZSA_CHARGE_CURRENT_MIN_MA) {
+        out.charge_ma = ZSA_CHARGE_CURRENT_MIN_MA;
+    }
     return out;
 }
 

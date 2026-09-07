@@ -155,11 +155,17 @@ static bool     link_state_seen;
  *
  * The left nRF reports the USB source's CC-detected current budget
  * (EVT_PWR_BUDGET); this module owns the charging policy and both halves
- * execute it. zsa_charge_limits_for_budget() in the shared wire header turns
- * that budget into the two currents to apply — how much we may draw from VBUS,
- * and how much of it goes into each cell — and they are commanded to the left
+ * execute it. zsa_charge_limits_for_half() in the shared wire header turns that
+ * budget into the two currents to apply — how much a half may draw from VBUS,
+ * and how much of it goes into its cell — and they are commanded to the left
  * over UART (CMD_CHARGE_LIMITS) and to the right over the TRRS I2C bus
  * (voyager_right_nrf_set_charge_limits()).
+ *
+ * The two halves get different answers. The right is fed from the left over the
+ * TRRS cable, about 1 ohm, so its own ceilings apply on top of the shared
+ * derivation; the left, wired straight to VBUS, gets the plain answer. Each
+ * pair is tracked separately, so a change on either side is sent on either
+ * side.
  *
  * Sent whenever the computed limits change, so a source that renegotiates
  * downward is followed down and not only up, and re-sent every
@@ -170,12 +176,14 @@ static bool     link_state_seen;
  *
  * There is no user setting and no host command for any of this. The rate
  * follows the source, and only the source. */
-static uint16_t nrf_power_budget_ma  = ZSA_PWR_BUDGET_UNKNOWN_MA;
+static uint16_t nrf_power_budget_ma  = ZSA_PWR_BUDGET_DEFAULT_MA;
 static bool     pwr_budget_seen;      /* any EVT_PWR_BUDGET received yet */
 static uint32_t last_pwr_maintain_ms = 0;
-/* What we last commanded, and whether we have commanded anything yet. Reported
- * as telemetry, so it has to be what went out rather than what we would send. */
-static struct zsa_charge_limits commanded_limits;
+/* What we last commanded to each half, and whether we have commanded anything
+ * yet. Reported as telemetry, so it has to be what went out rather than what we
+ * would send. */
+static struct zsa_charge_limits commanded_limits;       /* left */
+static struct zsa_charge_limits commanded_right_limits; /* right */
 static bool                     limits_commanded;
 #define PWR_BUDGET_MAINTAIN_INTERVAL_MS 5000
 
@@ -551,12 +559,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             last_nav_announce_ms = 0;
             /* Same reasoning for the power budget: forget what the old link
              * said until the nRF re-reports its real budget (sent right after
-             * link-up). Back to UNKNOWN, not DEFAULT — an unidentified source
-             * is one we may take 100 mA from, and assuming 500 mA across a
-             * link that just came up is exactly the assumption the floor
-             * exists to prevent. An nRF that rebooted also lost its runtime
-             * input limit, so what we commanded is no longer in force. */
-            nrf_power_budget_ma = ZSA_PWR_BUDGET_UNKNOWN_MA;
+             * link-up). Back to DEFAULT, the profile the PMICs are already on.
+             * An nRF that rebooted also lost its runtime input limit, so what
+             * we commanded is no longer in force. */
+            nrf_power_budget_ma = ZSA_PWR_BUDGET_DEFAULT_MA;
             pwr_budget_seen     = false;
             limits_commanded    = false;
             /* An nRF that rebooted lost its DFU lock, so nothing is being
@@ -875,7 +881,8 @@ static uint8_t bat_flags(bool charging, bool usb) {
 
 static void telemetry_battery(oryx_telemetry_t *tlm) {
     /* Left: the nRF's own half, over UART. Only while it is still refreshing —
-     * a cached level from a link that died is not a reading. */
+     * a cached level from a link that died is not a reading. Anything outside
+     * 0-100 is the unknown sentinel. */
     if (zsa_wireless_battery_fresh() && nrf_battery_soc <= 100) {
         tlm->battery_left        = nrf_battery_soc;
         tlm->battery_left_flags  = bat_flags(nrf_battery_flags & ZSA_BAT_FLAG_CHARGING, nrf_battery_flags & ZSA_BAT_FLAG_USB);
@@ -979,6 +986,9 @@ static void telemetry_charging(oryx_telemetry_t *tlm) {
 
     tlm->power_budget_ma = nrf_power_budget_ma;
 
+    /* The left's pair. The right's is lower and is not reported: the struct has
+     * one pair of fields and 13 reserved bytes, and adding a second pair is a
+     * wire change for later. */
     if (limits_commanded) {
         tlm->charge_limit_ma   = commanded_limits.vbus_limit_ma;
         tlm->charge_current_ma = commanded_limits.charge_ma;
@@ -1526,22 +1536,26 @@ static void power_budget_task(void) {
         return;
     }
 
-    struct zsa_charge_limits want = zsa_charge_limits_for_budget(nrf_power_budget_ma);
+    struct zsa_charge_limits want_left  = zsa_charge_limits_for_half(nrf_power_budget_ma, ZSA_CHARGE_HALF_LEFT);
+    struct zsa_charge_limits want_right = zsa_charge_limits_for_half(nrf_power_budget_ma, ZSA_CHARGE_HALF_RIGHT);
 
     /* A changed budget is acted on at once; an unchanged one on the maintain
-     * cadence. Both go out — the nRFs drop repeats, so the resend is free. */
-    bool changed = !limits_commanded || want.vbus_limit_ma != commanded_limits.vbus_limit_ma || want.charge_ma != commanded_limits.charge_ma;
+     * cadence. Both pairs are compared: the right's ceilings mean it can hold
+     * still while the left moves. Both go out — the nRFs drop repeats, so the
+     * resend is free. */
+    bool changed = !limits_commanded || want_left.vbus_limit_ma != commanded_limits.vbus_limit_ma || want_left.charge_ma != commanded_limits.charge_ma || want_right.vbus_limit_ma != commanded_right_limits.vbus_limit_ma || want_right.charge_ma != commanded_right_limits.charge_ma;
     if (!changed && timer_elapsed32(last_pwr_maintain_ms) < PWR_BUDGET_MAINTAIN_INTERVAL_MS) {
         return;
     }
 
-    zsa_wireless_send_frame(ZSA_MSG_CMD_CHARGE_LIMITS, (const uint8_t *)&want, sizeof(want));
+    zsa_wireless_send_frame(ZSA_MSG_CMD_CHARGE_LIMITS, (const uint8_t *)&want_left, sizeof(want_left));
     if (is_transport_connected()) {
-        (void)voyager_right_nrf_set_charge_limits(want.vbus_limit_ma, want.charge_ma);
+        (void)voyager_right_nrf_set_charge_limits(want_right.vbus_limit_ma, want_right.charge_ma);
     }
-    commanded_limits     = want;
-    limits_commanded     = true;
-    last_pwr_maintain_ms = timer_read32();
+    commanded_limits       = want_left;
+    commanded_right_limits = want_right;
+    limits_commanded       = true;
+    last_pwr_maintain_ms   = timer_read32();
 }
 
 /* Refresh the right half's own reading while the STM32 masters its bus. Not
