@@ -422,12 +422,24 @@ static void send_idle_state(enum zsa_idle_step step);
 static void right_telemetry_task(void);
 
 /* A USB host, as opposed to a wall charger or an unplugged cable. VBUS alone
- * is a charger; the driver alone can linger in USB_SUSPENDED after unplug
- * because the STM32 has no VBUS pin. Both together is a host, suspended or
- * not. VBUS comes from the nRF as EVT_VBUS_STATE. */
+ * is a charger: it raises the D+ pull-up, no host ever resets the bus, and the
+ * USBv1 driver walks USB_READY -> USB_SUSPENDED on the idle bus (SUSP ISR ->
+ * _usb_suspend()). USB_SUSPENDED is therefore only a host when the driver was
+ * configured before it suspended — selective suspend. _usb_suspend() records
+ * that in saved_state; _usb_wakeup() restores state from it.
+ *
+ * saved_state also survives an unplug, so usb_configured tracks whether the
+ * enumeration behind it belongs to the current VBUS session; it is cleared
+ * when VBUS goes away. VBUS comes from the nRF as EVT_VBUS_STATE. */
+static bool usb_configured;
+
 static bool usb_host_present(void) {
     usbstate_t state = usbGetDriverStateI(&USB_DRIVER);
-    return nrf_vbus_present && (state == USB_ACTIVE || state == USB_SUSPENDED);
+    if (state == USB_ACTIVE) {
+        usb_configured = true;
+    }
+    return nrf_vbus_present && usb_configured &&
+           (state == USB_ACTIVE || (state == USB_SUSPENDED && USB_DRIVER.saved_state == USB_ACTIVE));
 }
 
 /* Send all current STM32 state to nRF — called on link establishment */
@@ -679,11 +691,15 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 bool present = v->present != 0;
                 if (present != nrf_vbus_present) {
                     nrf_vbus_present = present;
+                    if (!present) {
+                        usb_configured = false;
+                    }
                     /* The PMICs dropped their input limit back to the startup
                      * value when VBUS went away, so whatever we commanded is
                      * no longer in force. Without this, replugging the same
                      * source computes the same limits, sees no change, and
-                     * leaves the board at 100 mA until the next 5 s tick. */
+                     * leaves the board on the default profile until the next
+                     * 5 s tick. */
                     limits_commanded = false;
                     zsa_wireless_vbus_changed(present);
                 }
