@@ -5,6 +5,8 @@
 #include <string.h>
 #include "oryx.h"
 #include "oryx_telemetry.h"
+#include "oryx_charge_telemetry.h"
+#include "oryx_pmic_rails.h"
 #include "action_util.h"
 
 #ifdef COMMUNITY_MODULE_AUTOMOUSE_ENABLE
@@ -119,6 +121,14 @@ __attribute__((weak)) void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
     oryx_telemetry_reset(tlm);
 }
 
+__attribute__((weak)) void oryx_charge_telemetry_fill(oryx_charge_telemetry_t *ctlm) {
+    oryx_charge_telemetry_reset(ctlm);
+}
+
+__attribute__((weak)) void oryx_pmic_rails_fill(oryx_pmic_rails_t *rails) {
+    oryx_pmic_rails_reset(rails);
+}
+
 void raw_hid_receive(uint8_t *data, uint8_t length) {
     uint8_t  command = data[0];
     uint8_t *param   = &data[1];
@@ -157,6 +167,30 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
              * oryx_telemetry_reset() writes every byte, including the
              * reserved tail. */
             oryx_telemetry_fill((oryx_telemetry_t *)&event[1]);
+            raw_hid_send_oryx(event, RAW_EPSIZE);
+            break;
+        }
+
+        case ORYX_CMD_GET_CHARGE_TELEMETRY: {
+            uint8_t event[RAW_EPSIZE];
+            event[0] = ORYX_EVT_CHARGE_TELEMETRY;
+            /* No ORYX_STOP_BIT: the payload is binary and fills the report,
+             * so a terminator would be indistinguishable from a data byte.
+             * oryx_charge_telemetry_reset() writes every byte, including the
+             * reserved tail. */
+            oryx_charge_telemetry_fill((oryx_charge_telemetry_t *)&event[1]);
+            raw_hid_send_oryx(event, RAW_EPSIZE);
+            break;
+        }
+
+        case ORYX_CMD_GET_PMIC_RAILS: {
+            uint8_t event[RAW_EPSIZE];
+            event[0] = ORYX_EVT_PMIC_RAILS;
+            /* No ORYX_STOP_BIT: the payload is binary and fills the report,
+             * so a terminator would be indistinguishable from a data byte.
+             * oryx_pmic_rails_reset() writes every byte, including the
+             * reserved tail. */
+            oryx_pmic_rails_fill((oryx_pmic_rails_t *)&event[1]);
             raw_hid_send_oryx(event, RAW_EPSIZE);
             break;
         }

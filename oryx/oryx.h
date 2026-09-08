@@ -46,6 +46,16 @@ enum Oryx_Command_Code {
      * ORYX_EVT_TELEMETRY carrying an oryx_telemetry_t. Unpaired-safe, like
      * the version queries: it reads state, it changes nothing. */
     ORYX_CMD_GET_TELEMETRY,
+    /* Ask what each cell is doing: voltage, current, temperature, the fuel
+     * gauge's time estimates and the charger's status and fault registers.
+     * Answered with ORYX_EVT_CHARGE_TELEMETRY carrying an
+     * oryx_charge_telemetry_t. Unpaired-safe, like the other queries. */
+    ORYX_CMD_GET_CHARGE_TELEMETRY,
+    /* Ask what each charger is being fed: VBUS and VSYS, the nPM1300's
+     * input-status bits and whether charging is enabled. Answered with
+     * ORYX_EVT_PMIC_RAILS carrying an oryx_pmic_rails_t. Unpaired-safe, like
+     * the other queries. */
+    ORYX_CMD_GET_PMIC_RAILS,
     ORYX_GET_PROTOCOL_VERSION = 0xFE,
 };
 
@@ -66,6 +76,13 @@ enum Oryx_Event_Code {
     /* Answer to ORYX_CMD_GET_TELEMETRY: an oryx_telemetry_t in bytes 1..31.
      * Binary, so it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
     ORYX_EVT_TELEMETRY,
+    /* Answer to ORYX_CMD_GET_CHARGE_TELEMETRY: an oryx_charge_telemetry_t in
+     * bytes 1..31. Binary, so it carries no ORYX_STOP_BIT — a 0xFE inside it
+     * is data. */
+    ORYX_EVT_CHARGE_TELEMETRY,
+    /* Answer to ORYX_CMD_GET_PMIC_RAILS: an oryx_pmic_rails_t in bytes 1..31.
+     * Binary, so it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
+    ORYX_EVT_PMIC_RAILS,
     ORYX_EVT_GET_PROTOCOL_VERSION = 0XFE,
     ORYX_EVT_ERROR                = 0xFF,
 };

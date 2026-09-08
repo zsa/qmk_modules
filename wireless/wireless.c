@@ -119,6 +119,27 @@ static bool     battery_seen;         /* any EVT_BATTERY received yet */
  * so anything older than a few of those means the link stopped, not that the
  * value stopped changing. */
 #define BATTERY_STALE_MS 5000
+/* EVT_BATTERY_DETAIL: the same levels spelled out — cell voltage, current,
+ * temperature, time estimates and the charger registers. Sent alongside
+ * EVT_BATTERY at the same cadence, so it ages out on the same window, but on
+ * its own timestamp: left firmware that predates it sends EVT_BATTERY only. */
+static struct zsa_battery_detail nrf_detail_left;
+static struct zsa_battery_detail nrf_detail_right;
+static uint32_t last_detail_ms;
+static bool     detail_seen;          /* any EVT_BATTERY_DETAIL received yet */
+/* EVT_BLE_IDENTITY: the local Bluetooth address of the host slot the nRF is
+ * currently on. Sent alongside EVT_BATTERY_DETAIL at the same cadence, so it
+ * ages out on the same window, on its own timestamp: left firmware that
+ * predates it never sends one. */
+static struct zsa_ble_identity nrf_ble_identity;
+static uint32_t last_ble_identity_ms;
+static bool     ble_identity_seen;    /* any EVT_BLE_IDENTITY received yet */
+/* EVT_PMIC_RAILS: both halves' PMIC input rails. Sent alongside
+ * EVT_BLE_IDENTITY at the same cadence, so it ages out on the same window, on
+ * its own timestamp: left firmware that predates it never sends one. */
+static struct zsa_pmic_rails_event nrf_pmic_rails;
+static uint32_t last_pmic_rails_ms;
+static bool     pmic_rails_seen;      /* any EVT_PMIC_RAILS received yet */
 static uint8_t  nrf_led_state;
 static bool     nrf_vbus_present;
 
@@ -613,6 +634,32 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 
+        case ZSA_MSG_EVT_BATTERY_DETAIL:
+            if (frame->len >= sizeof(struct zsa_battery_detail_event)) {
+                const struct zsa_battery_detail_event *d = (const struct zsa_battery_detail_event *)frame->payload;
+                nrf_detail_left  = d->left;
+                nrf_detail_right = d->right;
+                last_detail_ms   = timer_read32();
+                detail_seen      = true;
+            }
+            break;
+
+        case ZSA_MSG_EVT_BLE_IDENTITY:
+            if (frame->len >= sizeof(struct zsa_ble_identity)) {
+                memcpy(&nrf_ble_identity, frame->payload, sizeof(nrf_ble_identity));
+                last_ble_identity_ms = timer_read32();
+                ble_identity_seen    = true;
+            }
+            break;
+
+        case ZSA_MSG_EVT_PMIC_RAILS:
+            if (frame->len >= sizeof(struct zsa_pmic_rails_event)) {
+                memcpy(&nrf_pmic_rails, frame->payload, sizeof(nrf_pmic_rails));
+                last_pmic_rails_ms = timer_read32();
+                pmic_rails_seen    = true;
+            }
+            break;
+
         case ZSA_MSG_EVT_PAIR_STATE:
             if (frame->len >= sizeof(struct zsa_pair_state)) {
                 const struct zsa_pair_state *p = (const struct zsa_pair_state *)frame->payload;
@@ -690,11 +737,16 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
         case ZSA_MSG_EVT_PWR_BUDGET:
             if (frame->len >= sizeof(struct zsa_pwr_budget)) {
                 const struct zsa_pwr_budget *p = (const struct zsa_pwr_budget *)frame->payload;
-                nrf_power_budget_ma  = p->budget_ma;
-                pwr_budget_seen      = true;
                 /* Re-derive on the next loop iteration, not the next 5 s
-                 * tick: this is the event that makes the rate change. */
-                last_pwr_maintain_ms = 0;
+                 * tick: this is the event that makes the rate change. The
+                 * budget is a level resent every second, so only a real change
+                 * may do it — otherwise every resend re-commands both halves,
+                 * and the right answers each command with a PMIC readback. */
+                if (!pwr_budget_seen || p->budget_ma != nrf_power_budget_ma) {
+                    last_pwr_maintain_ms = 0;
+                }
+                nrf_power_budget_ma = p->budget_ma;
+                pwr_budget_seen     = true;
             }
             break;
 
@@ -861,6 +913,25 @@ __attribute__((weak)) uint8_t zsa_nav_trackpad_probe_state(void) {
 
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
 #    include "oryx_telemetry.h"
+#    include "oryx_charge_telemetry.h"
+#    include "oryx_pmic_rails.h"
+
+/* Same rule and window as zsa_wireless_battery_fresh(), on the detail's own
+ * timestamp: a left half too old to send EVT_BATTERY_DETAIL keeps the battery
+ * levels fresh while never producing a detail block. */
+static bool detail_fresh(void) {
+    return link_ready && detail_seen && timer_elapsed32(last_detail_ms) < BATTERY_STALE_MS;
+}
+
+/* Same rule and window as detail_fresh(), on its own timestamp. */
+static bool ble_identity_fresh(void) {
+    return link_ready && ble_identity_seen && timer_elapsed32(last_ble_identity_ms) < BATTERY_STALE_MS;
+}
+
+/* Same rule and window as detail_fresh(), on its own timestamp. */
+static bool pmic_rails_fresh(void) {
+    return link_ready && pmic_rails_seen && timer_elapsed32(last_pmic_rails_ms) < BATTERY_STALE_MS;
+}
 
 static uint8_t nav_mask(uint8_t device_type) {
     switch (device_type) {
@@ -1005,12 +1076,91 @@ static void telemetry_charging(oryx_telemetry_t *tlm) {
     }
 }
 
+/* The nRF's answer or nothing: an address cached from a link that died names a
+ * host slot the board may already have left. */
+static void telemetry_ble_identity(oryx_telemetry_t *tlm) {
+    if (!ble_identity_fresh() || nrf_ble_identity.addr_type == ZSA_BLE_ADDR_TYPE_UNKNOWN) {
+        return;
+    }
+
+    tlm->ble_addr_type  = nrf_ble_identity.addr_type;
+    tlm->ble_slot       = nrf_ble_identity.slot;
+    tlm->ble_slot_count = nrf_ble_identity.slot_count;
+    memcpy(tlm->ble_addr, nrf_ble_identity.addr, sizeof(tlm->ble_addr));
+}
+
 /* Strong override of oryx.c's weak hook. */
 void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
     oryx_telemetry_reset(tlm);
     telemetry_battery(tlm);
     telemetry_nav(tlm);
     telemetry_charging(tlm);
+    telemetry_ble_identity(tlm);
+}
+
+/* The oryx module re-declares the block rather than including the wire header,
+ * so the two layouts are only ever the same by inspection — check it here,
+ * where both are visible, before copying one into the other. */
+_Static_assert(sizeof(oryx_battery_detail_t) == sizeof(struct zsa_battery_detail), "oryx charge telemetry block must match the wire block");
+
+/* Strong override of oryx.c's weak hook. */
+void oryx_charge_telemetry_fill(oryx_charge_telemetry_t *ctlm) {
+    oryx_charge_telemetry_reset(ctlm);
+
+    /* Left: the nRF's own half, over UART. Only while it is still refreshing —
+     * a cached block from a link that died is not a reading. */
+    if (detail_fresh()) {
+        memcpy(&ctlm->left, &nrf_detail_left, sizeof(ctlm->left));
+        ctlm->left_source = ORYX_TLM_SRC_NRF;
+    }
+
+    /* Right: prefer the wired read, which is this half answering for itself
+     * right now. A right half too old to send a detail block falls through. */
+    struct zsa_right_telemetry rt;
+    struct zsa_battery_detail  rd;
+    if (zsa_wireless_right_telemetry(&rt) && zsa_right_telemetry_detail(&rt, &rd)) {
+        memcpy(&ctlm->right, &rd, sizeof(ctlm->right));
+        ctlm->right_source = ORYX_TLM_SRC_WIRED;
+        return;
+    }
+
+    /* Otherwise the ESB relay, under the same condition telemetry_battery()
+     * accepts a relayed level: the left only carries the right's block while
+     * the radio link does. */
+    if (detail_fresh() && zsa_wireless_battery_fresh() && nrf_battery_right_soc > 0 && nrf_battery_right_soc <= 100) {
+        memcpy(&ctlm->right, &nrf_detail_right, sizeof(ctlm->right));
+        ctlm->right_source = ORYX_TLM_SRC_ESB;
+    }
+}
+
+/* Same re-declaration, same reason: check the two layouts here, where both are
+ * visible, before copying one into the other. */
+_Static_assert(sizeof(oryx_pmic_rails_block_t) == sizeof(struct zsa_pmic_rails), "oryx pmic rails block must match the wire block");
+
+/* Strong override of oryx.c's weak hook. */
+void oryx_pmic_rails_fill(oryx_pmic_rails_t *rails) {
+    oryx_pmic_rails_reset(rails);
+
+    /* Left: the nRF's own half, over UART, while it is still refreshing. */
+    if (pmic_rails_fresh() && (nrf_pmic_rails.left.flags & ZSA_PMIC_RAILS_PRESENT)) {
+        memcpy(&rails->left, &nrf_pmic_rails.left, sizeof(rails->left));
+    }
+
+    /* Right: prefer the wired read, which is this half answering for itself
+     * right now. A block without PRESENT is a right half too old to fill the
+     * seat, so it falls through to the relay rather than reporting 0 V. */
+    struct zsa_right_telemetry rt;
+    struct zsa_pmic_rails      rr;
+    if (zsa_wireless_right_telemetry(&rt) && zsa_right_telemetry_rails(&rt, &rr) && (rr.flags & ZSA_PMIC_RAILS_PRESENT)) {
+        memcpy(&rails->right, &rr, sizeof(rails->right));
+        return;
+    }
+
+    /* Otherwise whatever the left relayed, radio or cable — it merges both
+     * sources itself and marks the block absent when it has neither. */
+    if (pmic_rails_fresh() && (nrf_pmic_rails.right.flags & ZSA_PMIC_RAILS_PRESENT)) {
+        memcpy(&rails->right, &nrf_pmic_rails.right, sizeof(rails->right));
+    }
 }
 #endif // COMMUNITY_MODULE_ORYX_ENABLE
 
@@ -1577,6 +1727,14 @@ static void right_telemetry_task(void) {
     right_tlm_valid = voyager_right_nrf_read_telemetry(&got) && zsa_right_telemetry_ok(&got);
     if (right_tlm_valid) {
         right_tlm = got;
+        /* Relay it to the left: wired, the right's radio is off, so this is
+         * the only way the left learns the right's battery for BAS, its own
+         * EVT_BATTERY and the BLE detail characteristic. Nothing is sent on a
+         * failed read or when we do not own the bus — the left times the last
+         * copy out instead. */
+        if (link_ready) {
+            zsa_wireless_send_frame(ZSA_MSG_CMD_RIGHT_TELEMETRY, (const uint8_t *)&got, sizeof(got));
+        }
     }
 }
 

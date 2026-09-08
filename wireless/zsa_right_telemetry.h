@@ -26,14 +26,14 @@
  * ADDING A FIELD
  * ===========================================================================
  *
- * Append it where reserved[] starts, shrink reserved[] by the same size, and
- * raise ZSA_RIGHT_TLM_LEN. Leave ZSA_RIGHT_TLM_VERSION alone: `len` is what a
- * reader tests (ZSA_RIGHT_TLM_HAS), so an older STM32 reading a newer right
- * half stops at the fields it knows, and a newer STM32 reading an older right
- * half sees a short `len` and calls the missing fields unknown instead of
- * reading whatever was there. Raise the version only when a field that has
- * shipped changes meaning -- the one thing `len` cannot express. Never
- * renumber an offset and never reuse one.
+ * Append it at the end of the struct and raise ZSA_RIGHT_TLM_LEN by its size,
+ * so `len` stays sizeof(struct) - 2. Leave ZSA_RIGHT_TLM_VERSION alone: `len`
+ * is what a reader tests (ZSA_RIGHT_TLM_HAS), so an older STM32 reading a
+ * newer right half stops at the fields it knows, and a newer STM32 reading an
+ * older right half sees a short `len` and calls the missing fields unknown
+ * instead of reading whatever was there. Raise the version only when a field
+ * that has shipped changes meaning -- the one thing `len` cannot express.
+ * Never renumber an offset and never reuse one.
  *
  * Every field carries its own "could not read it" value. A level we failed to
  * get must never arrive as 0: that reads as a flat battery.
@@ -45,6 +45,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+#include "zsa_uart_proto.h" /* struct zsa_battery_detail, struct zsa_pmic_rails */
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,7 +60,7 @@ extern "C" {
 #define ZSA_RIGHT_TLM_VERSION 1u
 
 /* Bytes defined after the `len` byte itself. Grows as fields are appended. */
-#define ZSA_RIGHT_TLM_LEN 2u
+#define ZSA_RIGHT_TLM_LEN 22u
 
 /* The right half has no usable estimate: the gauge has not converged yet, or
  * the PMIC did not answer. Never confuse this with 0%. */
@@ -69,14 +72,18 @@ extern "C" {
 #define ZSA_RIGHT_TLM_FLAG_USB      0x02u /* VBUS present on the right half */
 
 struct __attribute__((packed)) zsa_right_telemetry {
-	uint8_t version;     /* ZSA_RIGHT_TLM_VERSION */
-	uint8_t len;         /* defined bytes after this one; ZSA_RIGHT_TLM_LEN */
-	uint8_t soc;         /* 0-100, or ZSA_RIGHT_TLM_SOC_UNKNOWN */
-	uint8_t flags;       /* ZSA_RIGHT_TLM_FLAG_* */
-	uint8_t reserved[4]; /* zero; room for four more one-byte fields */
+	uint8_t version;                  /* ZSA_RIGHT_TLM_VERSION */
+	uint8_t len;                      /* defined bytes after this one; ZSA_RIGHT_TLM_LEN */
+	uint8_t soc;                      /* 0-100, or ZSA_RIGHT_TLM_SOC_UNKNOWN */
+	uint8_t flags;                    /* ZSA_RIGHT_TLM_FLAG_* */
+	struct zsa_battery_detail detail; /* cell, charger and time estimates */
+	struct zsa_pmic_rails rails;      /* VBUS/VSYS and the charger's input state */
 };
 
 #define ZSA_RIGHT_TLM_SIZE sizeof(struct zsa_right_telemetry)
+
+_Static_assert(sizeof(struct zsa_right_telemetry) == 24u,
+	       "zsa_right_telemetry is a wire layout");
 
 /* True when the sender's `len` reaches far enough to cover `field`. The two
  * added bytes are `version` and `len`, which every version carries. */
@@ -93,9 +100,8 @@ static inline void zsa_right_telemetry_init(struct zsa_right_telemetry *t)
 	t->len = ZSA_RIGHT_TLM_LEN;
 	t->soc = ZSA_RIGHT_TLM_SOC_UNKNOWN;
 	t->flags = 0u;
-	for (size_t i = 0u; i < sizeof(t->reserved); ++i) {
-		t->reserved[i] = 0u;
-	}
+	zsa_battery_detail_init(&t->detail);
+	zsa_pmic_rails_init(&t->rails);
 }
 
 /* Reader side. A struct from a right half whose major version we do not know
@@ -126,6 +132,30 @@ static inline bool zsa_right_telemetry_flags(const struct zsa_right_telemetry *t
 		return false;
 	}
 	*out = t->flags;
+	return true;
+}
+
+/* The charging detail block, or false when this right half is too old to send
+ * one. Individual fields inside it carry their own unknown values. */
+static inline bool zsa_right_telemetry_detail(const struct zsa_right_telemetry *t,
+					      struct zsa_battery_detail *out)
+{
+	if (!zsa_right_telemetry_ok(t) || !ZSA_RIGHT_TLM_HAS(t, detail)) {
+		return false;
+	}
+	memcpy(out, &t->detail, sizeof(*out));
+	return true;
+}
+
+/* The PMIC rails block, or false when this right half is too old to send one.
+ * The block's own ZSA_PMIC_RAILS_PRESENT bit says whether it holds a reading. */
+static inline bool zsa_right_telemetry_rails(const struct zsa_right_telemetry *t,
+					     struct zsa_pmic_rails *out)
+{
+	if (!zsa_right_telemetry_ok(t) || !ZSA_RIGHT_TLM_HAS(t, rails)) {
+		return false;
+	}
+	memcpy(out, &t->rails, sizeof(*out));
 	return true;
 }
 

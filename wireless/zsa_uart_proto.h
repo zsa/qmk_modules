@@ -89,6 +89,21 @@ enum zsa_msg_type {
                                          * slot in turn for a short window. Sent
                                          * again mid-cycle it skips to the next
                                          * slot. */
+    ZSA_MSG_CMD_RIGHT_TELEMETRY = 0x2C, /* <=ZSA_RIGHT_TLM_SIZE B: struct
+                                         * zsa_right_telemetry (see
+                                         * zsa_right_telemetry.h), the right
+                                         * half's own wired 0x54 answer relayed
+                                         * by the STM32 while it masters the
+                                         * TRRS bus — the only path carrying the
+                                         * right's battery to the left in wired
+                                         * mode, where the right's radio is off.
+                                         * Level: resent after every successful
+                                         * read (1 s); the left calls it stale
+                                         * after ZSA_RIGHT_TLM_RELAY_STALE_MS
+                                         * without one. Not in ignition's copy
+                                         * of this header (frozen at
+                                         * voyager2-2.0.1; ignition never sends
+                                         * it). */
     ZSA_MSG_CMD_TRRS_STATE   = 0x2D,  /* 1 B: struct zsa_trrs_state — level,
                                        * not a lease: the TRRS cable between
                                        * the halves is plugged (the STM32 got
@@ -194,6 +209,13 @@ enum zsa_msg_type {
                                        * STM32 keeps the key matrix dark until
                                        * it arrives. Re-sent when it changes
                                        * (VBUS attach). Not known to ignition. */
+    ZSA_MSG_EVT_BATTERY_DETAIL = 0x8F, /* 26 B: struct zsa_battery_detail_event
+                                        * — both halves' cell voltage, current,
+                                        * temperature, time estimates and
+                                        * charger registers. What EVT_BATTERY
+                                        * carries as one percentage, spelled
+                                        * out. Sent as a level alongside
+                                        * EVT_BATTERY. Not known to ignition. */
 
     /* STM32 -> nRF: DFU responses (0x90-0x9F) */
     ZSA_MSG_DFU_STATUS       = 0x90,  /* 2 B: state + error code */
@@ -203,6 +225,25 @@ enum zsa_msg_type {
 
     /* Shared (bidirectional): log line (0xB0) */
     ZSA_MSG_LOG_LINE         = 0xB0,  /* src(1)+lvl(1)+ts_ms(4 LE)+text(<=120) */
+
+    /* nRF -> STM32: events continued (0xC0-0xCF). The 0x80-0x8F block is full;
+     * 0x86-0x88 in it stay reserved rather than being reused. */
+    ZSA_MSG_EVT_BLE_IDENTITY = 0xC0,  /* 9 B: struct zsa_ble_identity — the
+                                       * Bluetooth address this board answers
+                                       * to on the host it is currently talking
+                                       * to, plus which of its host slots that
+                                       * is. One identity per slot, so the
+                                       * address changes with the slot. Sent as
+                                       * a level alongside EVT_BATTERY_DETAIL
+                                       * and on QUERY_BATTERY. Not known to
+                                       * ignition. */
+    ZSA_MSG_EVT_PMIC_RAILS   = 0xC1,  /* 14 B: struct zsa_pmic_rails_event —
+                                       * both halves' PMIC input rails, so the
+                                       * cable path carries what the BLE detail
+                                       * read carries. Sent as a level
+                                       * alongside EVT_BLE_IDENTITY and on
+                                       * QUERY_BATTERY. Not known to
+                                       * ignition. */
 };
 
 /* ---- Payload structures ---- */
@@ -267,6 +308,141 @@ struct __attribute__((packed)) zsa_battery_status {
 
 #define ZSA_BAT_FLAG_CHARGING 0x01
 #define ZSA_BAT_FLAG_USB      0x02
+
+/* One half's charging detail. Every field has its own "could not read it"
+ * value, and none of them is a reading the field can really take: 0 mA and a
+ * current nobody measured must not arrive as the same number. Also carried
+ * over ESB (wireless_i2c_reversed_proto.h), over the wired 0x54 read
+ * (zsa_right_telemetry.h) and over BLE. */
+#define ZSA_BAT_DETAIL_MV_UNKNOWN   0u       /* voltage_mv */
+#define ZSA_BAT_DETAIL_I16_UNKNOWN  (-32768) /* current_ma, temp_cdeg */
+#define ZSA_BAT_DETAIL_MIN_UNKNOWN  0xFFFFu  /* tte_min, ttf_min */
+#define ZSA_BAT_DETAIL_REG_UNKNOWN  0xFFu    /* chg_status, chg_error, chg_sensor */
+
+struct __attribute__((packed)) zsa_battery_detail {
+    uint16_t voltage_mv;  /* cell voltage */
+    int16_t  current_ma;  /* positive = into the cell (charging), negative = discharge */
+    int16_t  temp_cdeg;   /* NTC battery temperature, 0.01 degC */
+    uint16_t tte_min;     /* fuel-gauge time to empty, 0..0xFFFE minutes;
+                           * 0xFFFF is unknown, and so is any estimate past
+                           * 0xFFFE minutes (~45 days) */
+    uint16_t ttf_min;     /* fuel-gauge time to full, same range and cap */
+    uint8_t  chg_status;  /* nPM1300 CHARGER.BCHGCHARGESTATUS, raw */
+    uint8_t  chg_error;   /* nPM1300 CHARGER.BCHGERRREASON, raw (latched fault) */
+    uint8_t  chg_sensor;  /* nPM1300 CHARGER.BCHGERRSENSOR, raw */
+};
+
+#define ZSA_BAT_DETAIL_SIZE 13u
+
+_Static_assert(sizeof(struct zsa_battery_detail) == ZSA_BAT_DETAIL_SIZE,
+               "zsa_battery_detail is a wire layout");
+
+/* Sender side: a block that claims nothing, ready for the fields that read. */
+static inline void zsa_battery_detail_init(struct zsa_battery_detail *d)
+{
+    d->voltage_mv = ZSA_BAT_DETAIL_MV_UNKNOWN;
+    d->current_ma = ZSA_BAT_DETAIL_I16_UNKNOWN;
+    d->temp_cdeg  = ZSA_BAT_DETAIL_I16_UNKNOWN;
+    d->tte_min    = ZSA_BAT_DETAIL_MIN_UNKNOWN;
+    d->ttf_min    = ZSA_BAT_DETAIL_MIN_UNKNOWN;
+    d->chg_status = ZSA_BAT_DETAIL_REG_UNKNOWN;
+    d->chg_error  = ZSA_BAT_DETAIL_REG_UNKNOWN;
+    d->chg_sensor = ZSA_BAT_DETAIL_REG_UNKNOWN;
+}
+
+/* One half's PMIC input rails: what the charger is being fed, next to what the
+ * cell is doing. `flags` is the whole block's validity marker -- a sender too
+ * old to fill the seat leaves it zeroed, which reads as "not present" rather
+ * than as 0 V. Also carried over ESB (wireless_i2c_reversed_proto.h), over the
+ * wired 0x54 read (zsa_right_telemetry.h) and over BLE. */
+#define ZSA_PMIC_RAILS_PRESENT 0x01u /* flags bit 0: the block carries a reading */
+/* flags bit 1: the boost-converter state in bit 2 is meaningful. A sender that
+ * does not report it leaves both clear. */
+#define ZSA_PMIC_RAILS_BOOST_KNOWN 0x02u
+/* flags bit 2: the firmware has the boost converter disabled (bit 1 set). */
+#define ZSA_PMIC_RAILS_BOOST_OFF 0x04u
+/* flags bit 3: the half is holding its charge current below the rate it was
+ * commanded, because the charger kept restarting its cycle at that rate. */
+#define ZSA_PMIC_RAILS_CHARGE_REDUCED 0x08u
+
+/* `vbusin_status` bits, nPM1300 VBUSIN.VBUSINSTATUS raw. */
+#define ZSA_PMIC_RAILS_VBUS_PRESENT   0x01u
+#define ZSA_PMIC_RAILS_VBUS_CUR_LIM   0x02u
+#define ZSA_PMIC_RAILS_VBUS_OVP       0x04u
+#define ZSA_PMIC_RAILS_VBUS_UNDERVOLT 0x08u
+#define ZSA_PMIC_RAILS_VBUS_SUSPENDED 0x10u
+#define ZSA_PMIC_RAILS_VBUS_OUT       0x20u
+
+#define ZSA_PMIC_RAILS_MV_UNKNOWN  0u    /* vbus_mv, vsys_mv */
+#define ZSA_PMIC_RAILS_REG_UNKNOWN 0xFFu /* vbusin_status, chg_enable */
+
+struct __attribute__((packed)) zsa_pmic_rails {
+    uint8_t  flags;         /* ZSA_PMIC_RAILS_PRESENT, else the rest means nothing */
+    uint16_t vbus_mv;       /* nPM1300 ADC VBUS */
+    uint16_t vsys_mv;       /* nPM1300 ADC VSYS */
+    uint8_t  vbusin_status; /* VBUSIN.VBUSINSTATUS raw (base 0x02, offset 0x07) */
+    uint8_t  chg_enable;    /* CHARGER.BCHGENABLESET readback (base 0x03, offset 0x04) */
+};
+
+#define ZSA_PMIC_RAILS_SIZE 7u
+
+_Static_assert(sizeof(struct zsa_pmic_rails) == ZSA_PMIC_RAILS_SIZE,
+               "zsa_pmic_rails is a wire layout");
+
+/* Sender side: a block that claims nothing. */
+static inline void zsa_pmic_rails_init(struct zsa_pmic_rails *r)
+{
+    r->flags         = 0u;
+    r->vbus_mv       = ZSA_PMIC_RAILS_MV_UNKNOWN;
+    r->vsys_mv       = ZSA_PMIC_RAILS_MV_UNKNOWN;
+    r->vbusin_status = ZSA_PMIC_RAILS_REG_UNKNOWN;
+    r->chg_enable    = ZSA_PMIC_RAILS_REG_UNKNOWN;
+}
+
+/* ZSA_MSG_EVT_BATTERY_DETAIL (26 bytes): left half then right half. The right
+ * block is all-unknown whenever the ESB link is not carrying it (wired mode,
+ * link down) — the STM32 has the right's own wired read for that case. */
+struct __attribute__((packed)) zsa_battery_detail_event {
+    struct zsa_battery_detail left;
+    struct zsa_battery_detail right;
+};
+
+_Static_assert(sizeof(struct zsa_battery_detail_event) == 2u * ZSA_BAT_DETAIL_SIZE,
+               "EVT_BATTERY_DETAIL is a wire layout");
+
+/* ZSA_MSG_EVT_BLE_IDENTITY (9 bytes): the local Bluetooth identity in use.
+ * Each host slot owns its own identity, so this is both an address and a "which
+ * host am I on". The address is the local one the host is bonded to, not the
+ * host's. Unknown before the identity table exists, which is why addr_type has
+ * a sentinel of its own — a zero address is a real address. */
+#define ZSA_BLE_ADDR_TYPE_UNKNOWN 0xFFu
+
+struct __attribute__((packed)) zsa_ble_identity {
+    uint8_t slot;       /* host slot of this identity, 0-based */
+    uint8_t slot_count; /* host slots the board keeps */
+    uint8_t addr_type;  /* 0 public, 1 random (bt_addr_le_t.type);
+                         * ZSA_BLE_ADDR_TYPE_UNKNOWN when nothing is known,
+                         * and then slot/addr mean nothing either */
+    uint8_t addr[6];    /* bt_addr_t.val order, least significant byte first */
+};
+
+#define ZSA_BLE_IDENTITY_SIZE 9u
+
+_Static_assert(sizeof(struct zsa_ble_identity) == ZSA_BLE_IDENTITY_SIZE,
+               "zsa_ble_identity is a wire layout");
+
+/* ZSA_MSG_EVT_PMIC_RAILS (14 bytes): left half then right half. A half with
+ * nothing to report sends a zsa_pmic_rails_init() block, so `flags` decides
+ * per half whether the reading exists. */
+struct __attribute__((packed)) zsa_pmic_rails_event {
+    struct zsa_pmic_rails left;
+    struct zsa_pmic_rails right;
+};
+
+#define ZSA_PMIC_RAILS_EVENT_SIZE (2u * ZSA_PMIC_RAILS_SIZE)
+
+_Static_assert(sizeof(struct zsa_pmic_rails_event) == ZSA_PMIC_RAILS_EVENT_SIZE,
+               "EVT_PMIC_RAILS is a wire layout");
 
 /* ZSA_MSG_EVT_PAIR_STATE (1 byte) */
 struct __attribute__((packed)) zsa_pair_state {
@@ -580,6 +756,12 @@ struct __attribute__((packed)) zsa_bus_grant {
  * leave the grant latched and the right on the bus forever. */
 #define ZSA_BUS_GRANT_INTERVAL_MS 100u
 #define ZSA_BUS_GRANT_TIMEOUT_MS  500u
+
+/* ZSA_MSG_CMD_RIGHT_TELEMETRY — the payload is a struct zsa_right_telemetry
+ * (zsa_right_telemetry.h; not included here, that header includes this one).
+ * How long the left trusts the last relayed copy: the STM32 sends one per
+ * successful wired read, so silence means the cable read stopped. */
+#define ZSA_RIGHT_TLM_RELAY_STALE_MS 3000u
 
 /* ZSA_MSG_CMD_TRRS_STATE (1 byte) */
 struct __attribute__((packed)) zsa_trrs_state {

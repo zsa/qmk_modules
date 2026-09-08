@@ -48,7 +48,7 @@ confident "no".
 #define ORYX_TLM_VERSION 1
 
 /* Defined bytes after the `len` byte itself. Grows as fields are appended. */
-#define ORYX_TLM_LEN 16
+#define ORYX_TLM_LEN 25
 
 /* Battery level we could not read. Never 0: that is a flat battery. */
 #define ORYX_TLM_LEVEL_UNKNOWN 0xFF
@@ -88,6 +88,14 @@ confident "no".
 #define ORYX_TLM_SRC_ESB     2 /* the right half over ESB, relayed by the left nRF */
 #define ORYX_TLM_SRC_WIRED   3 /* the right half, read directly over the TRRS I2C bus */
 
+/* The board's own Bluetooth address, so a host can match the keyboard on the
+ * cable against the one in its Bluetooth list. Not the host's address. A zero
+ * address is a real address, hence a sentinel on the type rather than on the
+ * bytes. */
+#define ORYX_TLM_BLE_ADDR_UNKNOWN 0xFF
+/* Which remembered host the address belongs to. Slots are 0-based. */
+#define ORYX_TLM_BLE_SLOT_UNKNOWN 0xFF
+
 /* Fills bytes 1..31 of the 32-byte response report, byte 0 being
  * ORYX_EVT_TELEMETRY. */
 typedef struct __attribute__((packed)) {
@@ -110,7 +118,13 @@ typedef struct __attribute__((packed)) {
     uint16_t charge_limit_ma;     /* input current limit in force, or ORYX_TLM_CURRENT_UNKNOWN */
     uint16_t charge_current_ma;   /* charge current in force, or ORYX_TLM_CURRENT_UNKNOWN */
     uint8_t  charge_state;        /* ORYX_TLM_CHG_* */
-    uint8_t reserved[13];         /* zero; room for thirteen more one-byte fields */
+    /* Bluetooth identity of the host slot the board is on right now: the live
+     * connection's, or the one it advertises when nothing is connected. */
+    uint8_t  ble_addr_type;       /* 0 public, 1 random, or ORYX_TLM_BLE_ADDR_UNKNOWN */
+    uint8_t  ble_addr[6];         /* least significant byte first, as it arrives from the nRF */
+    uint8_t  ble_slot;            /* 0-based, or ORYX_TLM_BLE_SLOT_UNKNOWN */
+    uint8_t  ble_slot_count;      /* host slots the board keeps; 0 unknown */
+    uint8_t reserved[4];          /* zero; room for four more one-byte fields */
 } oryx_telemetry_t;
 
 _Static_assert(sizeof(oryx_telemetry_t) == RAW_EPSIZE - 1, "telemetry payload must fill the report");
@@ -130,7 +144,10 @@ static inline void oryx_telemetry_reset(oryx_telemetry_t *tlm) {
     tlm->nav_left             = ORYX_TLM_NAV_UNKNOWN;
     tlm->nav_right            = ORYX_TLM_NAV_UNKNOWN;
     tlm->charge_state         = ORYX_TLM_CHG_UNKNOWN;
-    /* The three currents stay 0, which is already their "we do not know". */
+    tlm->ble_addr_type        = ORYX_TLM_BLE_ADDR_UNKNOWN;
+    tlm->ble_slot             = ORYX_TLM_BLE_SLOT_UNKNOWN;
+    /* The three currents stay 0, which is already their "we do not know", and
+     * so are ble_addr[] and ble_slot_count. */
 }
 
 /* Weak hook. The oryx module owns the wire format but knows none of the
