@@ -196,7 +196,18 @@ static bool     link_state_seen;
  * nPM1300s revert to their startup limit by themselves when VBUS goes away.
  *
  * There is no user setting and no host command for any of this. The rate
- * follows the source, and only the source. */
+ * follows the source, and only the source.
+ *
+ * Bench builds only: defining both ZSA_RIGHT_VBUS_LIMIT_OVERRIDE_MA and
+ * ZSA_RIGHT_CHARGE_OVERRIDE_MA (milliamps) replaces the right half's computed
+ * pair with those two fixed values. Both must be given; neither alone has any
+ * effect, and the left half is never overridden.
+ *
+ * Bench builds only: defining ZSA_BENCH_FORCE_NO_HOST makes every host
+ * decision in this file report "no USB host" — CMD_USB_STATE to the nRF, idle
+ * stepping, and the nav HID routing gates — so a cabled board behaves as if it
+ * were on a wall charger. The USB stack itself is untouched: the board still
+ * enumerates and QMK still routes keyboard HID over USB. */
 static uint16_t nrf_power_budget_ma  = ZSA_PWR_BUDGET_DEFAULT_MA;
 static bool     pwr_budget_seen;      /* any EVT_PWR_BUDGET received yet */
 static uint32_t last_pwr_maintain_ms = 0;
@@ -465,6 +476,10 @@ static void right_telemetry_task(void);
 static bool usb_configured;
 
 static bool usb_host_present(void) {
+#ifdef ZSA_BENCH_FORCE_NO_HOST
+    /* Bench knob: report no USB host regardless of the bus state. */
+    return false;
+#endif
     usbstate_t state = usbGetDriverStateI(&USB_DRIVER);
     if (state == USB_ACTIVE) {
         usb_configured = true;
@@ -1688,6 +1703,11 @@ static void power_budget_task(void) {
 
     struct zsa_charge_limits want_left  = zsa_charge_limits_for_half(nrf_power_budget_ma, ZSA_CHARGE_HALF_LEFT);
     struct zsa_charge_limits want_right = zsa_charge_limits_for_half(nrf_power_budget_ma, ZSA_CHARGE_HALF_RIGHT);
+#if defined(ZSA_RIGHT_VBUS_LIMIT_OVERRIDE_MA) && defined(ZSA_RIGHT_CHARGE_OVERRIDE_MA)
+    /* Bench knob: command the right half a fixed pair instead of the policy's. */
+    want_right.vbus_limit_ma = ZSA_RIGHT_VBUS_LIMIT_OVERRIDE_MA;
+    want_right.charge_ma     = ZSA_RIGHT_CHARGE_OVERRIDE_MA;
+#endif
 
     /* A changed budget is acted on at once; an unchanged one on the maintain
      * cadence. Both pairs are compared: the right's ceilings mean it can hold
@@ -1828,6 +1848,16 @@ void bluetooth_send_mouse(report_mouse_t *report) {
 }
 
 #ifdef DIGITIZER_MODE_TOUCHPAD
+/* USB gate for the nav HID routing below: QMK's usb_connected_state(), forced
+ * false by the ZSA_BENCH_FORCE_NO_HOST bench knob. */
+static bool usb_hid_on_usb(void) {
+#ifdef ZSA_BENCH_FORCE_NO_HOST
+    return false;
+#else
+    return usb_connected_state();
+#endif
+}
+
 /* Strong override of navigator_trackpad_ptp.c's weak
  * navigator_trackpad_output_touchpad() hook (see the extern declarations and
  * comment near the top of this file). Routes the PTP input report (report ID
@@ -1840,7 +1870,7 @@ void navigator_trackpad_output_touchpad(report_digitizer_touchpad_t *report) {
     if (zsa_wireless_dfu_active()) {
         return;
     }
-    if (usb_connected_state()) {
+    if (usb_hid_on_usb()) {
         send_digitizer_touchpad(report);
         return;
     }
@@ -1861,7 +1891,7 @@ void navigator_trackpad_output_touchpad_mouse(report_digitizer_touchpad_mouse_t 
     if (zsa_wireless_dfu_active()) {
         return;
     }
-    if (usb_connected_state()) {
+    if (usb_hid_on_usb()) {
         send_digitizer_touchpad_mouse(report);
         return;
     }
@@ -1878,7 +1908,7 @@ void navigator_trackpad_output_touchpad_mouse(report_digitizer_touchpad_mouse_t 
  * wireless; on USB (or before any mode has ever arrived over UART) returns -1
  * so the USB feature-report state keeps governing. */
 int16_t navigator_trackpad_wireless_input_mode(void) {
-    if (usb_connected_state() || !digitizer_wireless_mode_set) {
+    if (usb_hid_on_usb() || !digitizer_wireless_mode_set) {
         return -1;
     }
     return (int16_t)digitizer_wireless_mode;
