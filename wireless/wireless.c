@@ -1802,8 +1802,24 @@ void bluetooth_task(void) {
     idle_power_task();
 }
 
+/* USB gate for the HID routing below: QMK's usb_connected_state(), forced
+ * false by the ZSA_BENCH_FORCE_NO_HOST bench knob. */
+static bool usb_hid_on_usb(void) {
+#ifdef ZSA_BENCH_FORCE_NO_HOST
+    return false;
+#else
+    return usb_connected_state();
+#endif
+}
+
+/* True whenever we are not on USB, so connection_auto_detect_host() picks
+ * CONNECTION_HOST_BLUETOOTH and QMK hands every report to
+ * bluetooth_send_keyboard() below. Deliberately not the BLE link state: the
+ * nRF decides what to do with a report — including acting on key presses with
+ * no host connected — so the STM32 no longer withholds reports when the link
+ * is down. zsa_wireless_ble_connected() remains the real link state. */
 bool bluetooth_is_connected(void) {
-    return nrf_ble_connected;
+    return !usb_hid_on_usb();
 }
 
 bool bluetooth_can_send_nkro(void) {
@@ -1848,16 +1864,6 @@ void bluetooth_send_mouse(report_mouse_t *report) {
 }
 
 #ifdef DIGITIZER_MODE_TOUCHPAD
-/* USB gate for the nav HID routing below: QMK's usb_connected_state(), forced
- * false by the ZSA_BENCH_FORCE_NO_HOST bench knob. */
-static bool usb_hid_on_usb(void) {
-#ifdef ZSA_BENCH_FORCE_NO_HOST
-    return false;
-#else
-    return usb_connected_state();
-#endif
-}
-
 /* Strong override of navigator_trackpad_ptp.c's weak
  * navigator_trackpad_output_touchpad() hook (see the extern declarations and
  * comment near the top of this file). Routes the PTP input report (report ID
