@@ -229,6 +229,9 @@ extern bool zsa_stm32_owns_right_bus(void);
 /* TRRS cable presence, from the same probe: an ACK from the real right-half
  * expander is the only evidence the cable is plugged. */
 extern bool zsa_trrs_plugged(void);
+/* Failed right-half expander scan reads, cumulative, kept by the same
+ * matrix.c. Reported in the scan diagnostics below. */
+extern uint16_t zsa_matrix_right_read_errors(void);
 /* Right LED driver, supervised by the keyboard (voyager_tng.c). */
 extern void voyager_right_led_resync(void);
 extern bool voyager_right_led_up(void);
@@ -268,6 +271,25 @@ static uint32_t last_right_tlm_ms;
 
 /* Board-provided (voyager_tng.c), like voyager_right_nrf_set_charge_limits(). */
 extern bool voyager_right_nrf_read_telemetry(struct zsa_right_telemetry *out);
+
+/* ---- Scan diagnostics ---- *
+ *
+ * Per-window pass and gap counters plus cumulative right-half read failures
+ * and keyboard reports sent to the nRF. Finalized every
+ * ZSA_SCAN_DIAG_INTERVAL_MS into scan_diag_last, sent as CMD_SCAN_DIAG and
+ * served as the answer to ORYX_CMD_GET_SCAN_DIAG. Zero (version 0) until the
+ * first window completes. */
+static struct zsa_scan_diag scan_diag_last;
+static uint32_t scan_diag_prev_ms;   /* previous pass */
+static uint32_t scan_diag_window_ms; /* window start */
+static bool     scan_diag_started;   /* a previous pass exists to measure from */
+static uint16_t scan_diag_scans;
+static uint16_t scan_diag_max_gap_ms;
+static uint16_t scan_diag_over_5ms;
+static uint16_t scan_diag_over_20ms;
+static uint16_t scan_diag_kbd_reports; /* cumulative */
+#define SCAN_DIAG_GAP_5MS  5u
+#define SCAN_DIAG_GAP_20MS 20u
 
 #ifdef DIGITIZER_MODE_TOUCHPAD
 /* ---- Digitizer/PTP report + input-mode routing ---- *
@@ -462,6 +484,7 @@ static void send_usb_state(bool connected);
 static void send_trrs_state(bool plugged);
 static void send_idle_state(enum zsa_idle_step step);
 static void right_telemetry_task(void);
+static bool usb_hid_on_usb(void);
 
 /* A USB host, as opposed to a wall charger or an unplugged cable. VBUS alone
  * is a charger: it raises the D+ pull-up, no host ever resets the bus, and the
@@ -930,6 +953,7 @@ __attribute__((weak)) uint8_t zsa_nav_trackpad_probe_state(void) {
 #    include "oryx_telemetry.h"
 #    include "oryx_charge_telemetry.h"
 #    include "oryx_pmic_rails.h"
+#    include "oryx_scan_diag.h"
 
 /* Same rule and window as zsa_wireless_battery_fresh(), on the detail's own
  * timestamp: a left half too old to send EVT_BATTERY_DETAIL keeps the battery
@@ -1176,6 +1200,15 @@ void oryx_pmic_rails_fill(oryx_pmic_rails_t *rails) {
     if (pmic_rails_fresh() && (nrf_pmic_rails.right.flags & ZSA_PMIC_RAILS_PRESENT)) {
         memcpy(&rails->right, &nrf_pmic_rails.right, sizeof(rails->right));
     }
+}
+
+/* The oryx block re-declares the wire struct; both are visible here. */
+_Static_assert(sizeof(oryx_scan_diag_block_t) == sizeof(struct zsa_scan_diag), "oryx scan diag block must match the wire block");
+
+/* Strong override of oryx.c's weak hook: the last finalized window. */
+void oryx_scan_diag_fill(oryx_scan_diag_t *diag) {
+    oryx_scan_diag_reset(diag);
+    memcpy(&diag->diag, &scan_diag_last, sizeof(diag->diag));
 }
 #endif // COMMUNITY_MODULE_ORYX_ENABLE
 
@@ -1758,6 +1791,64 @@ static void right_telemetry_task(void) {
     }
 }
 
+/* One main-loop pass: fold the gap since the previous one into the window
+ * and finalize the window every ZSA_SCAN_DIAG_INTERVAL_MS. */
+static void scan_diag_task(void) {
+    uint32_t now = timer_read32();
+
+    if (!scan_diag_started) {
+        scan_diag_started   = true;
+        scan_diag_prev_ms   = now;
+        scan_diag_window_ms = now;
+        return;
+    }
+
+    uint32_t gap      = now - scan_diag_prev_ms;
+    uint16_t gap_ms   = (gap > UINT16_MAX) ? UINT16_MAX : (uint16_t)gap;
+    scan_diag_prev_ms = now;
+
+    scan_diag_scans++;
+    if (gap_ms > scan_diag_max_gap_ms) {
+        scan_diag_max_gap_ms = gap_ms;
+    }
+    if (gap_ms > SCAN_DIAG_GAP_5MS) {
+        scan_diag_over_5ms++;
+    }
+    if (gap_ms > SCAN_DIAG_GAP_20MS) {
+        scan_diag_over_20ms++;
+    }
+
+    if ((now - scan_diag_window_ms) < ZSA_SCAN_DIAG_INTERVAL_MS) {
+        return;
+    }
+    scan_diag_window_ms = now;
+
+    uint16_t flags = 0;
+    if (zsa_stm32_owns_right_bus()) {
+        flags |= ZSA_SCAN_DIAG_FLAG_WIRED_RIGHT;
+    }
+    if (usb_hid_on_usb()) {
+        flags |= ZSA_SCAN_DIAG_FLAG_USB_HOST;
+    }
+
+    scan_diag_last.version           = ZSA_SCAN_DIAG_VERSION;
+    scan_diag_last.len               = ZSA_SCAN_DIAG_LEN;
+    scan_diag_last.scans             = scan_diag_scans;
+    scan_diag_last.max_gap_ms        = scan_diag_max_gap_ms;
+    scan_diag_last.gaps_over_5ms     = scan_diag_over_5ms;
+    scan_diag_last.gaps_over_20ms    = scan_diag_over_20ms;
+    scan_diag_last.right_read_errors = zsa_matrix_right_read_errors();
+    scan_diag_last.kbd_reports       = scan_diag_kbd_reports;
+    scan_diag_last.flags             = flags;
+
+    zsa_wireless_send_frame(ZSA_MSG_CMD_SCAN_DIAG, (const uint8_t *)&scan_diag_last, sizeof(scan_diag_last));
+
+    scan_diag_scans      = 0;
+    scan_diag_max_gap_ms = 0;
+    scan_diag_over_5ms   = 0;
+    scan_diag_over_20ms  = 0;
+}
+
 void bluetooth_task(void) {
     watchdog_kick();
 
@@ -1796,6 +1887,9 @@ void bluetooth_task(void) {
 
     /* Wired-mode source for the right half's battery */
     right_telemetry_task();
+
+    /* Main-loop regularity and link counters */
+    scan_diag_task();
 
     status_led_task();
 
@@ -1838,6 +1932,7 @@ void bluetooth_send_keyboard(report_keyboard_t *report) {
         payload[2 + i] = report->keys[i];
     }
     zsa_wireless_send_frame(ZSA_MSG_HID_KEYBOARD, payload, sizeof(payload));
+    scan_diag_kbd_reports++;
 }
 
 void bluetooth_send_nkro(report_nkro_t *report) {

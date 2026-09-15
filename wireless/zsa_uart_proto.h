@@ -114,6 +114,15 @@ enum zsa_msg_type {
                                        * Not in ignition's copy of this header
                                        * (frozen at voyager2-2.0.1; ignition
                                        * never sends it). */
+    ZSA_MSG_CMD_SCAN_DIAG    = 0x2E,  /* 16 B: struct zsa_scan_diag — STM32
+                                       * main-loop and link counters, sent
+                                       * every ZSA_SCAN_DIAG_INTERVAL_MS. The
+                                       * left folds it into its BLE telemetry
+                                       * read (bat_telemetry) next to its own
+                                       * struct zsa_nrf_diag. Not in ignition's
+                                       * copy of this header (frozen at
+                                       * voyager2-2.0.1; ignition never sends
+                                       * it). */
     ZSA_MSG_CMD_CHARGE_LIMITS = 0x26, /* 4 B: struct zsa_charge_limits — the
                                        * VBUS input current limit and the
                                        * charge current to apply, both in mA.
@@ -770,6 +779,65 @@ struct __attribute__((packed)) zsa_trrs_state {
 /* Refresh cadence for the level while it is unchanged. */
 #define ZSA_TRRS_STATE_INTERVAL_MS 1000
 
+/* ---- Diagnostics counters ---- */
+
+/* ZSA_MSG_CMD_SCAN_DIAG (16 bytes), STM32 -> left, once a second.
+ * Window fields cover the last ZSA_SCAN_DIAG_INTERVAL_MS; cumulative fields
+ * wrap at 65535 and are compared as differences. A gap is the time between
+ * two consecutive keyboard_task() passes. */
+#define ZSA_SCAN_DIAG_VERSION     1u
+#define ZSA_SCAN_DIAG_INTERVAL_MS 1000u
+
+#define ZSA_SCAN_DIAG_FLAG_WIRED_RIGHT 0x01u /* STM32 owns the right bus (cable) */
+#define ZSA_SCAN_DIAG_FLAG_USB_HOST    0x02u /* reports go to a USB host */
+
+struct __attribute__((packed)) zsa_scan_diag {
+    uint8_t  version;          /* ZSA_SCAN_DIAG_VERSION */
+    uint8_t  len;              /* bytes after this one: 14 */
+    uint16_t scans;            /* passes in the window */
+    uint16_t max_gap_ms;       /* longest gap in the window */
+    uint16_t gaps_over_5ms;    /* gaps > 5 ms in the window */
+    uint16_t gaps_over_20ms;   /* gaps > 20 ms in the window */
+    uint16_t right_read_errors;/* cumulative right-half expander read failures */
+    uint16_t kbd_reports;      /* cumulative keyboard reports sent to the left nRF */
+    uint16_t flags;            /* ZSA_SCAN_DIAG_FLAG_* */
+};
+
+#define ZSA_SCAN_DIAG_SIZE 16u
+#define ZSA_SCAN_DIAG_LEN  14u
+
+_Static_assert(sizeof(struct zsa_scan_diag) == ZSA_SCAN_DIAG_SIZE,
+               "zsa_scan_diag is a wire layout");
+
+/* Left nRF counters, served in the BLE telemetry read after zsa_scan_diag.
+ * Not carried over UART. All cumulative except the connection parameters. */
+#define ZSA_NRF_DIAG_VERSION 1u
+
+struct __attribute__((packed)) zsa_nrf_diag {
+    uint8_t  version;          /* ZSA_NRF_DIAG_VERSION */
+    uint8_t  len;              /* bytes after this one: 24 */
+    uint16_t uart_frames;      /* frames parsed from the STM32 */
+    uint16_t uart_bad_frames;  /* parser resyncs: CRC, escape, length */
+    uint16_t uart_rx_errors;   /* total: RX stopped, whatever the reason, plus
+                                * no free RX buffer and ring overflow */
+    uint16_t kbd_reports;      /* keyboard reports received from the STM32 */
+    uint16_t kbd_dropped;      /* keyboard reports dropped, queue full */
+    uint16_t ble_send_errors;  /* failed HID notifications, all report types */
+    uint16_t esb_hops;         /* right-half link channel hops */
+    uint16_t esb_timeouts;     /* right-half link snapshot timeouts */
+    uint16_t conn_interval;    /* granted BLE interval, 1.25 ms units, 0 = no host */
+    uint16_t conn_latency;     /* granted BLE peripheral latency */
+    uint16_t uart_rx_overruns; /* RX stopped with UART_ERROR_OVERRUN */
+    uint16_t uart_rx_line_errors;/* RX stopped with framing, parity, break or
+                                  * noise */
+};
+
+#define ZSA_NRF_DIAG_SIZE 26u
+#define ZSA_NRF_DIAG_LEN  24u
+
+_Static_assert(sizeof(struct zsa_nrf_diag) == ZSA_NRF_DIAG_SIZE,
+               "zsa_nrf_diag is a wire layout");
+
 /* ---- DFU state / error codes ---- */
 
 /* DFU state values (ZSA_MSG_DFU_STATUS payload[0]) */
@@ -910,6 +978,7 @@ struct zsa_parser {
     struct zsa_frame     frame;
     uint16_t             idx;
     uint8_t              esc;   /* 1 = previous byte was ESC */
+    uint16_t             resyncs; /* frames abandoned: bad escape, length or CRC */
 };
 
 /* ---- CRC-8/CCITT (polynomial 0x07) ---- */
@@ -988,6 +1057,7 @@ static inline uint16_t zsa_frame_encode(uint8_t *buf, uint8_t type, const uint8_
 static inline void zsa_parser_init(struct zsa_parser *p) {
     p->state = ZSA_PARSE_HUNT;
     p->esc   = 0;
+    p->resyncs = 0;
 }
 
 /*
@@ -1021,6 +1091,7 @@ static inline int zsa_parser_feed(struct zsa_parser *p, uint8_t byte) {
         } else {
             /* Invalid escape sequence — abort frame */
             p->state = ZSA_PARSE_HUNT;
+            p->resyncs++;
             return 0;
         }
     } else if (byte == ZSA_ESC_BYTE) {
@@ -1044,6 +1115,7 @@ static inline int zsa_parser_feed(struct zsa_parser *p, uint8_t byte) {
             p->frame.len |= ((uint16_t)byte << 8);
             if (p->frame.len > ZSA_MAX_PAYLOAD) {
                 p->state = ZSA_PARSE_HUNT;
+                p->resyncs++;
                 return 0;
             }
             if (p->frame.len == 0) {
@@ -1080,7 +1152,11 @@ static inline int zsa_parser_feed(struct zsa_parser *p, uint8_t byte) {
             }
 
             p->state = ZSA_PARSE_HUNT;
-            return (byte == expected) ? 1 : 0;
+            if (byte != expected) {
+                p->resyncs++;
+                return 0;
+            }
+            return 1;
         }
 
         default:

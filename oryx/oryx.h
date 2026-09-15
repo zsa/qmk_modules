@@ -56,6 +56,11 @@ enum Oryx_Command_Code {
      * ORYX_EVT_PMIC_RAILS carrying an oryx_pmic_rails_t. Unpaired-safe, like
      * the other queries. */
     ORYX_CMD_GET_PMIC_RAILS,
+    /* Ask how regular the main loop is: passes in the last window, the worst
+     * gap between two of them, failed right-half expander reads and keyboard
+     * reports handed to the wireless half. Answered with ORYX_EVT_SCAN_DIAG
+     * carrying an oryx_scan_diag_t. Unpaired-safe, like the other queries. */
+    ORYX_CMD_GET_SCAN_DIAG,
     ORYX_GET_PROTOCOL_VERSION = 0xFE,
 };
 
@@ -83,6 +88,9 @@ enum Oryx_Event_Code {
     /* Answer to ORYX_CMD_GET_PMIC_RAILS: an oryx_pmic_rails_t in bytes 1..31.
      * Binary, so it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
     ORYX_EVT_PMIC_RAILS,
+    /* Answer to ORYX_CMD_GET_SCAN_DIAG: an oryx_scan_diag_t in bytes 1..31.
+     * Binary, so it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
+    ORYX_EVT_SCAN_DIAG,
     ORYX_EVT_GET_PROTOCOL_VERSION = 0XFE,
     ORYX_EVT_ERROR                = 0xFF,
 };
