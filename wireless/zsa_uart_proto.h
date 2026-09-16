@@ -810,12 +810,13 @@ _Static_assert(sizeof(struct zsa_scan_diag) == ZSA_SCAN_DIAG_SIZE,
                "zsa_scan_diag is a wire layout");
 
 /* Left nRF counters, served in the BLE telemetry read after zsa_scan_diag.
- * Not carried over UART. All cumulative except the connection parameters. */
+ * Not carried over UART. All cumulative except the connection parameters and
+ * the keyboard latency, which are current values. */
 #define ZSA_NRF_DIAG_VERSION 1u
 
 struct __attribute__((packed)) zsa_nrf_diag {
     uint8_t  version;          /* ZSA_NRF_DIAG_VERSION */
-    uint8_t  len;              /* bytes after this one: 24 */
+    uint8_t  len;              /* bytes after this one: 26 */
     uint16_t uart_frames;      /* frames parsed from the STM32 */
     uint16_t uart_bad_frames;  /* parser resyncs: CRC, escape, length */
     uint16_t uart_rx_errors;   /* total: RX stopped, whatever the reason, plus
@@ -830,10 +831,13 @@ struct __attribute__((packed)) zsa_nrf_diag {
     uint16_t uart_rx_overruns; /* RX stopped with UART_ERROR_OVERRUN */
     uint16_t uart_rx_line_errors;/* RX stopped with framing, parity, break or
                                   * noise */
+    uint16_t kbd_latency_max_us; /* longest report wait from UART arrival to
+                                  * BLE send, last full second, 65535 =
+                                  * capped */
 };
 
-#define ZSA_NRF_DIAG_SIZE 26u
-#define ZSA_NRF_DIAG_LEN  24u
+#define ZSA_NRF_DIAG_SIZE 28u
+#define ZSA_NRF_DIAG_LEN  26u
 
 _Static_assert(sizeof(struct zsa_nrf_diag) == ZSA_NRF_DIAG_SIZE,
                "zsa_nrf_diag is a wire layout");
