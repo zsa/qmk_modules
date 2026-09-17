@@ -45,6 +45,14 @@ uint16_t zsa_wireless_power_budget_ma(void);
  * and once VBUS goes away. */
 bool zsa_wireless_vbus_present(void);
 
+#ifdef RGB_MATRIX_ENABLE
+/* Effective RGB value to scale LED output by: the stored setting
+ * (rgb_matrix_config.hsv.v), clamped to ZSA_WIRED_LED_VAL_CAP while VBUS is
+ * present. Full brightness on the cable starves the right half's charger.
+ * The stored setting itself is never written. */
+uint8_t zsa_wireless_led_val(void);
+#endif
+
 /* True while a firmware update is running through the nRF (EVT_DFU_STATE),
  * on either half. The module makes the keyboard inert for the duration: key
  * events dropped in pre_process_record, pointer reports dropped, idle steps

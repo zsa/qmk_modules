@@ -7,13 +7,20 @@
 #include <oryx.h>
 #endif
 
+#ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
+#include "wireless.h"
+#else
+/* No wireless module: nothing caps the stored value. */
+#define zsa_wireless_led_val() (rgb_matrix_config.hsv.v)
+#endif
+
 ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 0);
 
 extern const uint8_t PROGMEM ledmap[][RGB_MATRIX_LED_COUNT][3];
 
 RGB keycolors_hsv_to_rgb_with_value(HSV hsv) {
     RGB   rgb = hsv_to_rgb(hsv);
-    float f   = (float)rgb_matrix_config.hsv.v / UINT8_MAX;
+    float f   = (float)zsa_wireless_led_val() / UINT8_MAX;
     return (RGB){f * rgb.r, f * rgb.g, f * rgb.b};
 }
 

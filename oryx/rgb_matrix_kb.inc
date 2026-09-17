@@ -4,9 +4,16 @@ RGB_MATRIX_EFFECT(oryx_webhid_effect)
 
 extern RGB webhid_leds[RGB_MATRIX_LED_COUNT];
 
+#        ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
+#            include "wireless.h"
+#        else
+/* No wireless module: nothing caps the stored value. */
+#            define zsa_wireless_led_val() (rgb_matrix_config.hsv.v)
+#        endif
+
 static bool oryx_webhid_effect_run(effect_params_t* params) {
     RGB_MATRIX_USE_LIMITS(led_min, led_max);
-    float f = (float)rgb_matrix_config.hsv.v / UINT8_MAX;
+    float f = (float)zsa_wireless_led_val() / UINT8_MAX;
     for (uint8_t i = led_min; i < led_max; ++i) {
         rgb_matrix_set_color(i, webhid_leds[i].r * f, webhid_leds[i].g * f, webhid_leds[i].b * f);
     }

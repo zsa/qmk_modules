@@ -894,6 +894,30 @@ bool zsa_wireless_vbus_present(void) {
     return nrf_vbus_present;
 }
 
+#ifdef RGB_MATRIX_ENABLE
+uint8_t zsa_wireless_led_val(void) {
+    uint8_t v = rgb_matrix_config.hsv.v;
+
+    if (nrf_vbus_present && v > ZSA_WIRED_LED_VAL_CAP) {
+        v = ZSA_WIRED_LED_VAL_CAP;
+    }
+    return v;
+}
+
+/* Strong override of the matrix's weak HSV->RGB hook, so the built-in effect
+ * engine is capped too: the keymap only paints some layers itself and leaves
+ * the rest to the animations. Every effect runner converts through here. */
+rgb_t rgb_matrix_hsv_to_rgb(hsv_t hsv);
+rgb_t rgb_matrix_hsv_to_rgb(hsv_t hsv) {
+    uint8_t cap = zsa_wireless_led_val();
+
+    if (hsv.v > cap) {
+        hsv.v = cap;
+    }
+    return hsv_to_rgb(hsv);
+}
+#endif
+
 void zsa_wireless_query_ble_status(void) {
     send_command(ZSA_MSG_QUERY_BLE_STATUS);
 }

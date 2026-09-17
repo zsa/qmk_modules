@@ -38,6 +38,15 @@
 #    define ZSA_RIGHT_LED_INTERVAL_MS 50
 #endif
 
+/* ---- LED brightness policy (see wireless.c) ---- */
+
+/* Ceiling on the effective RGB value while VBUS is present (see
+ * zsa_wireless_led_val); the stored user setting is left untouched. 255 is no
+ * cap; lower it to cap. */
+#ifndef ZSA_WIRED_LED_VAL_CAP
+#    define ZSA_WIRED_LED_VAL_CAP 255
+#endif
+
 /* ---- BLE status overlay (see status_layer.c) ---- */
 
 /* Battery gauge geometry: six LEDs on the top row of each half, filling

@@ -29,7 +29,7 @@ static const uint8_t PROGMEM status_gauge_hue[ZSA_STATUS_GAUGE_LEDS] = {0, 17, 3
  * the keymap-side equivalent uses float, which is not worth it here. */
 static RGB status_hsv_to_rgb(HSV hsv) {
     RGB     rgb = hsv_to_rgb(hsv);
-    uint8_t v   = rgb_matrix_config.hsv.v;
+    uint8_t v   = zsa_wireless_led_val();
 
     return (RGB){
         .r = (uint8_t)(((uint16_t)rgb.r * v) / UINT8_MAX),
