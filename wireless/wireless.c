@@ -176,17 +176,14 @@ static bool     link_state_seen;
  *
  * The left nRF reports the USB source's CC-detected current budget
  * (EVT_PWR_BUDGET); this module owns the charging policy and both halves
- * execute it. zsa_charge_limits_for_half() in the shared wire header turns that
+ * execute it. zsa_charge_limits_for_budget() in the shared wire header turns that
  * budget into the two currents to apply — how much a half may draw from VBUS,
  * and how much of it goes into its cell — and they are commanded to the left
  * over UART (CMD_CHARGE_LIMITS) and to the right over the TRRS I2C bus
  * (voyager_right_nrf_set_charge_limits()).
  *
- * The two halves get different answers. The right is fed from the left over the
- * TRRS cable, about 1 ohm, so its own ceilings apply on top of the shared
- * derivation; the left, wired straight to VBUS, gets the plain answer. Each
- * pair is tracked separately, so a change on either side is sent on either
- * side.
+ * Both halves get the same derived pair. Each is tracked separately, so a
+ * change on either side is sent on either side.
  *
  * Sent whenever the computed limits change, so a source that renegotiates
  * downward is followed down and not only up, and re-sent every
@@ -1734,8 +1731,11 @@ static void power_budget_task(void) {
         return;
     }
 
-    struct zsa_charge_limits want_left  = zsa_charge_limits_for_half(nrf_power_budget_ma, ZSA_CHARGE_HALF_LEFT);
-    struct zsa_charge_limits want_right = zsa_charge_limits_for_half(nrf_power_budget_ma, ZSA_CHARGE_HALF_RIGHT);
+    /* Same pair for both halves: the right's LEDs no longer draw from the
+     * cable's 5 V rail, so the right-only ceilings in the wire header are not
+     * applied. */
+    struct zsa_charge_limits want_left  = zsa_charge_limits_for_budget(nrf_power_budget_ma);
+    struct zsa_charge_limits want_right = want_left;
 #if defined(ZSA_RIGHT_VBUS_LIMIT_OVERRIDE_MA) && defined(ZSA_RIGHT_CHARGE_OVERRIDE_MA)
     /* Bench knob: command the right half a fixed pair instead of the policy's. */
     want_right.vbus_limit_ma = ZSA_RIGHT_VBUS_LIMIT_OVERRIDE_MA;
