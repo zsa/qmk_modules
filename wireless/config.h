@@ -47,6 +47,15 @@
 #    define ZSA_RIGHT_LED_SLICED 1
 #endif
 
+/* Send the left half's frame one 16-byte PWM block per main-loop pass while
+ * off USB. The nine back-to-back writes to the real left chip (0x74 on the
+ * STM32's own bus) take ~3.6 ms on the wire and are the longest main-loop pass
+ * in wireless mode, one per animation frame. On a USB host the whole-frame
+ * flush is kept. Set to 0 for the old whole-frame flush everywhere. */
+#ifndef ZSA_LEFT_LED_SLICED
+#    define ZSA_LEFT_LED_SLICED 1
+#endif
+
 /* ---- LED brightness policy (see wireless.c) ---- */
 
 /* Ceiling on the effective RGB value while VBUS is present (see

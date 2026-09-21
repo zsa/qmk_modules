@@ -254,6 +254,32 @@ static uint32_t last_right_led_flush_ms = 0;
 #    if ZSA_RIGHT_LED_SLICED
 static uint8_t right_led_block;        /* next block to send */
 static bool    right_led_cycle_active; /* a frame is part-sent */
+static bool    right_frame_ready;      /* rgb_matrix has a whole frame to send */
+#    endif
+
+#    if ZSA_LEFT_LED_SLICED
+static uint8_t left_led_block;        /* next block to send */
+static bool    left_led_cycle_active; /* a frame is part-sent */
+static bool    left_frame_ready;      /* rgb_matrix has a whole frame to send */
+static bool    left_led_flush_now;    /* let one blocking flush through */
+
+/* Drops a part-sent left frame and asks for the whole frame again. */
+static void left_led_slice_abandon(void) {
+    left_led_cycle_active = false;
+    left_frame_ready      = false;
+    is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT, true);
+}
+
+/* Hands the left frame to the next blocking flush instead of the slicer, for
+ * the callers that need it on the chip before the main loop stops running. */
+static void left_led_flush_once(void) {
+    left_led_cycle_active = false;
+    left_frame_ready      = false;
+    left_led_flush_now    = true;
+}
+#    else
+#        define left_led_slice_abandon() ((void)0)
+#        define left_led_flush_once() ((void)0)
 #    endif
 #endif
 
@@ -735,6 +761,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                     zsa_rtt_event("LED_RAIL -> resync"); // TEMP DEBUG
                     // The rail powers the left chip, which is not supervised:
                     // resync it here. The right one goes through the supervisor.
+                    // The resync clears the chip's PWM registers, so a
+                    // part-sent frame has to start over.
+                    left_led_slice_abandon();
                     is31fl3731_resync(ZSA_LED_DRIVER_LEFT);
                     voyager_right_led_resync();
                 }
@@ -1307,6 +1336,9 @@ static void idle_power_enter_step(enum zsa_idle_step step) {
         /* Force LEDs off immediately — rgb_matrix_task() won't run
          * inside the slow-scan loop to pick up the disable flag. */
         rgb_matrix_set_color_all(0, 0, 0);
+        /* The slow-scan loop doesn't run the slicer either, so this one has to
+         * go out whole. */
+        left_led_flush_once();
         rgb_matrix_driver.flush();
     }
 #endif
@@ -1614,11 +1646,12 @@ static void idle_power_task(void) {
 /* Strong override of is31fl3731.c's weak is31fl3731_should_flush() hook.
  * The cap is skipped only while the STM32 drives the real right chip over the
  * cable - a real chip on a real bus, cheap to flush at full rate like the left
- * one. Otherwise the left (real, local) driver still runs at full rate, but the
- * right (emulated 0x77, relayed over ESB) driver is capped to
- * ZSA_RIGHT_LED_INTERVAL_MS: every flush it answers
- * blocks on a clock-stretched I2C write (~9 ms vs ~0.65 ms for the left chip
- * alone), and the right half doesn't need matrix-scan-rate refresh.
+ * one. Otherwise the left (real, local) driver flushes whole frames on USB and
+ * is sliced off USB, and the right (emulated 0x77, relayed over ESB) driver is
+ * capped to ZSA_RIGHT_LED_INTERVAL_MS: every flush it answers blocks on a
+ * clock-stretched I2C write (~9 ms, against ~4.3 ms for a whole left frame,
+ * 3.6 ms of it on the wire, measured 2026-09-21), and the right half doesn't
+ * need matrix-scan-rate refresh.
  * Skipping a flush here does not clear pwm_buffer_dirty (only
  * is31fl3731_update_pwm_buffers() does, after it actually writes), so the
  * buffer stays dirty and the next permitted flush still sends the latest
@@ -1627,11 +1660,28 @@ bool is31fl3731_should_flush(uint8_t index) {
     if (index == ZSA_LED_DRIVER_RIGHT && !voyager_right_led_up()) {
         return false;
     }
-    if (index != ZSA_LED_DRIVER_RIGHT || zsa_stm32_owns_right_bus()) {
+    if (index != ZSA_LED_DRIVER_RIGHT) {
+#    if ZSA_LEFT_LED_SLICED
+        if (left_led_flush_now) {
+            left_led_flush_now = false;
+            return true;
+        }
+        if (!usb_hid_on_usb()) {
+            /* left_led_slice_task() owns the left frame off USB. This is the
+             * only point where rgb_matrix has a whole rendered frame, so it is
+             * also the only point where a cycle may start. */
+            left_frame_ready = true;
+            return false;
+        }
+#    endif
+        return true;
+    }
+    if (zsa_stm32_owns_right_bus()) {
         return true;
     }
 #    if ZSA_RIGHT_LED_SLICED
     /* right_led_slice_task() owns the mirror's frames. */
+    right_frame_ready = true;
     return false;
 #    else
     if (timer_elapsed32(last_right_led_flush_ms) < ZSA_RIGHT_LED_INTERVAL_MS) {
@@ -1644,11 +1694,15 @@ bool is31fl3731_should_flush(uint8_t index) {
 
 #    if ZSA_RIGHT_LED_SLICED
 /* Sends the mirrored right-half frame one 16-byte PWM block per main-loop
- * pass. A cycle starts when the buffer is dirty and ZSA_RIGHT_LED_INTERVAL_MS
- * has passed since the last cycle started; dirty is cleared there, so colors
- * set during a cycle start the next one. A failed block or a change of bus
- * owner abandons the cycle and marks the buffer dirty again, so the next cycle
- * resends the whole frame - the same recovery the whole-frame flush had.
+ * pass. A cycle starts when is31fl3731_should_flush() has armed
+ * right_frame_ready, the buffer is dirty and ZSA_RIGHT_LED_INTERVAL_MS has
+ * passed since the last cycle started; dirty is cleared there, so colors set
+ * during a cycle start the next one. The arm matters: rgb_matrix renders
+ * RGB_MATRIX_LED_PROCESS_LIMIT LEDs per pass and the buffer goes dirty on the
+ * first of them, so a cycle keyed on dirty alone would send half-rendered
+ * frames. A failed block or a change of bus owner abandons the cycle and marks
+ * the buffer dirty again, so the next cycle resends the whole frame - the same
+ * recovery the whole-frame flush had.
  * Runs from bluetooth_task(), after the trackpad fetch in the pass. */
 static void right_led_slice_task(void) {
     if (!voyager_right_led_up() || zsa_stm32_owns_right_bus()) {
@@ -1656,14 +1710,19 @@ static void right_led_slice_task(void) {
             right_led_cycle_active = false;
             is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT, true);
         }
+        right_frame_ready = false;
         return;
     }
 
     if (!right_led_cycle_active) {
-        if (!is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT)) {
+        if (!right_frame_ready) {
             return;
         }
         if (timer_elapsed32(last_right_led_flush_ms) < ZSA_RIGHT_LED_INTERVAL_MS) {
+            return;
+        }
+        right_frame_ready = false;
+        if (!is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT)) {
             return;
         }
         last_right_led_flush_ms = timer_read32();
@@ -1679,6 +1738,53 @@ static void right_led_slice_task(void) {
     }
     if (++right_led_block >= IS31FL3731_PWM_BLOCK_COUNT) {
         right_led_cycle_active = false;
+    }
+}
+#    endif
+
+#    if ZSA_LEFT_LED_SLICED
+/* Sends the left half's frame one 16-byte PWM block per main-loop pass while
+ * off USB, the same way the right mirror is sliced. A cycle starts only where
+ * the whole-frame flush would have run (is31fl3731_should_flush() arms
+ * left_frame_ready when it refuses the left driver), which is also what caps
+ * the rate at one cycle per RGB_MATRIX_LED_FLUSH_LIMIT. A failed write, a host
+ * appearing or a resync abandons the cycle and marks the buffer dirty, so the
+ * whole frame is sent again. The PWM page is re-selected before every block:
+ * the left chip's busdev verify (led_function_page_ok in voyager_tng.c) walks
+ * to the function page and back between passes, and a failed walk back would
+ * otherwise send PWM data into the function registers. */
+static void left_led_slice_task(void) {
+    if (usb_hid_on_usb()) {
+        if (left_led_cycle_active) {
+            left_led_slice_abandon();
+        }
+        left_frame_ready = false;
+        return;
+    }
+
+    if (!left_led_cycle_active) {
+        if (!left_frame_ready) {
+            return;
+        }
+        left_frame_ready = false;
+        if (!is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT)) {
+            return;
+        }
+        is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT, false);
+        left_led_cycle_active = true;
+        left_led_block        = 0;
+    }
+
+    if (is31fl3731_select_page(ZSA_LED_DRIVER_LEFT, IS31FL3731_COMMAND_FRAME_1) != I2C_STATUS_SUCCESS) {
+        left_led_slice_abandon();
+        return;
+    }
+    if (!is31fl3731_write_pwm_block(ZSA_LED_DRIVER_LEFT, left_led_block)) {
+        left_led_slice_abandon();
+        return;
+    }
+    if (++left_led_block >= IS31FL3731_PWM_BLOCK_COUNT) {
+        left_led_cycle_active = false;
     }
 }
 #    endif
@@ -1964,9 +2070,14 @@ void bluetooth_task(void) {
     /* Wired-mode source for the right half's battery */
     right_telemetry_task();
 
-#if defined(RGB_MATRIX_ENABLE) && ZSA_RIGHT_LED_SLICED
-    /* One PWM block of the mirrored right-half frame */
+#if defined(RGB_MATRIX_ENABLE) && (ZSA_RIGHT_LED_SLICED || ZSA_LEFT_LED_SLICED)
+    /* One PWM block of each sliced frame */
+#    if ZSA_LEFT_LED_SLICED
+    left_led_slice_task();
+#    endif
+#    if ZSA_RIGHT_LED_SLICED
     right_led_slice_task();
+#    endif
 #endif
 
     /* Main-loop regularity and link counters */
