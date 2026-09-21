@@ -38,6 +38,15 @@
 #    define ZSA_RIGHT_LED_INTERVAL_MS 50
 #endif
 
+/* Send the mirrored right-half frame one 16-byte PWM block per main-loop pass
+ * instead of all nine in one call. The nine back-to-back writes block the loop
+ * ~9 ms, which pushes the trackpad fetch late. Set to 0 for the old
+ * whole-frame flush. Only applies to the mirror, never to the real chip on the
+ * cable and never to the left driver. */
+#ifndef ZSA_RIGHT_LED_SLICED
+#    define ZSA_RIGHT_LED_SLICED 1
+#endif
+
 /* ---- LED brightness policy (see wireless.c) ---- */
 
 /* Ceiling on the effective RGB value while VBUS is present (see

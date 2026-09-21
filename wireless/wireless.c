@@ -248,7 +248,13 @@ static bool left_led_rail_on = true;
 #    define ZSA_LED_DRIVER_LEFT 0
 #    define ZSA_LED_DRIVER_RIGHT 1
 
+/* Sliced: the start of the current (or last) block cycle. Otherwise the last
+ * whole-frame flush. */
 static uint32_t last_right_led_flush_ms = 0;
+#    if ZSA_RIGHT_LED_SLICED
+static uint8_t right_led_block;        /* next block to send */
+static bool    right_led_cycle_active; /* a frame is part-sent */
+#    endif
 #endif
 
 static uint8_t nav_device_type;  /* enum zsa_nav_device_type */
@@ -1624,12 +1630,58 @@ bool is31fl3731_should_flush(uint8_t index) {
     if (index != ZSA_LED_DRIVER_RIGHT || zsa_stm32_owns_right_bus()) {
         return true;
     }
+#    if ZSA_RIGHT_LED_SLICED
+    /* right_led_slice_task() owns the mirror's frames. */
+    return false;
+#    else
     if (timer_elapsed32(last_right_led_flush_ms) < ZSA_RIGHT_LED_INTERVAL_MS) {
         return false;
     }
     last_right_led_flush_ms = timer_read32();
     return true;
+#    endif
 }
+
+#    if ZSA_RIGHT_LED_SLICED
+/* Sends the mirrored right-half frame one 16-byte PWM block per main-loop
+ * pass. A cycle starts when the buffer is dirty and ZSA_RIGHT_LED_INTERVAL_MS
+ * has passed since the last cycle started; dirty is cleared there, so colors
+ * set during a cycle start the next one. A failed block or a change of bus
+ * owner abandons the cycle and marks the buffer dirty again, so the next cycle
+ * resends the whole frame - the same recovery the whole-frame flush had.
+ * Runs from bluetooth_task(), after the trackpad fetch in the pass. */
+static void right_led_slice_task(void) {
+    if (!voyager_right_led_up() || zsa_stm32_owns_right_bus()) {
+        if (right_led_cycle_active) {
+            right_led_cycle_active = false;
+            is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT, true);
+        }
+        return;
+    }
+
+    if (!right_led_cycle_active) {
+        if (!is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT)) {
+            return;
+        }
+        if (timer_elapsed32(last_right_led_flush_ms) < ZSA_RIGHT_LED_INTERVAL_MS) {
+            return;
+        }
+        last_right_led_flush_ms = timer_read32();
+        is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT, false);
+        right_led_cycle_active = true;
+        right_led_block        = 0;
+    }
+
+    if (!is31fl3731_write_pwm_block(ZSA_LED_DRIVER_RIGHT, right_led_block)) {
+        right_led_cycle_active = false;
+        is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT, true);
+        return;
+    }
+    if (++right_led_block >= IS31FL3731_PWM_BLOCK_COUNT) {
+        right_led_cycle_active = false;
+    }
+}
+#    endif
 #endif
 
 /* ---- BT_UNPR hold ---- */
@@ -1911,6 +1963,11 @@ void bluetooth_task(void) {
 
     /* Wired-mode source for the right half's battery */
     right_telemetry_task();
+
+#if defined(RGB_MATRIX_ENABLE) && ZSA_RIGHT_LED_SLICED
+    /* One PWM block of the mirrored right-half frame */
+    right_led_slice_task();
+#endif
 
     /* Main-loop regularity and link counters */
     scan_diag_task();
