@@ -254,13 +254,15 @@ static uint32_t last_right_led_flush_ms = 0;
 #    if ZSA_RIGHT_LED_SLICED
 static uint8_t right_led_block;        /* next block to send */
 static bool    right_led_cycle_active; /* a frame is part-sent */
-static bool    right_frame_ready;      /* rgb_matrix has a whole frame to send */
+static bool    right_frame_ready;      /* right_led_frame holds a whole frame to send */
+static uint8_t right_led_frame[IS31FL3731_PWM_REGISTER_COUNT]; /* the frame the cycle sends */
 #    endif
 
 #    if ZSA_LEFT_LED_SLICED
 static uint8_t left_led_block;        /* next block to send */
 static bool    left_led_cycle_active; /* a frame is part-sent */
-static bool    left_frame_ready;      /* rgb_matrix has a whole frame to send */
+static bool    left_frame_ready;      /* left_led_frame holds a whole frame to send */
+static uint8_t left_led_frame[IS31FL3731_PWM_REGISTER_COUNT]; /* the frame the cycle sends */
 static bool    left_led_flush_now;    /* let one blocking flush through */
 
 /* Drops a part-sent left frame and asks for the whole frame again. */
@@ -1669,8 +1671,12 @@ bool is31fl3731_should_flush(uint8_t index) {
         if (!usb_hid_on_usb()) {
             /* left_led_slice_task() owns the left frame off USB. This is the
              * only point where rgb_matrix has a whole rendered frame, so it is
-             * also the only point where a cycle may start. */
-            left_frame_ready = true;
+             * also the only point where a cycle may start. The frame is copied
+             * here and kept until the next copy; none is taken mid-cycle. */
+            if (!left_led_cycle_active) {
+                is31fl3731_copy_pwm_buffer(ZSA_LED_DRIVER_LEFT, left_led_frame);
+                left_frame_ready = true;
+            }
             return false;
         }
 #    endif
@@ -1680,8 +1686,12 @@ bool is31fl3731_should_flush(uint8_t index) {
         return true;
     }
 #    if ZSA_RIGHT_LED_SLICED
-    /* right_led_slice_task() owns the mirror's frames. */
-    right_frame_ready = true;
+    /* right_led_slice_task() owns the mirror's frames. The frame is copied
+     * here and kept until the next copy; none is taken mid-cycle. */
+    if (!right_led_cycle_active) {
+        is31fl3731_copy_pwm_buffer(ZSA_LED_DRIVER_RIGHT, right_led_frame);
+        right_frame_ready = true;
+    }
     return false;
 #    else
     if (timer_elapsed32(last_right_led_flush_ms) < ZSA_RIGHT_LED_INTERVAL_MS) {
@@ -1700,9 +1710,11 @@ bool is31fl3731_should_flush(uint8_t index) {
  * during a cycle start the next one. The arm matters: rgb_matrix renders
  * RGB_MATRIX_LED_PROCESS_LIMIT LEDs per pass and the buffer goes dirty on the
  * first of them, so a cycle keyed on dirty alone would send half-rendered
- * frames. A failed block or a change of bus owner abandons the cycle and marks
- * the buffer dirty again, so the next cycle resends the whole frame - the same
- * recovery the whole-frame flush had.
+ * frames. The blocks are sent from right_led_frame, the copy taken when the
+ * frame was complete; if the live buffer differs from that copy at cycle start,
+ * dirty stays set. A failed block or a change of bus owner abandons
+ * the cycle and marks the buffer dirty again, so the next cycle resends the
+ * whole frame - the same recovery the whole-frame flush had.
  * Runs from bluetooth_task(), after the trackpad fetch in the pass. */
 static void right_led_slice_task(void) {
     if (!voyager_right_led_up() || zsa_stm32_owns_right_bus()) {
@@ -1726,12 +1738,12 @@ static void right_led_slice_task(void) {
             return;
         }
         last_right_led_flush_ms = timer_read32();
-        is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT, false);
+        is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT, !is31fl3731_pwm_buffer_matches(ZSA_LED_DRIVER_RIGHT, right_led_frame));
         right_led_cycle_active = true;
         right_led_block        = 0;
     }
 
-    if (!is31fl3731_write_pwm_block(ZSA_LED_DRIVER_RIGHT, right_led_block)) {
+    if (!is31fl3731_write_pwm_block_from(ZSA_LED_DRIVER_RIGHT, right_led_block, right_led_frame)) {
         right_led_cycle_active = false;
         is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT, true);
         return;
@@ -1747,7 +1759,9 @@ static void right_led_slice_task(void) {
  * off USB, the same way the right mirror is sliced. A cycle starts only where
  * the whole-frame flush would have run (is31fl3731_should_flush() arms
  * left_frame_ready when it refuses the left driver), which is also what caps
- * the rate at one cycle per RGB_MATRIX_LED_FLUSH_LIMIT. A failed write, a host
+ * the rate at one cycle per RGB_MATRIX_LED_FLUSH_LIMIT. The blocks are sent from
+ * left_led_frame, the copy taken there when the frame was complete, with the
+ * same dirty check at cycle start as the right mirror. A failed write, a host
  * appearing or a resync abandons the cycle and marks the buffer dirty, so the
  * whole frame is sent again. The PWM page is re-selected before every block:
  * the left chip's busdev verify (led_function_page_ok in voyager_tng.c) walks
@@ -1770,7 +1784,7 @@ static void left_led_slice_task(void) {
         if (!is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT)) {
             return;
         }
-        is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT, false);
+        is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT, !is31fl3731_pwm_buffer_matches(ZSA_LED_DRIVER_LEFT, left_led_frame));
         left_led_cycle_active = true;
         left_led_block        = 0;
     }
@@ -1779,7 +1793,7 @@ static void left_led_slice_task(void) {
         left_led_slice_abandon();
         return;
     }
-    if (!is31fl3731_write_pwm_block(ZSA_LED_DRIVER_LEFT, left_led_block)) {
+    if (!is31fl3731_write_pwm_block_from(ZSA_LED_DRIVER_LEFT, left_led_block, left_led_frame)) {
         left_led_slice_abandon();
         return;
     }
