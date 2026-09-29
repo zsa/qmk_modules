@@ -446,6 +446,14 @@ void busdev_report_error(busdev_id_t id, i2c_status_t status) {
     }
 }
 
+void busdev_report_ok(busdev_id_t id) {
+    busdev_dev_t *d = dev_of(id);
+    if (d == NULL || d->state != BUSDEV_UP) {
+        return;
+    }
+    d->err_streak = 0;
+}
+
 void busdev_report_suspect(busdev_id_t id, uint8_t reason) {
     busdev_dev_t *d = dev_of(id);
     if (d == NULL || d->state == BUSDEV_ABSENT || d->state == BUSDEV_CONFIGURING || d->state == BUSDEV_VERIFYING) {

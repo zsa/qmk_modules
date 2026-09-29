@@ -30,6 +30,12 @@
 #    define NAVIGATOR_TRACKPAD_PROBE_TIMEOUT 5
 #endif
 
+// Consecutive failed transactions (NAK/error, not timeout) while up before the
+// pad is dropped: about 4 polls, 20 ms at NAVIGATOR_TRACKPAD_POLL_INTERVAL_MS.
+#ifndef NAVIGATOR_TRACKPAD_MAX_ERR_STREAK
+#    define NAVIGATOR_TRACKPAD_MAX_ERR_STREAK 4
+#endif
+
 // Packet and report IDs
 #define CGEN6_MAX_PACKET_SIZE 17
 #define CGEN6_PTP_REPORT_ID 0x01
@@ -174,8 +180,14 @@ uint8_t cirque_gen6_enable_logical_scaling(bool set);
 // Motion detection and report reading
 // Returns true if motion data is ready, false otherwise (including I2C failure)
 bool cirque_gen6_has_motion(void);
-// Reads report data into provided report struct. Returns true on success, false on I2C failure.
-bool cirque_gen_6_read_report(cgen6_report_t *report);
+typedef enum {
+    CGEN6_READ_OK,     // report filled
+    CGEN6_READ_EMPTY,  // transaction ok, no touch packet
+    CGEN6_READ_FAILED, // I2C transaction failed
+} cgen6_read_t;
+
+// Reads report data into provided report struct.
+cgen6_read_t cirque_gen_6_read_report(cgen6_report_t *report);
 
 // Device initialization
 void navigator_trackpad_device_init(void);

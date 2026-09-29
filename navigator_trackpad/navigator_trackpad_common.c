@@ -35,13 +35,23 @@ uint8_t zsa_nav_trackpad_probe_state(void) {
 }
 #endif
 
+// Failed transaction. A timeout while up takes the pad down at once; other
+// errors count toward NAVIGATOR_TRACKPAD_MAX_ERR_STREAK.
+static void trackpad_io_error(i2c_status_t status) {
+    busdev_report_error(navigator_trackpad_dev, status);
+    if (status == I2C_STATUS_TIMEOUT && busdev_is_up(navigator_trackpad_dev)) {
+        busdev_force_down(navigator_trackpad_dev, BUSDEV_REASON_TIMEOUT);
+    }
+}
+
 // I2C communication functions
 i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
     i2c_status_t res = i2c_receive(trackpad_addr, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);
     if (res != I2C_STATUS_SUCCESS) {
-        busdev_report_error(navigator_trackpad_dev, res);
+        trackpad_io_error(res);
         return res;
     }
+    busdev_report_ok(navigator_trackpad_dev);
     wait_us(cnt * 15);
     return res;
 }
@@ -70,7 +80,7 @@ uint8_t cirque_gen6_read_memory(uint32_t addr, uint8_t *data, uint16_t cnt, bool
     i2c_status_t status = i2c_transmit_and_receive(trackpad_addr, preamble, 8, buf, cnt + 3, NAVIGATOR_TRACKPAD_TIMEOUT);
     if (status != I2C_STATUS_SUCCESS) {
         res |= CGEN6_I2C_FAILED;
-        busdev_report_error(navigator_trackpad_dev, status);
+        trackpad_io_error(status);
     }
 
     // Read the data length
@@ -124,7 +134,7 @@ uint8_t cirque_gen6_write_memory(uint32_t addr, uint8_t *data, uint16_t cnt) {
     i2c_status_t status = i2c_transmit(trackpad_addr, buf, cnt + 9, NAVIGATOR_TRACKPAD_TIMEOUT);
     if (status != I2C_STATUS_SUCCESS) {
         res |= CGEN6_I2C_FAILED;
-        busdev_report_error(navigator_trackpad_dev, status);
+        trackpad_io_error(status);
     }
 
     wait_ms(1);
@@ -241,11 +251,11 @@ bool cirque_gen6_has_motion(void) {
     return data != 0;
 }
 
-// Report reading - fills provided report struct. Returns true on valid data, false on I2C failure or no data.
-bool cirque_gen_6_read_report(cgen6_report_t *report) {
+// Report reading - fills provided report struct on CGEN6_READ_OK.
+cgen6_read_t cirque_gen_6_read_report(cgen6_report_t *report) {
     uint8_t packet[CGEN6_MAX_PACKET_SIZE];
     if (cirque_gen6_read_report(packet, CGEN6_MAX_PACKET_SIZE) != I2C_STATUS_SUCCESS) {
-        return false;
+        return CGEN6_READ_FAILED;
     }
 
     uint8_t report_id = packet[2];
@@ -266,7 +276,7 @@ bool cirque_gen_6_read_report(cgen6_report_t *report) {
         report->contact_count         = packet[15];
         report->buttons               = packet[16];
 
-        return true;
+        return CGEN6_READ_OK;
     }
     // Mouse/relative mode report. The pad is always configured for PTP, so a
     // mouse report means it lost its configuration.
@@ -277,11 +287,11 @@ bool cirque_gen_6_read_report(cgen6_report_t *report) {
         report->yDelta      = packet[5];
         report->scrollDelta = packet[6];
         report->panDelta    = packet[7];
-        return true;
+        return CGEN6_READ_OK;
     }
 
     // Unknown or empty report - no valid data
-    return false;
+    return CGEN6_READ_EMPTY;
 }
 
 // Dumps sensor identification to the console. Enable with NAVIGATOR_TRACKPAD_DEBUG.
@@ -366,6 +376,31 @@ static bool trackpad_verify(uint8_t addr) {
     return (feed_config4 & CGEN6_FEED_CONFIG4_MODE_MASK) == CGEN6_FEED_CONFIG4_PTP;
 }
 
+#ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
+extern bool zsa_stm32_owns_right_bus(void);
+
+// Next probe uses the other address; cleared on every drop.
+static bool probe_other;
+
+// First probe after a drop: the real pad while the STM32 owns the right bus,
+// otherwise the address that last ACKed (the mirror ACKs whenever the left nRF
+// runs ESB, so it cannot rule out a pad on the left half). Then alternates.
+static uint8_t trackpad_select_addr(void) {
+    uint8_t first = zsa_stm32_owns_right_bus() ? NAVIGATOR_TRACKPAD_ADDRESS : busdev_addr(navigator_trackpad_dev);
+    uint8_t other = first == NAVIGATOR_TRACKPAD_ADDRESS ? NAVIGATOR_TRACKPAD_MIRROR_ADDRESS : NAVIGATOR_TRACKPAD_ADDRESS;
+    uint8_t addr  = probe_other ? other : first;
+
+    probe_other = !probe_other;
+    return addr;
+}
+
+static void trackpad_on_state(busdev_id_t id, busdev_state_t old_state, busdev_state_t new_state, uint8_t reason) {
+    if (new_state == BUSDEV_ABSENT) {
+        probe_other = false;
+    }
+}
+#endif
+
 static const busdev_desc_t trackpad_desc = {
     .name               = "nav_trackpad",
     .addr               = NAVIGATOR_TRACKPAD_ADDRESS,
@@ -373,11 +408,17 @@ static const busdev_desc_t trackpad_desc = {
     .settle_ms          = 20,
     .verify_interval_ms = 1000,
     .probe_timeout_ms   = NAVIGATOR_TRACKPAD_PROBE_TIMEOUT,
-    .max_err_streak     = 1,
+    .max_err_streak     = NAVIGATOR_TRACKPAD_MAX_ERR_STREAK,
+#ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
+    .select_addr        = trackpad_select_addr,
+    .on_state           = trackpad_on_state,
+#else
+    .select_addr        = NULL,
+    .on_state           = NULL,
+#endif
     .probe              = NULL,
     .init_step          = trackpad_init_step,
     .verify             = trackpad_verify,
-    .on_state           = NULL,
 };
 
 // Hands the pad over to the bus supervisor; presence and configuration are its

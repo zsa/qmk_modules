@@ -415,9 +415,10 @@ bool navigator_trackpad_ptp_task(void) {
 
     // Read the report data into local struct.
     //
-    // A failed read is one of two things: a genuine I2C/bus error (which the
-    // read helper reports to the supervisor, taking the device down), or a
-    // successful transaction that returned no touch packet. The Cirque streams
+    // A read that yields no report is one of two things: a failed I2C
+    // transaction (reported to the supervisor, which drops the device after a
+    // run of them), or a successful transaction that returned no touch packet.
+    // Only the second counts toward lift-off. The Cirque streams
     // reports continuously while any contact is present and goes quiet on
     // lift-off, so a *run* of empty reads means every finger has left the pad.
     //
@@ -429,6 +430,7 @@ bool navigator_trackpad_ptp_task(void) {
     // sensor_report below carries no fingers, so falling through drives cur_n==0
     // and nt_reconcile_contacts emits the release.
     cgen6_report_t sensor_report = {0};
+    cgen6_read_t   read          = CGEN6_READ_EMPTY;
     if (!busdev_is_up(navigator_trackpad_dev)) {
         // Off the bus: stay off it, but flush anything the host still tracks so
         // no contact is stranded. The zeroed report drives cur_n == 0 below.
@@ -436,13 +438,11 @@ bool navigator_trackpad_ptp_task(void) {
         if (host_contacts.count == 0 && !prev_finger0_tip) {
             return false;
         }
-    } else if (!cirque_gen_6_read_report(&sensor_report)) {
-        if (!busdev_is_up(navigator_trackpad_dev)) {
-            // Dead bus: let the supervisor recover; don't synthesize lift-offs
-            // off a failed transaction.
-            no_data_frames = 0;
-            return false;
-        }
+    } else if ((read = cirque_gen_6_read_report(&sensor_report)) == CGEN6_READ_FAILED) {
+        // Failed transaction: no output, contacts and lift-off count untouched.
+        // The supervisor drops the pad after a run of these.
+        return false;
+    } else if (read == CGEN6_READ_EMPTY) {
         if (host_contacts.count == 0) {
             // Pad already idle — nothing to release.
             no_data_frames = 0;

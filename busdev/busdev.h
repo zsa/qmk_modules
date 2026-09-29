@@ -119,6 +119,8 @@ bool    busdev_bus_suspect(void);
 uint8_t busdev_bus_timeout_streak(void);
 
 void busdev_report_error(busdev_id_t id, i2c_status_t status);
+// Successful driver transaction: clears the report_error() streak.
+void busdev_report_ok(busdev_id_t id);
 // Data plausibility failure. Ignored while the device is already being
 // reconfigured; takes it down after BUSDEV_MAX_SUSPECT_STREAK reports.
 void busdev_report_suspect(busdev_id_t id, uint8_t reason);
