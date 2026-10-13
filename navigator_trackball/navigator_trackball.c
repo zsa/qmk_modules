@@ -252,6 +252,26 @@ uint8_t zsa_nav_trackball_probe_state(void) {
     }
     return (busdev_addr(nav_dev) == NAVIGATOR_TRACKBALL_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
 }
+
+// Left nav probe window: the real bridge address, next. Up on the mirror, which
+// answers with or without a ball on the right, the real address is tried
+// directly and the device moves there only if the bridge answers.
+void zsa_nav_trackball_probe_local(void) {
+    if (busdev_is_up(nav_dev) && busdev_addr(nav_dev) != NAVIGATOR_TRACKBALL_ADDRESS) {
+        uint8_t spi_conf[2] = {SCI18IS606_CONF_SPI, SCI18IS606_CONF};
+        if (i2c_transmit(NAVIGATOR_TRACKBALL_ADDRESS, spi_conf, 2, NAVIGATOR_TRACKBALL_PROBE_TIMEOUT) != I2C_STATUS_SUCCESS) {
+            return;
+        }
+        busdev_force_down(nav_dev, BUSDEV_REASON_PROBE_ACK);
+    }
+    busdev_probe_now(nav_dev, NAVIGATOR_TRACKBALL_ADDRESS);
+}
+
+// The real bridge answered and is being brought up.
+bool zsa_nav_trackball_local_pending(void) {
+    busdev_state_t state = busdev_state(nav_dev);
+    return state != BUSDEV_ABSENT && state != BUSDEV_UP && busdev_addr(nav_dev) == NAVIGATOR_TRACKBALL_ADDRESS;
+}
 #endif
 
 // The bridge keeps ACKing across a transport switch, so only an explicit

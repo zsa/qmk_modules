@@ -5,10 +5,12 @@
 #include "zsa_uart_proto.h"
 #include "zsa_right_telemetry.h"
 
+/* ZSA_MSG_CMD_IDLE_STATE values. Only ACTIVE and SLEEP are sent; DIM and DEEP
+ * are kept for the wire and are never sent by this module. */
 enum zsa_idle_step {
     ZSA_IDLE_ACTIVE    = 0,
     ZSA_IDLE_DIM       = 1,
-    ZSA_IDLE_LEDS_OFF  = 2,  /* LEDs off + slow matrix scan */
+    ZSA_IDLE_SLEEP     = 2,  /* LEDs off, STM32 in STOP when wireless */
     ZSA_IDLE_DEEP      = 3,
 };
 
@@ -118,8 +120,12 @@ void zsa_wireless_cmd_ble_unpair(void);
 /* Hand over to the next remembered host. Sent by BLE_SWITCH_HOST. */
 void zsa_wireless_cmd_ble_switch_host(void);
 
-/* Idle power management */
+/* Power stage: ZSA_IDLE_ACTIVE or ZSA_IDLE_SLEEP. */
 enum zsa_idle_step zsa_wireless_idle_step(void);
+
+/* Keyboards override this to blank their status LEDs on entering Sleep and
+ * repaint them on leaving it. */
+void zsa_wireless_sleep_changed(bool sleeping);
 
 /* Low-level UART frame sender. Used by optional sub-modules like log_tap. */
 void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len);
@@ -165,3 +171,12 @@ enum zsa_nav_probe {
  * overrides its own. Return enum zsa_nav_probe. */
 uint8_t zsa_nav_trackball_probe_state(void);
 uint8_t zsa_nav_trackpad_probe_state(void);
+
+/* Left nav probe window, weak no-ops by default, one pair per nav module.
+ * probe_local: if the device is absent, probe its real address next; if it is
+ * up on the mirror, move it to the real address when that answers.
+ * local_pending: the real address answered and the device is not up yet. */
+void zsa_nav_trackball_probe_local(void);
+void zsa_nav_trackpad_probe_local(void);
+bool zsa_nav_trackball_local_pending(void);
+bool zsa_nav_trackpad_local_pending(void);

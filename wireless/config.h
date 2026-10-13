@@ -4,28 +4,46 @@
 #    define ZSA_WIRELESS_BAUD_RATE 1000000
 #endif
 
-/* Idle power-down (DIM/LEDS_OFF/DEEP) disabled by default for every build —
- * the board stays fully awake. Remove this define to restore normal idle
- * behavior. */
-#ifndef ZSA_DEV_NO_SLEEP
-#    define ZSA_DEV_NO_SLEEP
+/* Power stages: Active -> Sleep after ZSA_SLEEP_TIMEOUT_MS without input ->
+ * Hibernate (both halves in PMIC ship mode) after ZSA_HIBERNATE_TIMEOUT_MS
+ * without input. Both count from the last input. Define ZSA_DEV_NO_SLEEP to
+ * keep the board in Active. */
+#ifndef ZSA_SLEEP_TIMEOUT_MS
+#    define ZSA_SLEEP_TIMEOUT_MS 60000
+#endif
+#ifndef ZSA_HIBERNATE_TIMEOUT_MS
+#    define ZSA_HIBERNATE_TIMEOUT_MS 600000
 #endif
 
-/* Idle power management defaults */
-#ifndef ZSA_IDLE_DIM_MS
-#    define ZSA_IDLE_DIM_MS 30000
+/* How long the STM32 stays running after a wake from STOP, or after the last
+ * byte from the nRF, before it may stop again. Covers the debounce and the
+ * first read of the mirrored right half and nav devices. */
+#ifndef ZSA_SLEEP_WAKE_WINDOW_MS
+#    define ZSA_SLEEP_WAKE_WINDOW_MS 50
 #endif
-#ifndef ZSA_IDLE_LEDS_OFF_MS
-#    define ZSA_IDLE_LEDS_OFF_MS 120000
+
+/* Longest the STM32 waits for the black LED frame to reach both drivers
+ * before its first STOP. */
+#ifndef ZSA_SLEEP_LED_SETTLE_MS
+#    define ZSA_SLEEP_LED_SETTLE_MS 1000
 #endif
-#ifndef ZSA_IDLE_DEEP_MS
-#    define ZSA_IDLE_DEEP_MS 300000
+
+/* Left boost for the left nav connector (CMD_NAV_BOOST). Without a nav device
+ * answering on the STM32's own bus, the left boost is off and a probe window
+ * turns it on: at boot, on leaving Sleep, when a present device stops
+ * answering, every ZSA_NAV_PROBE_INTERVAL_MS while Active, and every
+ * ZSA_NAV_PROBE_SLEEP_INTERVAL_MS while in Sleep (the STM32 leaves STOP for
+ * it; a device found wakes the board). A window lasts ZSA_NAV_PROBE_WINDOW_MS
+ * from the request, longer while a device that answered is still being set
+ * up. Not used in builds without nav modules. */
+#ifndef ZSA_NAV_PROBE_INTERVAL_MS
+#    define ZSA_NAV_PROBE_INTERVAL_MS 2000
 #endif
-#ifndef ZSA_IDLE_DIM_BRIGHTNESS
-#    define ZSA_IDLE_DIM_BRIGHTNESS 128
+#ifndef ZSA_NAV_PROBE_SLEEP_INTERVAL_MS
+#    define ZSA_NAV_PROBE_SLEEP_INTERVAL_MS 30000
 #endif
-#ifndef ZSA_IDLE_SCAN_DELAY_MS
-#    define ZSA_IDLE_SCAN_DELAY_MS 50
+#ifndef ZSA_NAV_PROBE_WINDOW_MS
+#    define ZSA_NAV_PROBE_WINDOW_MS 150
 #endif
 
 /* Minimum spacing between flushes of the right-half LED driver (0x77) while

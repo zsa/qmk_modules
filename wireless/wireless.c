@@ -31,8 +31,8 @@
 #    include "is31fl3731.h"
 #endif
 
-/* keyboard.c — not in keyboard.h but we need it to reset the idle timer */
-void last_matrix_activity_trigger(void);
+/* keyboard.c — not in keyboard.h: digitizer reports count as input */
+void last_pointing_device_activity_trigger(void);
 
 /* ---- Independent watchdog ----
  *
@@ -44,7 +44,7 @@ void last_matrix_activity_trigger(void);
  *
  * Kick points cover every steady state of the firmware:
  *   - bluetooth_task()        — every keyboard_task() pass, wired or not
- *   - the slow-scan idle loop — bypasses keyboard_task() while idle
+ *   - the STOP loop           — every RTC wakeup while the STM32 is stopped
  *
  * USB suspend needs no kick of its own. This module sets BLUETOOTH_ENABLE,
  * and common_features.mk forces NO_USB_STARTUP_CHECK with it, which compiles
@@ -55,9 +55,9 @@ void last_matrix_activity_trigger(void);
  * so a suspend_power_down_wireless() hook would be dead code.
  *
  * The IWDG is disabled by any MCU reset, so bootloader_jump's soft reset
- * into Ignition (which arms its own watchdog) is unaffected. On battery
- * DEEP idle, the nRF cuts the rail (ship mode) — the watchdog dies with
- * the MCU, and if ship mode never engages the main loop keeps kicking.
+ * into Ignition (which arms its own watchdog) is unaffected. On Hibernate the
+ * nRF cuts the rail (ship mode) — the watchdog dies with the MCU, and if ship
+ * mode never engages the main loop keeps kicking.
  *
  * STM32-only: both boards that pull this module in are STM32F303, but the
  * register access is guarded so a non-STM32 target still compiles.
@@ -263,7 +263,6 @@ static uint8_t left_led_block;        /* next block to send */
 static bool    left_led_cycle_active; /* a frame is part-sent */
 static bool    left_frame_ready;      /* left_led_frame holds a whole frame to send */
 static uint8_t left_led_frame[IS31FL3731_PWM_REGISTER_COUNT]; /* the frame the cycle sends */
-static bool    left_led_flush_now;    /* let one blocking flush through */
 
 /* Drops a part-sent left frame and asks for the whole frame again. */
 static void left_led_slice_abandon(void) {
@@ -271,17 +270,8 @@ static void left_led_slice_abandon(void) {
     left_frame_ready      = false;
     is31fl3731_set_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT, true);
 }
-
-/* Hands the left frame to the next blocking flush instead of the slicer, for
- * the callers that need it on the chip before the main loop stops running. */
-static void left_led_flush_once(void) {
-    left_led_cycle_active = false;
-    left_frame_ready      = false;
-    left_led_flush_now    = true;
-}
 #    else
 #        define left_led_slice_abandon() ((void)0)
-#        define left_led_flush_once() ((void)0)
 #    endif
 #endif
 
@@ -371,11 +361,15 @@ static uint32_t last_nav_announce_ms = 0;
 
 static struct zsa_parser rx_parser;
 
-/* ---- Idle state (declared early for use in handle_rx_frame) ---- */
+/* ---- Power stage (declared early for use in handle_rx_frame) ---- */
 
-static enum zsa_idle_step idle_step       = ZSA_IDLE_ACTIVE;
-static uint32_t           nrf_wake_time  = 0;
-static bool               nrf_ship_mode  = false;
+static enum zsa_idle_step idle_step = ZSA_IDLE_ACTIVE;
+/* Last byte received from the nRF; a sleeping STM32 stays up a window after
+ * it. */
+static uint32_t last_rx_ms;
+/* CMD_HIBERNATE went out for the current Sleep. Cleared when VBUS changes,
+ * since the nRF refuses it while VBUS is present. */
+static bool hibernate_sent;
 
 /* ---- Boot power gate ---- *
  *
@@ -510,7 +504,7 @@ static void send_command(uint8_t type) {
     zsa_wireless_send_frame(type, NULL, 0);
 }
 
-static void idle_power_wake(void);
+static void sleep_exit(void);
 static void send_usb_state(bool connected);
 static void send_trrs_state(bool plugged);
 static void send_idle_state(enum zsa_idle_step step);
@@ -565,6 +559,127 @@ static void nav_announce_task(void) {
     last_nav_announce_ms = timer_read32();
 }
 
+/* ---- Left nav boost ---- *
+ *
+ * The left boost powers the left nav connector. The left nRF keeps it off on
+ * VBUS, on with the TRRS cable plugged, and otherwise on only while
+ * CMD_NAV_BOOST claims it (off for a build without nav support, CMD_NAV_ENABLE
+ * 0). A left nav device sits on our own bus and cannot answer with the boost
+ * off, so the claim is held while one answers at its real address, and
+ * otherwise only for a probe window: the claim goes out, the real addresses
+ * are probed every NAV_PROBE_KICK_MS from NAV_PROBE_FIRST_KICK_MS on, and the
+ * claim is dropped after ZSA_NAV_PROBE_WINDOW_MS unless a device answered.
+ * Windows open at link-up, on leaving Sleep, when a present device stops
+ * answering, every ZSA_NAV_PROBE_INTERVAL_MS while Active and every
+ * ZSA_NAV_PROBE_SLEEP_INTERVAL_MS of Sleep time (STOP included). A device found
+ * by a Sleep window wakes the board. None while the connector is powered anyway
+ * (VBUS or cable), where the bus supervisor's own probes find a device. */
+#define NAV_PROBE_FIRST_KICK_MS 40
+#define NAV_PROBE_KICK_MS 30
+/* Longest a window stays open past ZSA_NAV_PROBE_WINDOW_MS while a device that
+ * answered is being set up. */
+#define NAV_PROBE_PENDING_MAX_MS 1000
+
+static bool     nav_boost_sent;            /* last claim sent */
+static bool     nav_boost_dirty = true;    /* the nRF may not hold the claim */
+static bool     nav_window_open;
+static bool     nav_window_request = true; /* open a window at the next chance */
+static uint32_t nav_window_start_ms;
+static uint32_t nav_window_end_ms;
+static uint8_t  nav_window_kicks;
+static bool     nav_window_sleep;      /* opened by the Sleep interval */
+static uint32_t nav_sleep_due_ms;      /* next Sleep window, in sleep_clock_ms() time */
+static bool     nav_left_present;
+
+static uint32_t sleep_clock_ms(void);
+
+static bool nav_left_local(void) {
+    return zsa_nav_trackball_probe_state() == ZSA_NAV_PROBE_LOCAL || zsa_nav_trackpad_probe_state() == ZSA_NAV_PROBE_LOCAL;
+}
+
+static bool nav_left_pending(void) {
+    return zsa_nav_trackball_local_pending() || zsa_nav_trackpad_local_pending();
+}
+
+static void send_nav_boost(bool needed) {
+    struct zsa_nav_boost b = {.needed = needed ? 1 : 0};
+    zsa_wireless_send_frame(ZSA_MSG_CMD_NAV_BOOST, (const uint8_t *)&b, sizeof(b));
+    nav_boost_sent  = needed;
+    nav_boost_dirty = false;
+}
+
+static void nav_window_close(void) {
+    nav_window_open   = false;
+    nav_window_sleep  = false;
+    nav_window_end_ms = timer_read32();
+    if (idle_step != ZSA_IDLE_ACTIVE) {
+        nav_sleep_due_ms = sleep_clock_ms() + ZSA_NAV_PROBE_SLEEP_INTERVAL_MS;
+    }
+}
+
+/* Sleep windows apply: nav support, a link, and the connector unpowered. */
+static bool nav_sleep_windows(void) {
+    return nav_cap_mask != 0 && link_ready && !nrf_vbus_present && !zsa_trrs_plugged();
+}
+
+/* The nRF holds the final claim: STOP may follow. */
+static bool nav_boost_settled(void) {
+    return nav_cap_mask == 0 || !link_ready || (!nav_window_open && !nav_boost_dirty);
+}
+
+static void nav_boost_task(void) {
+    if (nav_cap_mask == 0 || !link_ready) {
+        return;
+    }
+
+    bool present = nav_left_local();
+    if (nav_left_present && !present) {
+        nav_window_request = true;
+    }
+    nav_left_present = present;
+
+    if (nrf_vbus_present || zsa_trrs_plugged()) {
+        nav_window_request = false;
+        if (nav_window_open) {
+            nav_window_close();
+        }
+        nav_window_end_ms = timer_read32();
+    } else if (nav_window_open) {
+        uint32_t elapsed = timer_elapsed32(nav_window_start_ms);
+        if (present) {
+            bool wake = nav_window_sleep && idle_step != ZSA_IDLE_ACTIVE;
+            nav_window_close();
+            if (wake) {
+                /* A device plugged while asleep: input. */
+                zsa_log("power: left nav found in sleep");
+                last_pointing_device_activity_trigger();
+                sleep_exit();
+            }
+        } else if (elapsed >= ZSA_NAV_PROBE_WINDOW_MS && (!nav_left_pending() || elapsed >= ZSA_NAV_PROBE_WINDOW_MS + NAV_PROBE_PENDING_MAX_MS)) {
+            nav_window_close();
+        } else if (elapsed >= NAV_PROBE_FIRST_KICK_MS + (uint32_t)nav_window_kicks * NAV_PROBE_KICK_MS) {
+            nav_window_kicks++;
+            zsa_nav_trackball_probe_local();
+            zsa_nav_trackpad_probe_local();
+        }
+    } else if (!present && !zsa_wireless_dfu_active()) {
+        bool due_sleep = idle_step != ZSA_IDLE_ACTIVE && sleep_clock_ms() >= nav_sleep_due_ms;
+        bool due       = due_sleep || (idle_step == ZSA_IDLE_ACTIVE && timer_elapsed32(nav_window_end_ms) >= ZSA_NAV_PROBE_INTERVAL_MS);
+        if (nav_window_request || due) {
+            nav_window_request  = false;
+            nav_window_open     = true;
+            nav_window_sleep    = due_sleep;
+            nav_window_start_ms = timer_read32();
+            nav_window_kicks    = 0;
+        }
+    }
+
+    bool needed = present || nav_window_open;
+    if (needed != nav_boost_sent || nav_boost_dirty) {
+        send_nav_boost(needed);
+    }
+}
+
 /* Fail-safe gate for the indicators. The nRF refreshes the pair state every
  * second; a lapse means the link is gone, and a stale state must not leave the
  * LED lit. pair_state_seen covers boot, where last_pair_state_ms and
@@ -579,18 +694,11 @@ static bool pair_advertising(void) {
     return nrf_discovery_active && pair_state_fresh();
 }
 
-/* A pairing starting is worth showing: leave the idle steps and power the matrix
- * back up. Discoverability deliberately does not do this — it can run for two
- * minutes and would pin the LEDs on. */
+/* A pairing starting is worth showing: leave Sleep, which restores the matrix
+ * the way it was. Discoverability deliberately does not do this — it can run
+ * for two minutes and would pin the LEDs on. */
 static void pair_confirm_wake(void) {
-    if (idle_step != ZSA_IDLE_ACTIVE) {
-        idle_power_wake();
-    }
-#ifdef RGB_MATRIX_ENABLE
-    if (power_gate_allows_rgb()) {
-        rgb_matrix_enable_noeeprom();
-    }
-#endif
+    sleep_exit();
 }
 
 bool zsa_wireless_dfu_active(void) {
@@ -613,10 +721,10 @@ static void dfu_set_active(bool active) {
     nrf_dfu_active = active;
     zsa_log("dfu: %s", active ? "active" : "idle");
 
-    /* An update produces no key activity, so hold the idle steps off rather
-     * than let the board power down mid-transfer. */
-    if (active && idle_step != ZSA_IDLE_ACTIVE) {
-        idle_power_wake();
+    /* An update produces no key activity, so leave Sleep rather than let the
+     * board power down mid-transfer. */
+    if (active) {
+        sleep_exit();
     }
 
     clear_keyboard();
@@ -647,6 +755,8 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
              * our nav capabilities immediately and wait for a fresh ack. */
             nav_announce_acked   = false;
             last_nav_announce_ms = 0;
+            /* The nRF drops the boost claim on LINK_UP and on reboot. */
+            nav_boost_dirty = true;
             /* Same reasoning for the power budget: forget what the old link
              * said until the nRF re-reports its real budget (sent right after
              * link-up). Back to DEFAULT, the profile the PMICs are already on.
@@ -663,12 +773,6 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             dfu_set_active(false);
             /* nrf_vbus_present is left alone: the nRF re-reports it right
              * after link-up via send_nrf_state(). */
-            /* nRF rebooted (e.g. after ship mode) — clear ship flag */
-            if (nrf_ship_mode) {
-                nrf_ship_mode = false;
-                nrf_wake_time = timer_read32();
-                idle_power_wake();
-            }
             send_full_state();
             break;
 
@@ -678,12 +782,6 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 zsa_rtt_event(s->connected ? "BLE_STATUS connected" : "BLE_STATUS disconnected"); // TEMP DEBUG
                 nrf_ble_connected  = s->connected != 0;
                 nrf_ble_device_idx = s->device_idx;
-                /* nRF is back from ship mode */
-                nrf_ship_mode = false;
-                nrf_wake_time = timer_read32();
-                if (idle_step != ZSA_IDLE_ACTIVE) {
-                    idle_power_wake();
-                }
             }
             break;
 
@@ -758,8 +856,8 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 bool rail_on = (r->rails & ZSA_LED_RAIL_LEFT) != 0;
                 // The nRF also reports this on unrelated transitions (usb_connected,
                 // idle_step), so only resync on the OFF->ON edge - rail power actually
-                // returning after LEDS_OFF idle. A repeated "on" report is a no-op.
-                if (rail_on && !left_led_rail_on && idle_step < ZSA_IDLE_LEDS_OFF && power_gate_allows_rgb()) {
+                // returning after Sleep. A repeated "on" report is a no-op.
+                if (rail_on && !left_led_rail_on && idle_step == ZSA_IDLE_ACTIVE && power_gate_allows_rgb()) {
                     zsa_rtt_event("LED_RAIL -> resync"); // TEMP DEBUG
                     // The rail powers the left chip, which is not supervised:
                     // resync it here. The right one goes through the supervisor.
@@ -838,6 +936,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                      * leaves the board on the default profile until the next
                      * 5 s tick. */
                     limits_commanded = false;
+                    hibernate_sent   = false;
                     zsa_wireless_vbus_changed(present);
                 }
             }
@@ -1003,6 +1102,18 @@ __attribute__((weak)) uint8_t zsa_nav_trackball_probe_state(void) {
 
 __attribute__((weak)) uint8_t zsa_nav_trackpad_probe_state(void) {
     return ZSA_NAV_PROBE_UNSUPPORTED;
+}
+
+__attribute__((weak)) void zsa_nav_trackball_probe_local(void) {}
+
+__attribute__((weak)) void zsa_nav_trackpad_probe_local(void) {}
+
+__attribute__((weak)) bool zsa_nav_trackball_local_pending(void) {
+    return false;
+}
+
+__attribute__((weak)) bool zsa_nav_trackpad_local_pending(void) {
+    return false;
 }
 
 /* ---- Telemetry (oryx raw-HID ORYX_CMD_GET_TELEMETRY) ---- */
@@ -1331,39 +1442,81 @@ static void trrs_state_task(void) {
     primed       = true;
 }
 
-static void idle_power_enter_step(enum zsa_idle_step step) {
+/* ---- Power stages ----
+ *
+ * Active: everything on. Sleep, after ZSA_SLEEP_TIMEOUT_MS without input: the
+ * matrix and status LEDs off, the nRF told (CMD_IDLE_STATE 2), and, wireless on
+ * battery, the STM32 in STOP between wakes (sleep_stop_task). Hibernate, after
+ * ZSA_HIBERNATE_TIMEOUT_MS without input: CMD_HIBERNATE, and the nRF ships both
+ * halves. Any input in Sleep goes back to Active; nothing comes back from
+ * Hibernate but the hardware wake.
+ *
+ * QMK's timer does not run in STOP, so time spent there is counted separately
+ * (sleep_stop_ms) and added for the hibernate step. */
+static uint32_t sleep_idle_base_ms; /* idle time when Sleep began */
+static uint32_t sleep_entered_ms;
+static uint32_t sleep_stop_ms;      /* time in STOP since Sleep began */
+static uint32_t sleep_awake_ms;     /* start of the current running window */
+static uint32_t sleep_window_ms;    /* its length */
+static uint32_t sleep_input_mark;   /* last_input_activity_time() when it began */
 #ifdef RGB_MATRIX_ENABLE
-    if (step >= ZSA_IDLE_LEDS_OFF && idle_step < ZSA_IDLE_LEDS_OFF) {
-        rgb_matrix_disable_noeeprom();
-        /* Force LEDs off immediately — rgb_matrix_task() won't run
-         * inside the slow-scan loop to pick up the disable flag. */
-        rgb_matrix_set_color_all(0, 0, 0);
-        /* The slow-scan loop doesn't run the slicer either, so this one has to
-         * go out whole. */
-        left_led_flush_once();
-        rgb_matrix_driver.flush();
-    }
+static bool sleep_rgb_on; /* the matrix was on when Sleep began */
 #endif
-    zsa_log("idle: step %u -> %u", (unsigned)idle_step, (unsigned)step);
-    idle_step = step;
-    if (step == ZSA_IDLE_DEEP) {
-        nrf_ship_mode = true;
-    }
-    send_idle_state(step);
+/* Start of the idle count when it is not the last input: a transport switch,
+ * or the end of an update, a pairing or a Sleep left for another reason. */
+static uint32_t idle_floor_ms;
+
+/* Time since Sleep began, STOP included. */
+static uint32_t sleep_clock_ms(void) {
+    return timer_elapsed32(sleep_entered_ms) + sleep_stop_ms;
 }
 
-static void idle_power_wake(void) {
-    /* Note: when waking from LEDS_OFF, the LED drivers (IS31FL3731) are
-     * resynced when the nRF sends EVT_LED_RAIL after re-enabling BUCK1. */
-    zsa_log("idle: wake from step %u", (unsigned)idle_step);
-    idle_step = ZSA_IDLE_ACTIVE;
-    send_idle_state(ZSA_IDLE_ACTIVE);
+/* Keyboards override this to drive their own status LEDs. */
+__attribute__((weak)) void zsa_wireless_sleep_changed(bool sleeping) { (void)sleeping; }
 
-    /* Reset the activity timer so idle_power_task() doesn't
-     * immediately re-enter the idle state.  The slow-scan loop
-     * calls matrix_scan() directly, which consumes the key-change
-     * before matrix_task() can see it. */
-    last_matrix_activity_trigger();
+static void sleep_enter(uint32_t idle_ms) {
+    zsa_log("power: sleep");
+    idle_step = ZSA_IDLE_SLEEP;
+    send_idle_state(idle_step);
+
+    sleep_idle_base_ms = idle_ms;
+    sleep_entered_ms   = timer_read32();
+    sleep_awake_ms     = sleep_entered_ms;
+    sleep_window_ms    = ZSA_SLEEP_WAKE_WINDOW_MS;
+    sleep_stop_ms      = 0;
+    sleep_input_mark   = last_input_activity_time();
+    hibernate_sent     = false;
+    nav_sleep_due_ms   = ZSA_NAV_PROBE_SLEEP_INTERVAL_MS;
+
+#ifdef RGB_MATRIX_ENABLE
+    /* rgb_matrix_task() renders and flushes black while disabled. */
+    sleep_rgb_on = rgb_matrix_is_enabled();
+    if (sleep_rgb_on) {
+        rgb_matrix_disable_noeeprom();
+    }
+    rgb_matrix_set_color_all(0, 0, 0);
+#endif
+    zsa_wireless_sleep_changed(true);
+}
+
+/* Back to Active, restoring what sleep_enter() turned off. No-op when Active.
+ * The LED drivers are resynced when the nRF reports the LED rail back on. */
+static void sleep_exit(void) {
+    if (idle_step == ZSA_IDLE_ACTIVE) {
+        return;
+    }
+    zsa_log("power: active");
+    idle_step          = ZSA_IDLE_ACTIVE;
+    idle_floor_ms      = timer_read32();
+    nav_window_request = true;
+    send_idle_state(idle_step);
+
+#ifdef RGB_MATRIX_ENABLE
+    if (sleep_rgb_on && power_gate_allows_rgb()) {
+        rgb_matrix_enable_noeeprom();
+    }
+#endif
+    zsa_wireless_sleep_changed(false);
 }
 
 /* Called on both USB<->wireless transitions. Nav modules override this to
@@ -1482,8 +1635,7 @@ bool zsa_wireless_pair_led_active(void) {
 /* Blinks the status LED: fast while a pairing is in progress, slow while
  * discoverable, released otherwise. The phase comes from the absolute clock
  * rather than elapsed-time toggling, so the blink rate is independent of how
- * often this runs — it is called both from bluetooth_task() and from inside
- * the idle slow-scan loop.
+ * often bluetooth_task() runs.
  *
  * Shares its pin with the update indication, which outranks it: while that
  * owns the green LED nothing is written here, and the current state is
@@ -1521,125 +1673,374 @@ static void status_led_task(void) {
     pair_led_task();
 }
 
-static void idle_power_task(void) {
-    static bool     was_bluetooth  = false;
-    static uint32_t bt_switch_time = 0;
+#if defined(MCU_STM32) && defined(STM32F3XX)
+/* ---- STM32 STOP mode ----
+ *
+ * Left matrix (voyager_tng/matrix.c): strobes B10-B15 drive high, sense inputs
+ * A0-A3, A6, A7, B0 are pulled down, so a key press is a rising edge. A0 and B0
+ * share EXTI0, which goes to B0 (three keys); the one key on A0 is read at
+ * every RTC wakeup instead. USART1 RX (PA10, EXTI10) wakes on the falling edge
+ * of the nRF's wake preamble or of any frame. The IWDG keeps counting in STOP,
+ * so the RTC wakeup timer (LSI, EXTI20) wakes every STOP_RTC_PERIOD_MS to kick
+ * it and to read A0, and goes straight back to STOP.
+ *
+ * The lines are unmasked in IMR for the duration so EXTI->PR records which one
+ * fired; nothing is serviced, since the system is locked and PR and the NVIC
+ * pending bits are cleared before unlocking. */
+#    define STOP_ROW_LINES_A 0xCEu /* A1-A3, A6, A7 */
+#    define STOP_ROW_LINES (STOP_ROW_LINES_A | 0x01u)
+#    define STOP_UART_LINE (1u << 10)
+#    define STOP_RTC_LINE (1u << 20)
+#    define STOP_WAKE_LINES (STOP_ROW_LINES | STOP_UART_LINE)
+#    define STOP_ALL_LINES (STOP_WAKE_LINES | STOP_RTC_LINE)
+/* RTC wakeup on RTCCLK/16: 2.5 kHz at the nominal 40 kHz LSI. */
+#    define STOP_RTC_PERIOD_MS 16u
+#    define STOP_RTC_WUTR (STOP_RTC_PERIOD_MS * 40u / 16u - 1u)
 
-    /* Only manage idle power when running wirelessly */
+_Static_assert(STOP_RTC_PERIOD_MS * 4u < ZSA_WATCHDOG_TIMEOUT_MS, "RTC wakeup must kick the IWDG well inside its timeout");
+
+static const pin_t stop_strobes_pins[] = {B10, B11, B12, B13, B14, B15};
+
+static void stop_strobes(bool high) {
+    for (uint8_t i = 0; i < sizeof(stop_strobes_pins) / sizeof(stop_strobes_pins[0]); i++) {
+        gpio_write_pin(stop_strobes_pins[i], high);
+    }
+}
+
+/* Needs the strobes high. */
+static bool stop_left_key_down(void) {
+    return (GPIOA->IDR & (STOP_ROW_LINES_A | 0x01u)) != 0 || (GPIOB->IDR & 0x01u) != 0;
+}
+
+static void stop_rtc_wakeup(bool on) {
+    PWR->CR |= PWR_CR_DBP;
+    RTC->WPR = 0xCAu;
+    RTC->WPR = 0x53u;
+    RTC->CR &= ~(RTC_CR_WUTE | RTC_CR_WUTIE);
+    if (on) {
+        while ((RTC->ISR & RTC_ISR_WUTWF) == 0) {
+        }
+        RTC->WUTR = STOP_RTC_WUTR;
+        RTC->CR   = (RTC->CR & ~RTC_CR_WUCKSEL) | RTC_CR_WUTIE | RTC_CR_WUTE; /* WUCKSEL 0: RTCCLK/16 */
+    }
+    RTC->ISR = ~(RTC_ISR_WUTF | RTC_ISR_INIT);
+    RTC->WPR = 0xFFu;
+}
+
+/* nRST_STOP = 0 would reset on STOP entry; the RTC must run on LSI. */
+static bool stop_supported(void) {
+    return (FLASH->OBR & FLASH_OBR_nRST_STOP) != 0 && (RCC->BDCR & RCC_BDCR_RTCEN) != 0 && (RCC->BDCR & RCC_BDCR_RTCSEL) == RCC_BDCR_RTCSEL_LSI;
+}
+
+/* Lets the last frame leave before the clock stops. */
+static void stop_uart_drain(void) {
+    uint32_t start = timer_read32();
+
+    while (timer_elapsed32(start) < 5) {
+        if (oqIsEmptyI(&UART_DRIVER.oqueue) && (UART_DRIVER.usart->ISR & USART_ISR_TC)) {
+            return;
+        }
+    }
+}
+
+static bool stop_rx_pending(void) {
+    return !iqIsEmptyI(&UART_DRIVER.iqueue) || (UART_DRIVER.usart->ISR & (USART_ISR_RXNE | USART_ISR_BUSY));
+}
+
+enum stop_wake {
+    STOP_WAKE_NONE = 0, /* did not stop: input was already pending */
+    STOP_WAKE_INPUT,    /* a left key */
+    STOP_WAKE_UART,     /* the nRF */
+    STOP_WAKE_TIMEOUT,  /* max_ms of RTC time ran out */
+};
+
+/* STOP until a left key, a byte from the nRF, or max_ms of RTC time. *stopped_ms
+ * gets the time spent stopped, counted in RTC periods. */
+static enum stop_wake stm32_stop(uint32_t max_ms, uint32_t *stopped_ms) {
+    enum stop_wake why        = STOP_WAKE_NONE;
+    uint32_t       rtc_wakes  = 0;
+    uint32_t       max_wakes  = max_ms / STOP_RTC_PERIOD_MS;
+    *stopped_ms               = 0;
+
+    stop_uart_drain();
+
+    rccEnableAPB2(RCC_APB2ENR_SYSCFGEN, true);
+    uint32_t exticr0 = SYSCFG->EXTICR[0];
+    uint32_t exticr1 = SYSCFG->EXTICR[1];
+    uint32_t exticr2 = SYSCFG->EXTICR[2];
+    uint32_t imr     = EXTI->IMR;
+    uint32_t imr2    = EXTI->IMR2;
+    uint32_t emr     = EXTI->EMR;
+    uint32_t rtsr    = EXTI->RTSR;
+    uint32_t ftsr    = EXTI->FTSR;
+
+    stop_strobes(true);
+    wait_us(30);
+
+    chSysLock();
+    /* EXTI0 = PB0, EXTI1-3 = PA1-PA3, EXTI6-7 = PA6-PA7, EXTI10 = PA10. */
+    SYSCFG->EXTICR[0] = 0x0001u;
+    SYSCFG->EXTICR[1] = exticr1 & ~0xFF00u;
+    SYSCFG->EXTICR[2] = exticr2 & ~0x0F00u;
+    EXTI->IMR         = STOP_ALL_LINES;
+    EXTI->IMR2        = 0;
+    EXTI->RTSR        = STOP_ROW_LINES | STOP_RTC_LINE;
+    EXTI->FTSR        = STOP_UART_LINE;
+    EXTI->EMR         = STOP_ALL_LINES;
+    EXTI->PR          = STOP_ALL_LINES;
+    stop_rtc_wakeup(true);
+
+    if (stop_rx_pending() || stop_left_key_down()) {
+        goto restore;
+    }
+
+    PWR->CR = (PWR->CR & ~PWR_CR_PDDS) | PWR_CR_LPDS;
+    SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+    for (;;) {
+        watchdog_kick();
+        /* SEV + WFE clears the event latch; an edge after this is in PR. */
+        __SEV();
+        __WFE();
+        uint32_t pr = EXTI->PR;
+        if (pr & STOP_UART_LINE) {
+            why = STOP_WAKE_UART;
+            break;
+        }
+        if ((pr & STOP_ROW_LINES) || stop_left_key_down()) {
+            why = STOP_WAKE_INPUT;
+            break;
+        }
+        if (rtc_wakes >= max_wakes) {
+            why = STOP_WAKE_TIMEOUT;
+            break;
+        }
+        __WFE();
+        if (RTC->ISR & RTC_ISR_WUTF) {
+            rtc_wakes++;
+            RTC->ISR = ~(RTC_ISR_WUTF | RTC_ISR_INIT);
+            EXTI->PR = STOP_RTC_LINE;
+        }
+    }
+    SCB->SCR &= ~SCB_SCR_SLEEPDEEP_Msk;
+    watchdog_kick();
+
+    /* STOP wakes on HSI: back to HSE + PLL. */
+    stm32_clock_init();
+
+restore:
+    stop_rtc_wakeup(false);
+    EXTI->EMR         = emr;
+    EXTI->RTSR        = rtsr;
+    EXTI->FTSR        = ftsr;
+    EXTI->PR          = STOP_ALL_LINES;
+    EXTI->IMR         = imr;
+    EXTI->IMR2        = imr2;
+    SYSCFG->EXTICR[0] = exticr0;
+    SYSCFG->EXTICR[1] = exticr1;
+    SYSCFG->EXTICR[2] = exticr2;
+    NVIC_ClearPendingIRQ(EXTI0_IRQn);
+    NVIC_ClearPendingIRQ(EXTI1_IRQn);
+    NVIC_ClearPendingIRQ(EXTI2_TSC_IRQn);
+    NVIC_ClearPendingIRQ(EXTI3_IRQn);
+    NVIC_ClearPendingIRQ(EXTI9_5_IRQn);
+    NVIC_ClearPendingIRQ(EXTI15_10_IRQn);
+    NVIC_ClearPendingIRQ(RTC_WKUP_IRQn);
+    chSysUnlock();
+
+    stop_strobes(false);
+
+    if (why != STOP_WAKE_NONE) {
+        /* What arrived while the clocks were restarting is noise. */
+        while (uart_available()) {
+            (void)uart_read();
+        }
+        zsa_parser_init(&rx_parser);
+    }
+
+    *stopped_ms = rtc_wakes * STOP_RTC_PERIOD_MS;
+    return why;
+}
+#else
+static bool stop_supported(void) {
+    return false;
+}
+enum stop_wake { STOP_WAKE_NONE = 0, STOP_WAKE_INPUT, STOP_WAKE_UART, STOP_WAKE_TIMEOUT };
+static enum stop_wake stm32_stop(uint32_t max_ms, uint32_t *stopped_ms) {
+    (void)max_ms;
+    *stopped_ms = 0;
+    return STOP_WAKE_NONE;
+}
+#endif
+
+/* After a wake by the nRF. Long enough to catch the next of the LINK_UP probes
+ * a rebooted nRF sends every 100 ms, which carry no preamble. */
+#define SLEEP_UART_WAKE_WINDOW_MS 150u
+
+/* STOP is used only where every input can wake it: wireless on battery, no nav
+ * device on the STM32's own bus, nothing held down, and no status LED blinking
+ * (it would freeze lit). Nor during a left nav probe window, or before the nRF
+ * has the boost claim that ends it. */
+static bool sleep_stop_allowed(void) {
+    if (!stop_supported() || nrf_vbus_present || zsa_stm32_owns_right_bus()) {
+        return false;
+    }
+    if (nav_left_local() || !nav_boost_settled()) {
+        return false;
+    }
+    if (pair_led_owned || dfu_led_green_owned || dfu_led_red_owned) {
+        return false;
+    }
+    for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
+        if (matrix_get_row(row)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The black frame has reached both LED drivers, or stopped trying. */
+static bool sleep_leds_settled(void) {
+#ifdef RGB_MATRIX_ENABLE
+    if (timer_elapsed32(sleep_entered_ms) >= ZSA_SLEEP_LED_SETTLE_MS) {
+        return true;
+    }
+    if (is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT)) {
+        return false;
+    }
+    if (voyager_right_led_up() && is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT)) {
+        return false;
+    }
+#    if ZSA_LEFT_LED_SLICED
+    if (left_led_cycle_active) {
+        return false;
+    }
+#    endif
+#    if ZSA_RIGHT_LED_SLICED
+    if (right_led_cycle_active) {
+        return false;
+    }
+#    endif
+#endif
+    return true;
+}
+
+/* Stops once the running window has passed. idle_ms is the idle time so far;
+ * a pending hibernate bounds the stop. */
+static void sleep_stop_task(uint32_t idle_ms) {
+    if (!sleep_stop_allowed() || !sleep_leds_settled()) {
+        return;
+    }
+    if (timer_elapsed32(sleep_awake_ms) < sleep_window_ms || timer_elapsed32(last_rx_ms) < ZSA_SLEEP_WAKE_WINDOW_MS) {
+        return;
+    }
+
+    uint32_t max_ms = UINT32_MAX;
+    if (!hibernate_sent && link_ready) {
+        /* The last stretch before the hibernate step is spent running. */
+        if (idle_ms + ZSA_SLEEP_WAKE_WINDOW_MS >= ZSA_HIBERNATE_TIMEOUT_MS) {
+            return;
+        }
+        max_ms = ZSA_HIBERNATE_TIMEOUT_MS - idle_ms;
+    }
+    if (nav_sleep_windows()) {
+        /* Likewise the last stretch before the next left nav window. */
+        uint32_t clock = sleep_clock_ms();
+        if (clock + ZSA_SLEEP_WAKE_WINDOW_MS >= nav_sleep_due_ms) {
+            return;
+        }
+        if (nav_sleep_due_ms - clock < max_ms) {
+            max_ms = nav_sleep_due_ms - clock;
+        }
+    }
+
+    /* Re-asserted every time, so a lost frame cannot leave the nRF without
+     * the preamble that wakes us for the right half. */
+    send_idle_state(ZSA_IDLE_SLEEP);
+    if (nav_cap_mask != 0 && link_ready) {
+        send_nav_boost(nav_boost_sent);
+    }
+
+    uint32_t       stopped_ms;
+    enum stop_wake why = stm32_stop(max_ms, &stopped_ms);
+
+    sleep_stop_ms += stopped_ms;
+    sleep_awake_ms  = timer_read32();
+    sleep_window_ms = (why == STOP_WAKE_UART) ? SLEEP_UART_WAKE_WINDOW_MS : ZSA_SLEEP_WAKE_WINDOW_MS;
+}
+
+static void idle_power_task(void) {
+    static bool was_bluetooth = false;
+
+    /* Only manage power stages when running wirelessly */
     if (usb_host_present()) {
         if (was_bluetooth) {
             was_bluetooth = false;
             send_usb_state(true);
             zsa_nav_transport_changed();
         }
-        nrf_ship_mode = false;
-        if (idle_step != ZSA_IDLE_ACTIVE) {
-            idle_power_wake();
-        }
+        sleep_exit();
         return;
     }
 
     /* Just switched to bluetooth — reset idle baseline */
     if (!was_bluetooth) {
-        was_bluetooth  = true;
-        bt_switch_time = timer_read32();
+        was_bluetooth = true;
+        idle_floor_ms = timer_read32();
         send_usb_state(false);
         zsa_nav_transport_changed();
-        if (idle_step != ZSA_IDLE_ACTIVE) {
-            idle_power_wake();
-        }
+        sleep_exit();
         return;
     }
 
-    /* An update produces no key activity, so the idle steps would power the
-     * board down mid-transfer. */
-    if (zsa_wireless_dfu_active()) {
-        if (idle_step != ZSA_IDLE_ACTIVE) {
-            idle_power_wake();
-        }
+    /* An update produces no key activity, and a pairing is waiting on the
+     * user: neither may be slept through. */
+    if (zsa_wireless_dfu_active() || zsa_wireless_pairing_active()) {
+        sleep_exit();
+        idle_floor_ms = timer_read32();
         return;
     }
 
 #ifdef ZSA_DEV_NO_SLEEP
     /* Dev toggle: keep the USB/BT state sync above (the nRF relies on those
-     * edges) but never step into DIM/LEDS_OFF/DEEP — the board stays fully
-     * awake so debug sessions (SWD, log captures) aren't interrupted. */
+     * edges) but stay Active. */
     return;
 #endif
 
-    /* nRF is in ship mode — stay in DEEP, don't wake on keypresses.
-     * Wake only happens via EVT_BLE_STATUS from nRF (handle_rx_frame). */
-    if (nrf_ship_mode) {
+    /* The boot power gate runs its own hibernate. */
+    if (power_gate != PG_OK) {
         return;
     }
 
-    /* Use the most recent of: last input, bluetooth switch, or nRF wake */
-    uint32_t since_input  = last_input_activity_elapsed();
-    uint32_t since_switch = timer_elapsed32(bt_switch_time);
-    uint32_t since_nrf    = timer_elapsed32(nrf_wake_time);
-    uint32_t idle_ms      = since_input;
-    if (since_switch < idle_ms) idle_ms = since_switch;
-    if (since_nrf    < idle_ms) idle_ms = since_nrf;
-
-    enum zsa_idle_step target = ZSA_IDLE_ACTIVE;
-    if      (idle_ms > ZSA_IDLE_DEEP_MS)     target = ZSA_IDLE_DEEP;
-    else if (idle_ms > ZSA_IDLE_LEDS_OFF_MS) target = ZSA_IDLE_LEDS_OFF;
-    else if (idle_ms > ZSA_IDLE_DIM_MS)      target = ZSA_IDLE_DIM;
-
-    if (target != idle_step) {
-        if (target > idle_step) {
-            idle_power_enter_step(target);
-        } else {
-            idle_power_wake();
+    if (idle_step == ZSA_IDLE_ACTIVE) {
+        uint32_t idle_ms     = last_input_activity_elapsed();
+        uint32_t since_floor = timer_elapsed32(idle_floor_ms);
+        if (since_floor < idle_ms) {
+            idle_ms = since_floor;
         }
+        if (idle_ms >= ZSA_SLEEP_TIMEOUT_MS) {
+            sleep_enter(idle_ms);
+        }
+        return;
     }
 
-    /* Slow-scan loop: skip the full QMK task pipeline and only
-     * scan the matrix + service UART until activity is detected.
-     * matrix_task() keeps its own matrix_previous[], so the
-     * keystroke that wakes us will be processed on the next
-     * keyboard_task() iteration after we return. */
-    while (idle_step >= ZSA_IDLE_LEDS_OFF) {
-        watchdog_kick();
-        wait_ms(ZSA_IDLE_SCAN_DELAY_MS);
-
-        /* Service UART so nRF events (e.g. BLE wake) can reach us */
-        while (uart_available()) {
-            uint8_t byte = uart_read();
-            if (zsa_parser_feed(&rx_parser, byte)) {
-                handle_rx_frame(&rx_parser.frame);
-            }
-        }
-
-        /* This loop never returns to the QMK task pipeline, so drive the
-         * status LEDs, the cable level, the bus grant refresh and the
-         * right-half telemetry read from here too. */
-        status_led_task();
-        trrs_state_task();
-        bus_grant_task();
-        right_telemetry_task();
-
-        /* handle_rx_frame may have woken us (EVT_BLE_STATUS, or a
-         * EVT_PAIR_STATE carrying CONFIRM) */
-        if (idle_step < ZSA_IDLE_LEDS_OFF) {
-            break;
-        }
-
-        /* Transition to DEEP if enough time has passed */
-        if (idle_step < ZSA_IDLE_DEEP &&
-            last_input_activity_elapsed() > ZSA_IDLE_DEEP_MS) {
-            idle_power_enter_step(ZSA_IDLE_DEEP);
-            /* nrf_ship_mode is now true — stop scanning */
-            break;
-        }
-
-        /* Scan matrix — if a key changed, wake and let the
-         * normal QMK loop process the keypress. */
-        if (matrix_scan()) {
-            idle_power_wake();
-            break;
-        }
+    if (last_input_activity_time() != sleep_input_mark) {
+        sleep_exit();
+        return;
     }
+
+    uint32_t idle_ms = sleep_idle_base_ms + sleep_clock_ms();
+
+    /* Sent once per Sleep: the nRF refuses with VBUS present, and a VBUS
+     * change re-arms it. Not on the cable: the right half's radio is off, so
+     * the ship request cannot reach it and it would be left running. */
+    if (idle_ms >= ZSA_HIBERNATE_TIMEOUT_MS && !hibernate_sent && !nrf_vbus_present && link_ready && !zsa_stm32_owns_right_bus()) {
+        zsa_log("power: hibernate");
+        zsa_wireless_cmd_hibernate();
+        hibernate_sent = true;
+        return;
+    }
+
+    sleep_stop_task(idle_ms);
 }
 
 #ifdef RGB_MATRIX_ENABLE
@@ -1664,10 +2065,6 @@ bool is31fl3731_should_flush(uint8_t index) {
     }
     if (index != ZSA_LED_DRIVER_RIGHT) {
 #    if ZSA_LEFT_LED_SLICED
-        if (left_led_flush_now) {
-            left_led_flush_now = false;
-            return true;
-        }
         if (!usb_hid_on_usb()) {
             /* left_led_slice_task() owns the left frame off USB. This is the
              * only point where rgb_matrix has a whole rendered frame, so it is
@@ -1727,6 +2124,13 @@ static void right_led_slice_task(void) {
     }
 
     if (!right_led_cycle_active) {
+        /* With the matrix off, rgb_matrix flushes its black frame once, and a
+         * cycle running at that flush does not take it. Nothing renders while
+         * off, so the live buffer is a whole frame: take it here. */
+        if (!right_frame_ready && !rgb_matrix_is_enabled() && is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_RIGHT)) {
+            is31fl3731_copy_pwm_buffer(ZSA_LED_DRIVER_RIGHT, right_led_frame);
+            right_frame_ready = true;
+        }
         if (!right_frame_ready) {
             return;
         }
@@ -2053,6 +2457,7 @@ void bluetooth_task(void) {
     /* Process incoming frames */
     while (uart_available()) {
         uint8_t byte = uart_read();
+        last_rx_ms   = timer_read32();
         if (zsa_parser_feed(&rx_parser, byte)) {
             handle_rx_frame(&rx_parser.frame);
         }
@@ -2062,10 +2467,14 @@ void bluetooth_task(void) {
     if (!link_ready && timer_elapsed32(last_link_up_ms) >= LINK_UP_INTERVAL_MS) {
         send_command(ZSA_MSG_LINK_UP);
         last_link_up_ms = timer_read32();
+        nav_boost_dirty = true;
     }
 
     /* Announce our nav capabilities once the link is up (retries until acked) */
     nav_announce_task();
+
+    /* Claim the left boost for a left nav device or a probe window */
+    nav_boost_task();
 
     /* Fire BT_UNPR once its hold completes */
     unpair_hold_task();
@@ -2177,6 +2586,8 @@ void navigator_trackpad_output_touchpad(report_digitizer_touchpad_t *report) {
     if (zsa_wireless_dfu_active()) {
         return;
     }
+    /* keyboard.c does not count digitizer reports as input. */
+    last_pointing_device_activity_trigger();
     if (usb_hid_on_usb()) {
         send_digitizer_touchpad(report);
         return;
@@ -2198,6 +2609,7 @@ void navigator_trackpad_output_touchpad_mouse(report_digitizer_touchpad_mouse_t 
     if (zsa_wireless_dfu_active()) {
         return;
     }
+    last_pointing_device_activity_trigger();
     if (usb_hid_on_usb()) {
         send_digitizer_touchpad_mouse(report);
         return;

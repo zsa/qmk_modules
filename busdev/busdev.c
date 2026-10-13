@@ -51,6 +51,7 @@ typedef struct {
     uint8_t              verify_fails; // consecutive verify mismatches
     uint8_t              suspects;     // report_suspect() since the last passing scheduled verify
     uint8_t              last_reason;
+    uint8_t              probe_next;   // address for the next probe, 0 = normal choice
     uint32_t             deadline;
 } busdev_dev_t;
 
@@ -183,6 +184,7 @@ busdev_id_t busdev_register(const busdev_desc_t *desc) {
     d->verify_fails     = 0;
     d->suspects         = 0;
     d->last_reason      = BUSDEV_REASON_NONE;
+    d->probe_next       = 0;
     d->deadline         = timer_read32();
     return id;
 }
@@ -275,9 +277,14 @@ static uint8_t probe_addr(busdev_dev_t *d) {
 static void do_probe(uint8_t index, uint32_t now) {
     busdev_dev_t        *d    = &devices[index];
     const busdev_desc_t *desc = d->desc;
-    uint8_t              addr = probe_addr(d);
+    uint8_t              addr = d->probe_next;
 
-    d->probe_alt = !d->probe_alt;
+    if (addr != 0) {
+        d->probe_next = 0;
+    } else {
+        addr         = probe_addr(d);
+        d->probe_alt = !d->probe_alt;
+    }
 
     i2c_status_t status = desc->probe != NULL ? desc->probe(addr) : i2c_ping_address(addr, desc->probe_timeout_ms);
     bus_note(status);
@@ -479,6 +486,16 @@ void busdev_force_down(busdev_id_t id, uint8_t reason) {
         return;
     }
     to_absent(id, reason, timer_read32());
+}
+
+void busdev_probe_now(busdev_id_t id, uint8_t addr) {
+    busdev_dev_t *d = dev_of(id);
+    if (d == NULL || d->state != BUSDEV_ABSENT) {
+        return;
+    }
+    d->probe_next  = addr;
+    d->probe_fails = 0;
+    d->deadline    = timer_read32();
 }
 
 void busdev_force_down_all(uint8_t reason) {

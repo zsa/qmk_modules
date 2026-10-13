@@ -399,6 +399,25 @@ static void trackpad_on_state(busdev_id_t id, busdev_state_t old_state, busdev_s
         probe_other = false;
     }
 }
+
+// Left nav probe window: the real pad address, next. Up on the mirror, which
+// answers with or without a pad on the right, the real address is pinged
+// directly and the device moves there only if the pad answers.
+void zsa_nav_trackpad_probe_local(void) {
+    if (busdev_is_up(navigator_trackpad_dev) && busdev_addr(navigator_trackpad_dev) != NAVIGATOR_TRACKPAD_ADDRESS) {
+        if (i2c_ping_address(NAVIGATOR_TRACKPAD_ADDRESS, NAVIGATOR_TRACKPAD_PROBE_TIMEOUT) != I2C_STATUS_SUCCESS) {
+            return;
+        }
+        busdev_force_down(navigator_trackpad_dev, BUSDEV_REASON_PROBE_ACK);
+    }
+    busdev_probe_now(navigator_trackpad_dev, NAVIGATOR_TRACKPAD_ADDRESS);
+}
+
+// The real pad answered and is being brought up.
+bool zsa_nav_trackpad_local_pending(void) {
+    busdev_state_t state = busdev_state(navigator_trackpad_dev);
+    return state != BUSDEV_ABSENT && state != BUSDEV_UP && busdev_addr(navigator_trackpad_dev) == NAVIGATOR_TRACKPAD_ADDRESS;
+}
 #endif
 
 static const busdev_desc_t trackpad_desc = {

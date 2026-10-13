@@ -126,6 +126,9 @@ void busdev_report_ok(busdev_id_t id);
 void busdev_report_suspect(busdev_id_t id, uint8_t reason);
 void busdev_force_down(busdev_id_t id, uint8_t reason);
 void busdev_force_down_all(uint8_t reason);
+// An ABSENT device probes addr at the next busdev_task() action, outside the
+// usual address alternation, and restarts its probe backoff. No-op otherwise.
+void busdev_probe_now(busdev_id_t id, uint8_t addr);
 
 // One bus action per call. Driven by housekeeping_task_busdev().
 void busdev_task(void);

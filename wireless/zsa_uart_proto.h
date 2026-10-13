@@ -132,6 +132,19 @@ enum zsa_msg_type {
                                        * executes this command. Was
                                        * CMD_VBUS_ILIM (1 B level) — same ID,
                                        * wider payload; see struct below. */
+    ZSA_MSG_CMD_NAV_BOOST    = 0x2F,  /* 1 B: struct zsa_nav_boost — whether
+                                       * the left nav connector needs the
+                                       * left boost: a nav device answered on
+                                       * the STM32's own bus, or the STM32 is
+                                       * running a probe window. Sent on every
+                                       * change and at link-up. The left drops
+                                       * it on LINK_UP from the STM32 and on
+                                       * reboot, and until it hears one again
+                                       * treats a nav-capable build as
+                                       * needing the boost. Not in ignition's
+                                       * copy of this header (frozen at
+                                       * voyager2-2.0.1; ignition never sends
+                                       * it). */
 
     /* nRF -> STM32: DFU commands (0x30-0x3F) */
     ZSA_MSG_DFU_ERASE        = 0x30,  /* 4 B: addr LE32 */
@@ -500,6 +513,11 @@ struct __attribute__((packed)) zsa_usb_state {
 #define ZSA_NAV_CAP_TRACKPAD  0x02
 struct __attribute__((packed)) zsa_nav_enable {
     uint8_t enabled; /* ZSA_NAV_CAP_* bitmask; 0 = none */
+};
+
+/* ZSA_MSG_CMD_NAV_BOOST (1 byte) */
+struct __attribute__((packed)) zsa_nav_boost {
+    uint8_t needed; /* 0 = no left nav device, 1 = left nav present or probing */
 };
 
 /* struct zsa_nav_cpi removed with ZSA_MSG_CMD_NAV_CPI (0x25, reserved). */
