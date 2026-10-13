@@ -46,6 +46,18 @@
 #    define ZSA_NAV_PROBE_WINDOW_MS 150
 #endif
 
+/* Wake filter for left nav motion read by a STOP poll (one poll per RTC
+ * period, 16 ms), for devices that opt in (trackball). A poll moving
+ * |dx| + |dy| >= ZSA_NAV_SLEEP_WAKE_COUNTS wakes at once. Smaller motion wakes
+ * only once ZSA_NAV_SLEEP_WAKE_POLLS polls in a row saw motion, with the
+ * counts of all of them delivered; an idle poll in between drops them. */
+#ifndef ZSA_NAV_SLEEP_WAKE_COUNTS
+#    define ZSA_NAV_SLEEP_WAKE_COUNTS 5
+#endif
+#ifndef ZSA_NAV_SLEEP_WAKE_POLLS
+#    define ZSA_NAV_SLEEP_WAKE_POLLS 2
+#endif
+
 /* Minimum spacing between flushes of the right-half LED driver (0x77) while
  * wireless. That driver is the left nRF's TWIS emulation, not a real chip -
  * every flush blocks on a clock-stretched I2C transfer relayed over ESB

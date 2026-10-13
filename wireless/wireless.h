@@ -180,3 +180,57 @@ void zsa_nav_trackball_probe_local(void);
 void zsa_nav_trackpad_probe_local(void);
 bool zsa_nav_trackball_local_pending(void);
 bool zsa_nav_trackpad_local_pending(void);
+
+/* ---- Left nav device in Sleep ----
+ *
+ * In Sleep the STM32 stops (STOP mode) between wakes. A nav device answering
+ * at its real address on the STM32's own bus (ZSA_NAV_PROBE_LOCAL) cannot wake
+ * it, so STOP is allowed with one only if its module provides these hooks;
+ * without them (weak default: NULL) the STM32 stays running, as before.
+ *
+ * enter: Sleep with the device local, before the first STOP. Normal context,
+ *   regular i2c_* calls. Prepares the device to be polled (e.g. keeps its own
+ *   sampling fast). false: cannot, the STM32 stays running for this Sleep.
+ * idle: before every STOP. false while the normal read path still has data to
+ *   pick up; the STM32 then stays running for that pass.
+ * poll: on every RTC wake inside STOP (every 16 ms), interrupts locked, core on
+ *   the 8 MHz HSI. Only zsa_stop_i2c_write/read and zsa_stop_delay_us may be
+ *   used. Must not drop input: data it reads is kept for the normal read path.
+ *   Returns enum zsa_nav_sleep_poll.
+ * exit: leaving Sleep, or the device no longer local. Normal context. Undoes
+ *   enter. Must cope with the device being gone. */
+enum zsa_nav_sleep_poll {
+    ZSA_NAV_SLEEP_IDLE = 0, /* nothing happened */
+    ZSA_NAV_SLEEP_ACTIVITY, /* motion or touch: the board wakes */
+    ZSA_NAV_SLEEP_ERROR,    /* bus error: the STM32 wakes, the normal path checks */
+};
+
+typedef struct {
+    bool (*enter)(void);
+    bool (*idle)(void);
+    uint8_t (*poll)(void);
+    void (*exit)(void);
+} zsa_nav_sleep_ops_t;
+
+/* Weak hooks, one per nav module, returning NULL by default. */
+const zsa_nav_sleep_ops_t *zsa_nav_trackball_sleep_ops(void);
+const zsa_nav_sleep_ops_t *zsa_nav_trackpad_sleep_ops(void);
+
+/* I2C1 and delay for zsa_nav_sleep_ops_t.poll only: polled, no DMA or
+ * interrupts, 8-bit (shifted) addresses, one transfer ending in STOP, len >= 1.
+ * Fail outside a poll. */
+bool zsa_stop_i2c_write(uint8_t addr, const uint8_t *data, uint8_t len);
+bool zsa_stop_i2c_read(uint8_t addr, uint8_t *data, uint8_t len);
+void zsa_stop_delay_us(uint16_t us);
+
+/* Wake filter (ZSA_NAV_SLEEP_WAKE_COUNTS), for poll only: called with the
+ * deltas of a poll that saw motion. ZSA_NAV_SLEEP_ACTIVITY: wake, *wake_dx and
+ * *wake_dy hold the counts of this poll and the held ones, to deliver.
+ * ZSA_NAV_SLEEP_IDLE: the counts are held, and dropped at the next poll that
+ * does not call this or at the next STOP. */
+uint8_t zsa_nav_sleep_filter(int16_t dx, int16_t dy, int32_t *wake_dx, int32_t *wake_dy);
+
+/* Sleep diagnostics (ZSA_SLEEP_DIAG): the last poll's raw bytes, up to 6, and
+ * a motion read by the normal path. Safe from a poll. */
+void zsa_nav_sleep_note_raw(const uint8_t *raw, uint8_t len);
+void zsa_nav_sleep_note_motion(int16_t x, int16_t y);

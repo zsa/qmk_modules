@@ -11,6 +11,7 @@
 #include "busdev.h"
 #include "quantum.h"
 #include "timer.h"
+#include <string.h>
 
 // Shared globals
 static uint16_t current_cpi = DEFAULT_CPI_TICK;
@@ -44,8 +45,31 @@ static void trackpad_io_error(i2c_status_t status) {
     }
 }
 
+#ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
+// A report packet a Sleep poll read, handed to the next report read.
+static uint8_t sleep_packet[CGEN6_MAX_PACKET_SIZE];
+static bool    sleep_packet_valid;
+
+static bool take_sleep_packet(uint8_t *data, uint16_t cnt) {
+    if (!sleep_packet_valid) {
+        return false;
+    }
+    sleep_packet_valid = false;
+    if (cnt != CGEN6_MAX_PACKET_SIZE || trackpad_addr != NAVIGATOR_TRACKPAD_ADDRESS) {
+        return false;
+    }
+    memcpy(data, sleep_packet, cnt);
+    return true;
+}
+#else
+#    define take_sleep_packet(data, cnt) false
+#endif
+
 // I2C communication functions
 i2c_status_t cirque_gen6_read_report(uint8_t *data, uint16_t cnt) {
+    if (take_sleep_packet(data, cnt)) {
+        return I2C_STATUS_SUCCESS;
+    }
     i2c_status_t res = i2c_receive(trackpad_addr, data, cnt, NAVIGATOR_TRACKPAD_TIMEOUT);
     if (res != I2C_STATUS_SUCCESS) {
         trackpad_io_error(res);
@@ -396,7 +420,8 @@ static uint8_t trackpad_select_addr(void) {
 
 static void trackpad_on_state(busdev_id_t id, busdev_state_t old_state, busdev_state_t new_state, uint8_t reason) {
     if (new_state == BUSDEV_ABSENT) {
-        probe_other = false;
+        probe_other        = false;
+        sleep_packet_valid = false;
     }
 }
 
@@ -417,6 +442,49 @@ void zsa_nav_trackpad_probe_local(void) {
 bool zsa_nav_trackpad_local_pending(void) {
     busdev_state_t state = busdev_state(navigator_trackpad_dev);
     return state != BUSDEV_ABSENT && state != BUSDEV_UP && busdev_addr(navigator_trackpad_dev) == NAVIGATOR_TRACKPAD_ADDRESS;
+}
+
+// ---- Sleep polling (wireless.h, zsa_nav_sleep_ops_t) ----
+//
+// The pad keeps its own power modes; its deeper sleep is not used. A poll reads
+// the report packet the normal path reads: with nothing pending the pad
+// answers an empty report, and a packet with a report ID is kept whole for the
+// next cirque_gen6_read_report(), so the touch goes through the normal PTP or
+// mouse path.
+static bool trackpad_sleep_enter(void) {
+    return busdev_is_up(navigator_trackpad_dev) && busdev_addr(navigator_trackpad_dev) == NAVIGATOR_TRACKPAD_ADDRESS;
+}
+
+static bool trackpad_sleep_idle(void) {
+    return !sleep_packet_valid;
+}
+
+static uint8_t trackpad_sleep_poll(void) {
+    memset(sleep_packet, 0, sizeof(sleep_packet));
+    bool ok = zsa_stop_i2c_read(NAVIGATOR_TRACKPAD_ADDRESS, sleep_packet, CGEN6_MAX_PACKET_SIZE);
+    zsa_nav_sleep_note_raw(sleep_packet, 6);
+    if (!ok) {
+        return ZSA_NAV_SLEEP_ERROR;
+    }
+    uint8_t report_id = sleep_packet[2];
+    if (report_id != CGEN6_PTP_REPORT_ID && report_id != CGEN6_MOUSE_REPORT_ID) {
+        return ZSA_NAV_SLEEP_IDLE;
+    }
+    sleep_packet_valid = true;
+    return ZSA_NAV_SLEEP_ACTIVITY;
+}
+
+static void trackpad_sleep_exit(void) {}
+
+static const zsa_nav_sleep_ops_t trackpad_sleep_ops = {
+    .enter = trackpad_sleep_enter,
+    .idle  = trackpad_sleep_idle,
+    .poll  = trackpad_sleep_poll,
+    .exit  = trackpad_sleep_exit,
+};
+
+const zsa_nav_sleep_ops_t *zsa_nav_trackpad_sleep_ops(void) {
+    return &trackpad_sleep_ops;
 }
 #endif
 

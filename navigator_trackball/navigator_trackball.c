@@ -272,6 +272,208 @@ bool zsa_nav_trackball_local_pending(void) {
     busdev_state_t state = busdev_state(nav_dev);
     return state != BUSDEV_ABSENT && state != BUSDEV_UP && busdev_addr(nav_dev) == NAVIGATOR_TRACKBALL_ADDRESS;
 }
+
+// ---- Sleep polling (wireless.h, zsa_nav_sleep_ops_t) ----
+//
+// Operation_Mode (0x05) default 0xB8: bit 4 Slp_enh (Run -> Sleep1), bit 3
+// Slp2_enh (Sleep1 -> Sleep2 -> Sleep3), bit 0 Wakeup (self-clearing), bits 6:5
+// always 01. Layout from the PAW3204 datasheet, whose 0x05 default matches the
+// PAW3805's. In Sleep, Slp2_enh is cleared so the sensor goes no deeper than
+// Sleep1 (8 ms sampling) and Wakeup brings it out of a deeper mode it is
+// already in; the saved value is written back on exit.
+//
+// Reading Motion_Status freezes the deltas and a second read before the deltas
+// are read loses them, so a poll that sees motion reads the deltas at once and
+// keeps them for pointing_device_driver_get_report().
+#    define PAW3805EK_REG_MOTION 0x02
+#    define PAW3805EK_REG_OPERATION_MODE 0x05
+#    define PAW3805EK_REG_WRITE_PROTECT 0x09
+#    define PAW3805EK_WRITE_UNLOCK 0x5A
+#    define PAW3805EK_MODE_FIXED_MASK 0x60
+#    define PAW3805EK_MODE_FIXED 0x20
+#    define PAW3805EK_MODE_SLP2_ENH 0x08
+#    define PAW3805EK_MODE_FORCE_MASK 0x07
+#    define PAW3805EK_MODE_WAKEUP 0x01
+#    define PAW3805EK_MOTION_BIT 0x80
+
+static bool    sleep_mode_saved;
+static uint8_t sleep_mode; // Operation_Mode before Sleep
+static int32_t sleep_dx;   // deltas read by a poll, not yet reported
+static int32_t sleep_dy;
+
+static bool nav_local_up(void) {
+    return busdev_is_up(nav_dev) && !nav_on_mirror(busdev_addr(nav_dev));
+}
+
+static bool paw3805ek_read_reg(uint8_t reg, uint8_t *value) {
+    uint8_t buf[3] = {NCS_PIN, reg, 0x00};
+    if (sci18is606_spi_tx(buf, 3, true) != I2C_STATUS_SUCCESS) {
+        return false;
+    }
+    *value = buf[1];
+    return true;
+}
+
+// Writes Operation_Mode values in order inside one write-unlock.
+static bool paw3805ek_write_mode(const uint8_t *values, uint8_t count) {
+    paw3805ek_reg_seq_t seq[4];
+    uint8_t             n = 0;
+    seq[n++]              = (paw3805ek_reg_seq_t){PAW3805EK_REG_WRITE_PROTECT | WRITE_REG_BIT, PAW3805EK_WRITE_UNLOCK};
+    for (uint8_t i = 0; i < count && n < 3; i++) {
+        seq[n++] = (paw3805ek_reg_seq_t){PAW3805EK_REG_OPERATION_MODE | WRITE_REG_BIT, values[i]};
+    }
+    seq[n++] = (paw3805ek_reg_seq_t){PAW3805EK_REG_WRITE_PROTECT | WRITE_REG_BIT, 0x00};
+
+    bool ok = true;
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t buf[3] = {NCS_PIN, seq[i].reg, seq[i].data};
+        // The lock is written even after a failure.
+        if (sci18is606_spi_tx(buf, 3, true) != I2C_STATUS_SUCCESS) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+static bool trackball_sleep_enter(void) {
+    if (!nav_local_up()) {
+        return false;
+    }
+    uint8_t mode;
+    if (!paw3805ek_read_reg(PAW3805EK_REG_OPERATION_MODE, &mode) || (mode & PAW3805EK_MODE_FIXED_MASK) != PAW3805EK_MODE_FIXED) {
+        return false;
+    }
+    mode &= ~PAW3805EK_MODE_FORCE_MASK;
+
+    uint8_t sleep1    = mode & ~PAW3805EK_MODE_SLP2_ENH;
+    uint8_t values[2] = {sleep1, sleep1 | PAW3805EK_MODE_WAKEUP};
+    uint8_t check;
+    if (!paw3805ek_write_mode(values, 2) || !paw3805ek_read_reg(PAW3805EK_REG_OPERATION_MODE, &check) || (check & ~PAW3805EK_MODE_FORCE_MASK) != sleep1) {
+        paw3805ek_write_mode(&mode, 1);
+        return false;
+    }
+    sleep_mode       = mode;
+    sleep_mode_saved = true;
+    return true;
+}
+
+static bool trackball_sleep_idle(void) {
+    return !has_motion && sleep_dx == 0 && sleep_dy == 0;
+}
+
+// STOP context: one bridge SPI read of a sensor register.
+static bool stop_paw3805ek_read_reg(uint8_t reg, uint8_t *value) {
+    uint8_t buf[3] = {NCS_PIN, reg, 0x00};
+    if (!zsa_stop_i2c_write(NAVIGATOR_TRACKBALL_ADDRESS, buf, 3)) {
+        return false;
+    }
+    zsa_stop_delay_us(3 * 15);
+    if (!zsa_stop_i2c_read(NAVIGATOR_TRACKBALL_ADDRESS, buf, 3)) {
+        return false;
+    }
+    *value = buf[1];
+    return true;
+}
+
+// raw: Motion_Status, Delta_X_Lo, Delta_Y_Lo, Delta_X_Hi, Delta_Y_Hi, last
+// step read (1 status, 2 low deltas, 3 high deltas).
+static uint8_t trackball_sleep_read(uint8_t *raw) {
+    if (!stop_paw3805ek_read_reg(PAW3805EK_REG_MOTION, &raw[0])) {
+        return ZSA_NAV_SLEEP_ERROR;
+    }
+    raw[5] = 1;
+    if ((raw[0] & PAW3805EK_MOTION_BIT) == 0) {
+        return ZSA_NAV_SLEEP_IDLE;
+    }
+
+    // The deltas are frozen until read: a failed read loses them.
+    if (!stop_paw3805ek_read_reg(0x03, &raw[1]) || !stop_paw3805ek_read_reg(0x04, &raw[2])) {
+        return ZSA_NAV_SLEEP_ERROR;
+    }
+    raw[5] = 2;
+#    ifdef MOUSE_EXTENDED_REPORT
+    if (!stop_paw3805ek_read_reg(0x11, &raw[3]) || !stop_paw3805ek_read_reg(0x12, &raw[4])) {
+        return ZSA_NAV_SLEEP_ERROR;
+    }
+    raw[5]     = 3;
+    int16_t dx = (int16_t)((raw[3] << 8) | raw[1]);
+    int16_t dy = (int16_t)((raw[4] << 8) | raw[2]);
+#    else
+    int16_t dx = (int8_t)raw[1];
+    int16_t dy = (int8_t)raw[2];
+#    endif
+    // Motion with zero deltas sends nothing on the normal path either.
+    if (dx == 0 && dy == 0) {
+        return ZSA_NAV_SLEEP_IDLE;
+    }
+    // Sensor noise (a lone poll of +-1-2 counts) is held and dropped.
+    int32_t wake_dx, wake_dy;
+    if (zsa_nav_sleep_filter(dx, dy, &wake_dx, &wake_dy) != ZSA_NAV_SLEEP_ACTIVITY) {
+        return ZSA_NAV_SLEEP_IDLE;
+    }
+    sleep_dx += wake_dx;
+    sleep_dy += wake_dy;
+    return ZSA_NAV_SLEEP_ACTIVITY;
+}
+
+static uint8_t trackball_sleep_poll(void) {
+    uint8_t raw[6] = {0};
+    uint8_t result = trackball_sleep_read(raw);
+    zsa_nav_sleep_note_raw(raw, sizeof(raw));
+    return result;
+}
+
+static void trackball_sleep_exit(void) {
+    if (!sleep_mode_saved) {
+        return;
+    }
+    sleep_mode_saved = false;
+    if (nav_local_up()) {
+        paw3805ek_write_mode(&sleep_mode, 1);
+    }
+}
+
+static const zsa_nav_sleep_ops_t trackball_sleep_ops = {
+    .enter = trackball_sleep_enter,
+    .idle  = trackball_sleep_idle,
+    .poll  = trackball_sleep_poll,
+    .exit  = trackball_sleep_exit,
+};
+
+const zsa_nav_sleep_ops_t *zsa_nav_trackball_sleep_ops(void) {
+    return &trackball_sleep_ops;
+}
+
+static mouse_xy_report_t clamp_xy(int32_t v) {
+    if (v > MOUSE_REPORT_XY_MAX) {
+        return MOUSE_REPORT_XY_MAX;
+    }
+    if (v < -MOUSE_REPORT_XY_MAX) {
+        return -MOUSE_REPORT_XY_MAX;
+    }
+    return (mouse_xy_report_t)v;
+}
+
+// Adds what a Sleep poll read to the report.
+static void add_sleep_motion(report_mouse_t *mouse_report) {
+    if (sleep_dx == 0 && sleep_dy == 0) {
+        return;
+    }
+    mouse_report->x = clamp_xy((int32_t)mouse_report->x + sleep_dx);
+    mouse_report->y = clamp_xy((int32_t)mouse_report->y + sleep_dy);
+    sleep_dx        = 0;
+    sleep_dy        = 0;
+}
+
+// Sleep diagnostics: a normal-path motion read.
+static void note_sleep_motion(const report_mouse_t *mouse_report) {
+    if (mouse_report->x != 0 || mouse_report->y != 0) {
+        zsa_nav_sleep_note_motion(mouse_report->x, mouse_report->y);
+    }
+}
+#else
+#    define add_sleep_motion(report) ((void)0)
+#    define note_sleep_motion(report) ((void)0)
 #endif
 
 // The bridge keeps ACKing across a transport switch, so only an explicit
@@ -301,7 +503,9 @@ report_mouse_t pointing_device_driver_get_report(report_mouse_t mouse_report) {
     if (has_motion) {
         has_motion = 0;
         paw3804ek_read_motion(&mouse_report);
+        note_sleep_motion(&mouse_report);
     }
+    add_sleep_motion(&mouse_report);
     return mouse_report;
 }
 
