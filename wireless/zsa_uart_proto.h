@@ -220,13 +220,14 @@ enum zsa_msg_type {
                                        * VBUS presence. Gates the STM32's USB
                                        * D+ pullup (PA15). Sent on VBUS change
                                        * and at link-up. */
-    ZSA_MSG_EVT_DFU_STATE    = 0x8C,  /* 3 B: struct zsa_dfu_progress — a
+    ZSA_MSG_EVT_DFU_STATE    = 0x8C,  /* 4 B: struct zsa_dfu_progress — a
                                        * firmware update is running through
                                        * this half (nRF SMP or the STM32
                                        * relay), plus which half's image and
-                                       * what phase, for the status LEDs. Sent
-                                       * on every change and re-sent as a
-                                       * level. Older senders send 1 B. */
+                                       * what phase, for the status LEDs, and
+                                       * whether to stay awake. Sent on every
+                                       * change and re-sent as a level. Older
+                                       * senders send 1 or 3 B. */
     ZSA_MSG_EVT_LINK_STATE   = 0x8D,  /* 2 B: struct zsa_link_state — the two
                                        * nRF halves' view of each other over
                                        * ESB. Distinct from EVT_DFU_STATE: a
@@ -584,14 +585,17 @@ struct __attribute__((packed)) zsa_pwr_budget {
 /* ZSA_MSG_EVT_VBUS_STATE (1 byte) */
 struct __attribute__((packed)) zsa_vbus_state { uint8_t present; };
 
-/* ZSA_MSG_EVT_DFU_STATE (3 bytes) — `active` mirrors the nRF's DFU lock, so
+/* ZSA_MSG_EVT_DFU_STATE (4 bytes) — `active` mirrors the nRF's DFU lock, so
  * it covers both the mcumgr SMP path and the STM32 relay; QMK drops keys and
  * holds the idle state off while it is set. `target`/`phase` describe the
  * left half's own image for the status LEDs (the right half indicates
  * itself). Named _progress because the zsa_dfu_state tag is taken by the
  * DFU_STATUS enum below. Sent as a level: the nRF re-sends it every second,
  * so QMK ages it out if the link dies mid-update. A 1-byte payload (older
- * senders) carries only `active`; receivers treat it as target NONE. */
+ * senders) carries only `active`; receivers treat it as target NONE.
+ * `flags` is wider than `active`: KEEP_AWAKE holds the STM32 out of Sleep for
+ * the whole update, including the waits between steps, without dropping keys.
+ * Payloads shorter than 4 bytes carry no flags. */
 enum zsa_dfu_target {
     ZSA_DFU_TARGET_NONE  = 0,
     ZSA_DFU_TARGET_LEFT  = 1,
@@ -603,10 +607,12 @@ enum zsa_dfu_phase {
     ZSA_DFU_PHASE_SETTLE = 2, /* written; swapping or awaiting the host's confirm: green solid */
     ZSA_DFU_PHASE_FAILED = 3, /* update refused or aborted: red solid */
 };
+#define ZSA_DFU_FLAG_KEEP_AWAKE 0x01u /* an update session or step is under way */
 struct __attribute__((packed)) zsa_dfu_progress {
     uint8_t active; /* 0 = idle, 1 = update in progress */
     uint8_t target; /* enum zsa_dfu_target */
     uint8_t phase;  /* enum zsa_dfu_phase */
+    uint8_t flags;  /* ZSA_DFU_FLAG_* */
 };
 
 /* Status LED timing shared by every renderer (QMK, right nRF, ignition):

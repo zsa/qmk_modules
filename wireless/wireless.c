@@ -174,6 +174,9 @@ static uint8_t  nrf_dfu_target;    /* enum zsa_dfu_target */
 static uint8_t  nrf_dfu_phase;     /* enum zsa_dfu_phase */
 static uint32_t last_dfu_phase_ms;
 static bool     dfu_phase_seen;    /* any 3-byte EVT_DFU_STATE received yet */
+/* ZSA_DFU_FLAG_KEEP_AWAKE: an update session or step is under way. Holds the
+ * idle state off like `active`, without dropping keys. Aged out with it. */
+static bool     nrf_dfu_keep_awake;
 
 /* ---- Inter-half link state ---- *
  *
@@ -548,6 +551,7 @@ enum sleep_end {
     SE_DFU_PAIRING,  /* update or pairing in progress */
     SE_PAIR_CONFIRM, /* pairing confirmation */
     SE_DFU_START,    /* update started */
+    SE_DFU_AWAKE,    /* update session or step under way */
 };
 
 static void sleep_exit_for(uint8_t why);
@@ -788,7 +792,8 @@ static void dfu_set_active(bool active) {
 
 /* Ages out a state that stopped being refreshed. */
 static void dfu_state_task(void) {
-    if (nrf_dfu_active && timer_elapsed32(last_dfu_state_ms) >= ZSA_DFU_STATE_STALE_MS) {
+    if ((nrf_dfu_active || nrf_dfu_keep_awake) && timer_elapsed32(last_dfu_state_ms) >= ZSA_DFU_STATE_STALE_MS) {
+        nrf_dfu_keep_awake = false;
         dfu_set_active(false);
     }
 }
@@ -828,6 +833,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
              * deliberately left alone: the reboot this link-up follows is
              * usually the swap itself, and the new image re-asserts SETTLE. */
             dfu_set_active(false);
+            nrf_dfu_keep_awake = false;
             /* nrf_vbus_present is left alone: the nRF re-reports it right
              * after link-up via send_nrf_state(). */
             send_full_state();
@@ -1004,8 +1010,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 const struct zsa_dfu_progress *d = (const struct zsa_dfu_progress *)frame->payload;
                 last_dfu_state_ms = timer_read32();
                 dfu_set_active(d->active != 0);
+                nrf_dfu_keep_awake = frame->len >= 4 && (d->flags & ZSA_DFU_FLAG_KEEP_AWAKE) != 0;
                 /* Older senders carry `active` alone: no phase to show. */
-                if (frame->len >= sizeof(struct zsa_dfu_progress)) {
+                if (frame->len >= 3) {
                     nrf_dfu_target = d->target;
                     nrf_dfu_phase  = d->phase;
                 } else {
@@ -2699,6 +2706,11 @@ static void idle_power_task(void) {
      * user: neither may be slept through. */
     if (zsa_wireless_dfu_active() || zsa_wireless_pairing_active()) {
         sleep_exit_for(SE_DFU_PAIRING);
+        idle_floor_ms = timer_read32();
+        return;
+    }
+    if (nrf_dfu_keep_awake) {
+        sleep_exit_for(SE_DFU_AWAKE);
         idle_floor_ms = timer_read32();
         return;
     }
