@@ -184,6 +184,7 @@ static bool     dfu_phase_seen;    /* any 3-byte EVT_DFU_STATE received yet */
 static uint8_t  nrf_link_state;    /* enum zsa_link_state_val */
 static uint32_t last_link_state_ms;
 static bool     link_state_seen;
+static struct zsa_nav_link_age nav_link_age; /* the same, aged for nav presence */
 
 /* ---- Adaptive charging ---- *
  *
@@ -618,7 +619,9 @@ static void nav_announce_task(void) {
  * answering, every ZSA_NAV_PROBE_INTERVAL_MS while Active and every
  * ZSA_NAV_PROBE_SLEEP_INTERVAL_MS of Sleep time (STOP included). A device found
  * by a Sleep window wakes the board. None while the connector is powered anyway
- * (VBUS or cable), where the bus supervisor's own probes find a device. */
+ * (VBUS or cable). The supervisor's own probes stop once a device is up on the
+ * mirror, so on VBUS without the cable the real addresses are still probed
+ * every ZSA_NAV_PROBE_INTERVAL_MS, with no claim: VBUS feeds the rail. */
 #define NAV_PROBE_FIRST_KICK_MS 40
 #define NAV_PROBE_KICK_MS 30
 /* Longest a window stays open past ZSA_NAV_PROBE_WINDOW_MS while a device that
@@ -635,6 +638,7 @@ static uint8_t  nav_window_kicks;
 static bool     nav_window_sleep;      /* opened by the Sleep interval */
 static uint32_t nav_sleep_due_ms;      /* next Sleep window, in sleep_clock_ms() time */
 static bool     nav_left_present;
+static uint32_t nav_vbus_probe_ms;     /* last real-address probe on VBUS */
 
 static uint32_t sleep_clock_ms(void);
 
@@ -687,6 +691,13 @@ static void nav_boost_task(void) {
         nav_window_request = false;
         if (nav_window_open) {
             nav_window_close();
+        }
+        /* VBUS without the cable: a device latched on the mirror is never
+         * moved by the supervisor's own probes, so probe the real addresses. */
+        if (nrf_vbus_present && !zsa_trrs_plugged() && !present && !zsa_wireless_dfu_active() && timer_elapsed32(nav_vbus_probe_ms) >= ZSA_NAV_PROBE_INTERVAL_MS) {
+            nav_vbus_probe_ms = timer_read32();
+            zsa_nav_trackball_probe_local();
+            zsa_nav_trackpad_probe_local();
         }
         nav_window_end_ms = timer_read32();
     } else if (nav_window_open) {
@@ -800,6 +811,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
              * our nav capabilities immediately and wait for a fresh ack. */
             nav_announce_acked   = false;
             last_nav_announce_ms = 0;
+            nav_device_seen      = false;
             /* The nRF drops the boost claim on LINK_UP and on reboot. */
             nav_boost_dirty = true;
             /* Same reasoning for the power budget: forget what the old link
@@ -1011,6 +1023,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 nrf_link_state     = l->state;
                 last_link_state_ms = timer_read32();
                 link_state_seen    = true;
+                zsa_nav_link_received(&nav_link_age, last_link_state_ms);
             }
             break;
 
@@ -1169,6 +1182,83 @@ __attribute__((weak)) const zsa_nav_sleep_ops_t *zsa_nav_trackpad_sleep_ops(void
     return NULL;
 }
 
+/* ---- Nav presence (telemetry nav_* and CMD_NAV_STATE) ---- *
+ *
+ * zsa_nav_presence() decides; this feeds it. The right half's report from the
+ * left nRF counts only while EVT_LINK_STATE is fresh (zsa_nav_link_fresh(),
+ * held through Sleep) and says OK, and
+ * ZSA_NAV_RIGHT_SETTLE_MS after that and the announce ack both hold, so the
+ * right has had time to probe. The level goes to the nRF on every change and
+ * every ZSA_NAV_STATE_INTERVAL_MS, at least NAV_STATE_STAGGER_MS after the
+ * last 1 s periodic frame (TRRS_STATE, SCAN_DIAG, RIGHT_TELEMETRY). */
+#define NAV_STATE_STAGGER_MS 250
+#define NAV_STATE_MIN_GAP_MS 100
+
+static bool     nav_right_linked;    /* fresh OK link state, announce acked */
+static uint32_t nav_right_linked_ms; /* when nav_right_linked last became true */
+static uint32_t periodic_tx_ms;      /* last 1 s periodic frame to the nRF */
+
+static bool link_state_fresh(void) {
+    return link_ready && zsa_nav_link_fresh(&nav_link_age, timer_read32(), ZSA_LINK_STATE_STALE_MS);
+}
+
+static struct zsa_nav_state nav_state_now(void) {
+    bool fresh  = link_state_fresh();
+    bool linked = fresh && nrf_link_state == ZSA_LINK_STATE_OK && nav_announce_acked && nav_device_seen;
+    if (linked && !nav_right_linked) {
+        nav_right_linked_ms = timer_read32();
+    }
+    nav_right_linked = linked;
+
+    struct zsa_nav_inputs in = {
+        .build         = nav_cap_mask,
+        .ball          = zsa_nav_trackball_probe_state(),
+        .pad           = zsa_nav_trackpad_probe_state(),
+        .right_on_bus  = zsa_stm32_owns_right_bus(),
+        .nrf_seen      = nav_device_seen,
+        .link_fresh    = fresh,
+        .right_linked  = fresh && nrf_link_state == ZSA_LINK_STATE_OK,
+        .right_settled = linked && timer_elapsed32(nav_right_linked_ms) >= ZSA_NAV_RIGHT_SETTLE_MS,
+        .nrf_device    = nav_device_type,
+    };
+    return zsa_nav_presence(&in);
+}
+
+static void nav_state_task(void) {
+    static struct zsa_nav_state sent;
+    static uint32_t             sent_ms;
+    static bool                 primed;
+
+    if (!link_ready) {
+        return;
+    }
+
+    struct zsa_nav_state now     = nav_state_now();
+    bool                 changed = memcmp(&now, &sent, sizeof(now)) != 0;
+    uint32_t             since   = timer_elapsed32(sent_ms);
+
+    bool quiet = timer_elapsed32(periodic_tx_ms) >= NAV_STATE_STAGGER_MS;
+
+    if (!primed) {
+        if (!quiet) {
+            return;
+        }
+    } else if (changed) {
+        if (since < NAV_STATE_MIN_GAP_MS) {
+            return;
+        }
+    } else if (since < ZSA_NAV_STATE_INTERVAL_MS || !quiet) {
+        return;
+    }
+
+    zsa_wireless_send_frame(ZSA_MSG_CMD_NAV_STATE, (const uint8_t *)&now, sizeof(now));
+    sent    = now;
+    sent_ms = timer_read32();
+    primed  = true;
+}
+
+_Static_assert(sizeof(struct zsa_nav_state) == ZSA_NAV_STATE_SIZE, "nav state payload size");
+
 /* ---- Telemetry (oryx raw-HID ORYX_CMD_GET_TELEMETRY) ---- */
 
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
@@ -1194,16 +1284,9 @@ static bool pmic_rails_fresh(void) {
     return link_ready && pmic_rails_seen && timer_elapsed32(last_pmic_rails_ms) < BATTERY_STALE_MS;
 }
 
-static uint8_t nav_mask(uint8_t device_type) {
-    switch (device_type) {
-        case ZSA_NAV_DEVICE_TRACKBALL:
-            return ORYX_TLM_NAV_TRACKBALL;
-        case ZSA_NAV_DEVICE_TOUCHPAD:
-            return ORYX_TLM_NAV_TRACKPAD;
-        default:
-            return 0;
-    }
-}
+/* zsa_nav_presence() fills the telemetry nav fields as they are. */
+_Static_assert(ORYX_TLM_NAV_TRACKBALL == ZSA_NAV_CAP_TRACKBALL && ORYX_TLM_NAV_TRACKPAD == ZSA_NAV_CAP_TRACKPAD, "nav mask bits");
+_Static_assert(ORYX_TLM_NAV_UNKNOWN == ZSA_NAV_STATE_UNKNOWN, "nav unknown value");
 
 /* Only ever called where both answers are actually known — the KNOWN bit is
  * what stops a host reading a cleared bit as a confident "no". */
@@ -1250,62 +1333,11 @@ static void telemetry_battery(oryx_telemetry_t *tlm) {
 }
 
 static void telemetry_nav(oryx_telemetry_t *tlm) {
-    tlm->nav_build = nav_cap_mask;
-
-    /* Combine the per-device probes: LOCAL wins over MIRROR over NONE over
-     * UNSUPPORTED, and `found` collects every device answering locally. */
-    uint8_t tb    = zsa_nav_trackball_probe_state();
-    uint8_t tp    = zsa_nav_trackpad_probe_state();
-    uint8_t probe = ZSA_NAV_PROBE_UNSUPPORTED;
-    uint8_t found = 0;
-    if (tb == ZSA_NAV_PROBE_LOCAL) found |= ORYX_TLM_NAV_TRACKBALL;
-    if (tp == ZSA_NAV_PROBE_LOCAL) found |= ORYX_TLM_NAV_TRACKPAD;
-    if (found) {
-        probe = ZSA_NAV_PROBE_LOCAL;
-    } else if (tb == ZSA_NAV_PROBE_MIRROR || tp == ZSA_NAV_PROBE_MIRROR) {
-        probe = ZSA_NAV_PROBE_MIRROR;
-    } else if (tb == ZSA_NAV_PROBE_NONE || tp == ZSA_NAV_PROBE_NONE) {
-        probe = ZSA_NAV_PROBE_NONE;
-    }
-    /* The right half sharing our I2C net is what makes a device at the real
-     * address ambiguous: the TRRS segments do not isolate, so a right-plugged
-     * device answers at exactly the address a left-plugged one would. */
-    bool right_on_bus = zsa_stm32_owns_right_bus();
-
-    /* A build that announced no nav capability told the nRF to stop detecting
-     * altogether (nav_announce_task), so its EVT_NAV_PRESENT of "none" is not
-     * evidence of an empty connector — and nothing probed our own bus either.
-     * Both halves stay unknown. */
-    if (nav_cap_mask == 0) {
-        return;
-    }
-
-    /* Right half. Its own nRF probes its nav connector and reports what it
-     * finds — but only while ESB is up. Wired it suspends the radio and stops
-     * looking, so the last value proves nothing and we fall back to what the
-     * shared bus shows. */
-    if (!right_on_bus) {
-        tlm->nav_right = zsa_wireless_nav_device_seen() ? nav_mask(nav_device_type) : ORYX_TLM_NAV_UNKNOWN;
-    } else if (probe == ZSA_NAV_PROBE_NONE) {
-        tlm->nav_right = 0; /* nothing answered on a net that reaches both halves */
-    }
-
-    /* Left half. Nothing on the bus is a real answer. A device on the bus is
-     * only the left's when the right half is not sharing the net; otherwise
-     * the side is genuinely undecidable from here and stays unknown. */
-    switch (probe) {
-        case ZSA_NAV_PROBE_NONE:
-        case ZSA_NAV_PROBE_MIRROR:
-            tlm->nav_left = 0;
-            break;
-        case ZSA_NAV_PROBE_LOCAL:
-            if (!right_on_bus) {
-                tlm->nav_left = found;
-            }
-            break;
-        default:
-            break; /* UNSUPPORTED: no driver probed, so we cannot say */
-    }
+    struct zsa_nav_state nav = nav_state_now();
+    tlm->nav_build = nav.build;
+    tlm->nav_left  = nav.left;
+    tlm->nav_right = nav.right;
+    tlm->nav_bus   = nav.bus;
 }
 
 /* What the charging policy decided and what came of it. Reports what was
@@ -1490,9 +1522,10 @@ static void trrs_state_task(void) {
     }
 
     send_trrs_state(plugged);
-    last_sent_ms = timer_read32();
-    last_plugged = plugged;
-    primed       = true;
+    last_sent_ms   = timer_read32();
+    periodic_tx_ms = last_sent_ms;
+    last_plugged   = plugged;
+    primed         = true;
 }
 
 /* ---- Power stages ----
@@ -1724,6 +1757,7 @@ static void sleep_enter(uint32_t idle_ms) {
     zsa_log("power: sleep");
     idle_step = ZSA_IDLE_SLEEP;
     send_idle_state(idle_step);
+    zsa_nav_link_sleep(&nav_link_age, true, timer_read32(), ZSA_LINK_STATE_STALE_MS);
 
     sleep_idle_base_ms = idle_ms;
     sleep_entered_ms   = timer_read32();
@@ -1764,6 +1798,7 @@ static void sleep_exit_for(uint8_t why) {
     idle_floor_ms      = timer_read32();
     nav_window_request = true;
     send_idle_state(idle_step);
+    zsa_nav_link_sleep(&nav_link_age, false, timer_read32(), ZSA_LINK_STATE_STALE_MS);
     nav_sleep_end();
 
 #ifdef RGB_MATRIX_ENABLE
@@ -3063,6 +3098,7 @@ static void right_telemetry_task(void) {
          * copy out instead. */
         if (link_ready) {
             zsa_wireless_send_frame(ZSA_MSG_CMD_RIGHT_TELEMETRY, (const uint8_t *)&got, sizeof(got));
+            periodic_tx_ms = timer_read32();
         }
     }
 }
@@ -3197,6 +3233,7 @@ static void scan_diag_task(void) {
 #else
     zsa_wireless_send_frame(ZSA_MSG_CMD_SCAN_DIAG, (const uint8_t *)&scan_diag_last, sizeof(scan_diag_last));
 #endif
+    periodic_tx_ms = timer_read32();
 
     scan_diag_scans      = 0;
     scan_diag_max_gap_ms = 0;
@@ -3230,6 +3267,9 @@ void bluetooth_task(void) {
 
     /* Claim the left boost for a left nav device or a probe window */
     nav_boost_task();
+
+    /* Nav presence level to the nRF */
+    nav_state_task();
 
     /* Fire BT_UNPR once its hold completes */
     unpair_hold_task();

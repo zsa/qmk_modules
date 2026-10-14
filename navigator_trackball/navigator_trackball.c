@@ -247,8 +247,12 @@ uint32_t sci18is606_read_callback(uint32_t trigger_time, void *cb_arg) {
 // drive. The latched address says which of the two answered, which is as close
 // to a side-of-the-board signal as the STM32 gets.
 uint8_t zsa_nav_trackball_probe_state(void) {
-    if (!busdev_is_up(nav_dev)) {
+    busdev_state_t state = busdev_state(nav_dev);
+    if (state == BUSDEV_ABSENT) {
         return ZSA_NAV_PROBE_NONE;
+    }
+    if (state != BUSDEV_UP) {
+        return ZSA_NAV_PROBE_PENDING;
     }
     return (busdev_addr(nav_dev) == NAVIGATOR_TRACKBALL_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
 }

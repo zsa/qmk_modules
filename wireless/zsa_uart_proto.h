@@ -175,6 +175,14 @@ enum zsa_msg_type {
     ZSA_MSG_CONFIRM_REPLY    = 0x39,  /* nRF -> STM, ZSA_CONFIRM_REPLY_LEN B:
                                        * struct zsa_confirm_reply */
 
+    /* STM32 -> nRF: state (0x40-0x4F) */
+    ZSA_MSG_CMD_NAV_STATE    = 0x40,  /* 4 B: struct zsa_nav_state — the nav
+                                       * devices the STM32 reports per half,
+                                       * as in its raw-HID telemetry. Sent on
+                                       * every change and as a level every
+                                       * ZSA_NAV_STATE_INTERVAL_MS. Not in
+                                       * ignition's copy of this header. */
+
     /* nRF -> STM32: queries (0x70-0x7F) */
     ZSA_MSG_QUERY_USB_STATE  = 0x70,  /* 0 B: nRF asks STM32 for USB state */
 
@@ -532,6 +540,22 @@ enum zsa_nav_device_type {
 struct __attribute__((packed)) zsa_nav_present {
     uint8_t device_type; /* enum zsa_nav_device_type */
 };
+
+/* ZSA_MSG_CMD_NAV_STATE (4 bytes). Each field is a ZSA_NAV_CAP_* mask, or
+ * ZSA_NAV_STATE_UNKNOWN. `bus` holds devices found on the bus both halves
+ * share while the TRRS cable is plugged, where the side cannot be told; 0
+ * when the bus is not shared. The receiver treats the state as unknown once
+ * ZSA_NAV_STATE_STALE_MS passes without one. */
+#define ZSA_NAV_STATE_UNKNOWN     0xFF
+#define ZSA_NAV_STATE_INTERVAL_MS 1000
+#define ZSA_NAV_STATE_STALE_MS    3000
+struct __attribute__((packed)) zsa_nav_state {
+    uint8_t build; /* devices this build can drive */
+    uint8_t left;
+    uint8_t right;
+    uint8_t bus;
+};
+#define ZSA_NAV_STATE_SIZE 4
 
 /* struct zsa_nav_motion removed with ZSA_MSG_EVT_NAV_MOTION (0x86, reserved). */
 

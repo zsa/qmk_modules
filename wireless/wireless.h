@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "zsa_uart_proto.h"
 #include "zsa_right_telemetry.h"
+#include "nav_presence.h"
 
 /* ZSA_MSG_CMD_IDLE_STATE values. Only ACTIVE and SLEEP are sent; DIM and DEEP
  * are kept for the wire and are never sent by this module. */
@@ -150,22 +151,7 @@ uint8_t zsa_wireless_nav_device_type(void);  /* enum zsa_nav_device_type, 0 if n
  * plugged in" rather than "never asked". */
 bool zsa_wireless_nav_device_seen(void);
 
-/* What the compiled-in nav driver found the last time it probed. The driver
- * tries the real device address first — a chip on the STM32's own I2C bus —
- * and only then the left nRF's mirror address, which exists solely to relay a
- * right-plugged device while wireless. Which one answered is the only
- * side-of-the-board signal QMK has.
- *
- * Note the ambiguity it does not resolve: the TRRS segments do not isolate, so
- * a right-plugged device is on the same net and answers at the same real
- * address whenever the cable is plugged. LOCAL means "on our bus", not "on the
- * left half". */
-enum zsa_nav_probe {
-    ZSA_NAV_PROBE_UNSUPPORTED = 0, /* no nav driver in this build: nothing looked */
-    ZSA_NAV_PROBE_NONE,            /* looked, neither address answered */
-    ZSA_NAV_PROBE_LOCAL,           /* the real device address answered */
-    ZSA_NAV_PROBE_MIRROR,          /* only the left-nRF mirror answered */
-};
+/* enum zsa_nav_probe: nav_presence.h. */
 
 /* Weak hooks, one per nav module; each module compiled into the build
  * overrides its own. Return enum zsa_nav_probe. */

@@ -35,7 +35,9 @@
  * ZSA_NAV_PROBE_SLEEP_INTERVAL_MS while in Sleep (the STM32 leaves STOP for
  * it; a device found wakes the board). A window lasts ZSA_NAV_PROBE_WINDOW_MS
  * from the request, longer while a device that answered is still being set
- * up. Not used in builds without nav modules. */
+ * up. With VBUS (which feeds the connector) and the cable unplugged, the
+ * real addresses are probed every ZSA_NAV_PROBE_INTERVAL_MS without a claim.
+ * Not used in builds without nav modules. */
 #ifndef ZSA_NAV_PROBE_INTERVAL_MS
 #    define ZSA_NAV_PROBE_INTERVAL_MS 2000
 #endif
@@ -157,6 +159,15 @@
  * cadence as the pair state. */
 #ifndef ZSA_LINK_STATE_STALE_MS
 #    define ZSA_LINK_STATE_STALE_MS 5000
+#endif
+
+/* Right-half nav presence from the left nRF is reported this long after the
+ * right half is seen linked (EVT_LINK_STATE OK) and the capability announce is
+ * acked: the right starts probing on its first reply with NAV_ENABLED, and
+ * retries every 1000 ms (NAV_PROBE_INTERVAL_MS in voyager_right ptx_main.c)
+ * when a probe fails or its peripherals are not up yet. */
+#ifndef ZSA_NAV_RIGHT_SETTLE_MS
+#    define ZSA_NAV_RIGHT_SETTLE_MS 1500
 #endif
 
 /* ---- Low-battery boot guard (see wireless.c) ---- */

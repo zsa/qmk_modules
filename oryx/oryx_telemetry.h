@@ -41,6 +41,7 @@ tell". Flags carry ORYX_TLM_BAT_KNOWN because a clear bit otherwise reads as a
 confident "no".
 */
 
+#include <stddef.h>
 #include <stdint.h>
 #include "oryx.h" // RAW_EPSIZE, the opcodes this payload answers
 
@@ -48,7 +49,7 @@ confident "no".
 #define ORYX_TLM_VERSION 1
 
 /* Defined bytes after the `len` byte itself. Grows as fields are appended. */
-#define ORYX_TLM_LEN 25
+#define ORYX_TLM_LEN 26
 
 /* Battery level we could not read. Never 0: that is a flat battery. */
 #define ORYX_TLM_LEVEL_UNKNOWN 0xFF
@@ -124,10 +125,15 @@ typedef struct __attribute__((packed)) {
     uint8_t  ble_addr[6];         /* least significant byte first, as it arrives from the nRF */
     uint8_t  ble_slot;            /* 0-based, or ORYX_TLM_BLE_SLOT_UNKNOWN */
     uint8_t  ble_slot_count;      /* host slots the board keeps; 0 unknown */
-    uint8_t reserved[4];          /* zero; room for four more one-byte fields */
+    /* Devices on the I2C net both halves share while the TRRS cable is plugged,
+     * where the side cannot be told: ORYX_TLM_NAV_*, 0 with the cable
+     * unplugged, or ORYX_TLM_NAV_UNKNOWN. */
+    uint8_t nav_bus;
+    uint8_t reserved[3];          /* zero; room for three more one-byte fields */
 } oryx_telemetry_t;
 
 _Static_assert(sizeof(oryx_telemetry_t) == RAW_EPSIZE - 1, "telemetry payload must fill the report");
+_Static_assert(offsetof(oryx_telemetry_t, nav_bus) == 27 && ORYX_TLM_LEN == offsetof(oryx_telemetry_t, nav_bus) - offsetof(oryx_telemetry_t, len), "nav_bus is the last defined byte");
 
 /* Everything unknown, ready for whoever can actually answer. Not memset(0):
  * zero is a real answer for most of these fields. */
@@ -143,6 +149,7 @@ static inline void oryx_telemetry_reset(oryx_telemetry_t *tlm) {
     tlm->battery_right_source = ORYX_TLM_SRC_UNKNOWN;
     tlm->nav_left             = ORYX_TLM_NAV_UNKNOWN;
     tlm->nav_right            = ORYX_TLM_NAV_UNKNOWN;
+    tlm->nav_bus              = ORYX_TLM_NAV_UNKNOWN;
     tlm->charge_state         = ORYX_TLM_CHG_UNKNOWN;
     tlm->ble_addr_type        = ORYX_TLM_BLE_ADDR_UNKNOWN;
     tlm->ble_slot             = ORYX_TLM_BLE_SLOT_UNKNOWN;

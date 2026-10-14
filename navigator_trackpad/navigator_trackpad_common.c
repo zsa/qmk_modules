@@ -29,8 +29,12 @@ static uint8_t trackpad_addr = NAVIGATOR_TRACKPAD_ADDRESS;
 // drive. The latched address says which of the two answered, which is as close
 // to a side-of-the-board signal as the STM32 gets.
 uint8_t zsa_nav_trackpad_probe_state(void) {
-    if (!busdev_is_up(navigator_trackpad_dev)) {
+    busdev_state_t state = busdev_state(navigator_trackpad_dev);
+    if (state == BUSDEV_ABSENT) {
         return ZSA_NAV_PROBE_NONE;
+    }
+    if (state != BUSDEV_UP) {
+        return ZSA_NAV_PROBE_PENDING;
     }
     return (busdev_addr(navigator_trackpad_dev) == NAVIGATOR_TRACKPAD_ADDRESS) ? ZSA_NAV_PROBE_LOCAL : ZSA_NAV_PROBE_MIRROR;
 }
