@@ -593,6 +593,54 @@ static bool usb_host_present(void) {
            (state == USB_ACTIVE || (state == USB_SUSPENDED && USB_DRIVER.saved_state == USB_ACTIVE));
 }
 
+#if ZSA_USB_STOP_WITHOUT_VBUS
+/* ---- USB peripheral without VBUS ----
+ *
+ * Stopped (transceiver powered down, clock gated) while the nRF reports no
+ * VBUS, restarted when it reports VBUS: the steps of restart_usb_driver()
+ * without its 50 ms wait, the D+ pull-up being off while stopped. The config
+ * is the one init_usb_driver() started the driver with. */
+extern usb_endpoint_in_t  usb_endpoints_in[USB_ENDPOINT_IN_COUNT];
+extern usb_endpoint_out_t usb_endpoints_out[USB_ENDPOINT_OUT_COUNT];
+
+static bool             usb_stopped;
+static const USBConfig *usb_saved_config;
+
+static void usb_follow_vbus(bool vbus) {
+    if (!vbus && !usb_stopped) {
+        usb_saved_config = USB_DRIVER.config;
+        if (usb_saved_config == NULL) {
+            return;
+        }
+        usbDisconnectBus(&USB_DRIVER);
+        usbStop(&USB_DRIVER);
+        for (int i = 0; i < USB_ENDPOINT_IN_COUNT; i++) {
+            usb_endpoint_in_stop(&usb_endpoints_in[i]);
+        }
+        for (int i = 0; i < USB_ENDPOINT_OUT_COUNT; i++) {
+            usb_endpoint_out_stop(&usb_endpoints_out[i]);
+        }
+        usb_stopped = true;
+    } else if (vbus && usb_stopped) {
+        for (int i = 0; i < USB_ENDPOINT_IN_COUNT; i++) {
+            usb_endpoint_in_init(&usb_endpoints_in[i]);
+            usb_endpoint_in_start(&usb_endpoints_in[i]);
+        }
+        for (int i = 0; i < USB_ENDPOINT_OUT_COUNT; i++) {
+            usb_endpoint_out_init(&usb_endpoints_out[i]);
+            usb_endpoint_out_start(&usb_endpoints_out[i]);
+        }
+        usbStart(&USB_DRIVER, usb_saved_config);
+        usbConnectBus(&USB_DRIVER);
+        usb_stopped = false;
+    }
+}
+#else
+static inline void usb_follow_vbus(bool vbus) {
+    (void)vbus;
+}
+#endif
+
 /* Send all current STM32 state to nRF — called on link establishment */
 static void send_full_state(void) {
     send_usb_state(usb_host_present());
@@ -1007,6 +1055,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             if (frame->len >= sizeof(struct zsa_vbus_state)) {
                 const struct zsa_vbus_state *v = (const struct zsa_vbus_state *)frame->payload;
                 bool present = v->present != 0;
+                /* USB runs before the D+ pull-up rises and stops after it falls. */
+                if (present) {
+                    usb_follow_vbus(true);
+                }
                 if (present != nrf_vbus_present) {
                     nrf_vbus_present = present;
                     if (!present) {
@@ -1021,6 +1073,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                     limits_commanded = false;
                     hibernate_sent   = false;
                     zsa_wireless_vbus_changed(present);
+                }
+                if (!present) {
+                    usb_follow_vbus(false);
                 }
             }
             break;
