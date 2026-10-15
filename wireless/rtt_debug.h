@@ -11,7 +11,7 @@ void     zsa_rtt_init(void);
 /* Call once per keyboard_task() iteration; computes loop dt and emits a
  * 1 Hz stats line. */
 void     zsa_rtt_loop_tick(void);
-/* Raw DWT cycle counter (72 MHz), for stamping around blocking calls. */
+/* Raw DWT cycle counter (SYSCLK), for stamping around blocking calls. */
 uint32_t zsa_rtt_cycles(void);
 /* Record one UART TX frame; start_cycles = zsa_rtt_cycles() taken before
  * the blocking uart_transmit(). */

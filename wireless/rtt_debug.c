@@ -2,18 +2,19 @@
 #ifdef ZSA_RTT_DEBUG
 
 #include <stdbool.h>
+#include <hal.h>
 #include "rtt_debug.h"
 #include "SEGGER_RTT.h"
 #include "timer.h"
 #include "zsa_uart_proto.h"
 
-/* DWT cycle counter, STM32F303 @ 72 MHz. Deltas are computed on raw cycle
+/* DWT cycle counter at SYSCLK. Deltas are computed on raw cycle
  * counts (wrap-safe for intervals < ~59 s) and converted to µs at the end. */
 #define REG32(a)   (*(volatile uint32_t *)(a))
 #define DEMCR      REG32(0xE000EDFCu)
 #define DWT_CTRL   REG32(0xE0001000u)
 #define DWT_CYCCNT REG32(0xE0001004u)
-#define CPU_MHZ    72u
+#define CPU_MHZ    (STM32_SYSCLK / 1000000u)
 
 uint32_t zsa_rtt_cycles(void) {
     return DWT_CYCCNT;
