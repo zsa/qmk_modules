@@ -95,12 +95,6 @@
 #    define ZSA_ACTIVE_PACE_US 1000
 #endif
 
-/* Stop the USB peripheral while the nRF reports no VBUS and restart it when
- * VBUS returns. 0 keeps it running. */
-#ifndef ZSA_USB_STOP_WITHOUT_VBUS
-#    define ZSA_USB_STOP_WITHOUT_VBUS 1
-#endif
-
 /* ---- LED brightness policy (see wireless.c) ---- */
 
 /* Ceiling on the effective RGB value while VBUS is present (see
