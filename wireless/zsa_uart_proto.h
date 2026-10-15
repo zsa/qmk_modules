@@ -48,6 +48,10 @@ enum zsa_msg_type {
                                        * fallback report (report ID 6) has no
                                        * PTP-specific shape and rides
                                        * ZSA_MSG_HID_MOUSE instead. */
+    ZSA_MSG_ORYX_TO_HOST     = 0x05,  /* ZSA_ORYX_REPORT_LEN B: one Oryx raw-HID
+                                       * IN report, as it would go on the USB
+                                       * raw IN endpoint. Not known to
+                                       * ignition. */
 
     /* STM32 -> nRF: queries (0x10-0x1F) */
     ZSA_MSG_QUERY_BLE_STATUS = 0x10,
@@ -275,9 +279,16 @@ enum zsa_msg_type {
                                        * alongside EVT_BLE_IDENTITY and on
                                        * QUERY_BATTERY. Not known to
                                        * ignition. */
+    ZSA_MSG_EVT_ORYX_FROM_HOST = 0xC2, /* ZSA_ORYX_REPORT_LEN B: one Oryx
+                                       * raw-HID OUT report from the BLE host,
+                                       * zero padded. Other lengths are
+                                       * dropped. Not known to ignition. */
 };
 
 /* ---- Payload structures ---- */
+
+/* ZSA_MSG_ORYX_TO_HOST / ZSA_MSG_EVT_ORYX_FROM_HOST: one Oryx raw-HID report. */
+#define ZSA_ORYX_REPORT_LEN 32
 
 /* ZSA_MSG_HID_KEYBOARD (8 bytes) */
 struct __attribute__((packed)) zsa_hid_keyboard {

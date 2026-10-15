@@ -26,6 +26,9 @@
 /* rtt_debug.h resolves to no-op static inlines unless ZSA_RTT_DEBUG is set. */
 #include "rtt_debug.h"
 #include "busdev.h"
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+#    include "oryx.h"
+#endif
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
 #    include "is31fl3731.h"
@@ -511,6 +514,9 @@ void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len)
      * (every payload byte escapes). static is safe because QMK runs one cooperative
      * task for the keymap/uart path — no reentrancy. */
     static uint8_t buf[(ZSA_LOG_MAX_PAYLOAD + ZSA_FRAME_OVERHEAD) * 2 + 1];
+    if (len > ZSA_LOG_MAX_PAYLOAD) {
+        return;
+    }
     uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
     uint32_t rtt_t0    = zsa_rtt_cycles(); // TEMP DEBUG
     uart_transmit(buf, frame_len);
@@ -845,6 +851,11 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 zsa_rtt_event(s->connected ? "BLE_STATUS connected" : "BLE_STATUS disconnected"); // TEMP DEBUG
                 nrf_ble_connected  = s->connected != 0;
                 nrf_ble_device_idx = s->device_idx;
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+                if (!nrf_ble_connected) {
+                    oryx_ble_link_down();
+                }
+#endif
             }
             break;
 
@@ -889,6 +900,14 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 pmic_rails_seen    = true;
             }
             break;
+
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+        case ZSA_MSG_EVT_ORYX_FROM_HOST:
+            if (frame->len == ZSA_ORYX_REPORT_LEN) {
+                oryx_receive_ble(frame->payload, ZSA_ORYX_REPORT_LEN);
+            }
+            break;
+#endif
 
         case ZSA_MSG_EVT_PAIR_STATE:
             if (frame->len >= sizeof(struct zsa_pair_state)) {
@@ -3459,6 +3478,20 @@ void bluetooth_send_system(uint16_t usage) {
     payload[2] = (uint8_t)(usage >> 8);
     zsa_wireless_send_frame(ZSA_MSG_HID_SYSTEM, payload, sizeof(payload));
 }
+
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+_Static_assert(RAW_EPSIZE == ZSA_ORYX_REPORT_LEN, "oryx report must match the wire report");
+_Static_assert(ZSA_ORYX_REPORT_LEN <= ZSA_LOG_MAX_PAYLOAD, "oryx report must fit the send_frame buffer");
+
+/* Strong override of oryx.c's weak hook. */
+bool oryx_ble_send(const uint8_t *data) {
+    if (!link_ready || !nrf_ble_connected) {
+        return false;
+    }
+    zsa_wireless_send_frame(ZSA_MSG_ORYX_TO_HOST, data, ZSA_ORYX_REPORT_LEN);
+    return true;
+}
+#endif
 
 void bluetooth_send_raw_hid(uint8_t *data, uint8_t length) {
     /* Raw HID not supported over wireless */

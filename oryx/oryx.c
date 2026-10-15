@@ -38,19 +38,45 @@ bool send_report(usb_endpoint_in_lut_t endpoint, void *report, size_t size);
 RGB webhid_leds[RGB_MATRIX_LED_COUNT];
 #endif
 
+/* Transport the paired session lives on, set by PAIRING_INIT. */
+static oryx_transport_t session_transport = ORYX_TRANSPORT_USB;
+/* Where events go: the arrival transport while a command is handled, the
+ * session transport otherwise. */
+static oryx_transport_t send_transport = ORYX_TRANSPORT_USB;
+
+/* Weak default: no BLE transport. Overridden by the wireless module. */
+__attribute__((weak)) bool oryx_ble_send(const uint8_t *data) {
+    (void)data;
+    return false;
+}
+
 void raw_hid_send_oryx(uint8_t *data, uint8_t length) {
     if (length != RAW_EPSIZE) {
         return;
     }
+    if (send_transport == ORYX_TRANSPORT_BLE) {
+        if (!oryx_ble_send(data) && session_transport == ORYX_TRANSPORT_BLE) {
+            rawhid_state.paired = false;
+        }
+        return;
+    }
     if (!send_report(RAW_EP_NAME, data, length)) {
 #if !defined(PROTOCOL_LUFA)
-        rawhid_state.paired = false;
+        if (session_transport == ORYX_TRANSPORT_USB) {
+            rawhid_state.paired = false;
+        }
 #endif
     }
 }
 
+void oryx_ble_link_down(void) {
+    if (session_transport == ORYX_TRANSPORT_BLE) {
+        rawhid_state.paired = false;
+    }
+}
+
 void oryx_error(uint8_t code) {
-    uint8_t event[RAW_EPSIZE];
+    uint8_t event[RAW_EPSIZE] = {0};
     event[0] = ORYX_EVT_ERROR;
     event[1] = code;
     raw_hid_send_oryx(event, RAW_EPSIZE);
@@ -58,7 +84,7 @@ void oryx_error(uint8_t code) {
 
 void oryx_layer_event(void) {
     uint8_t layer;
-    uint8_t event[RAW_EPSIZE];
+    uint8_t event[RAW_EPSIZE] = {0};
     layer    = get_highest_layer(layer_state | default_layer_state);
     event[0] = ORYX_EVT_LAYER;
     event[1] = layer;
@@ -68,7 +94,7 @@ void oryx_layer_event(void) {
 
 void pairing_failed_event(void) {
     rawhid_state.paired = false;
-    uint8_t event[RAW_EPSIZE];
+    uint8_t event[RAW_EPSIZE] = {0};
     event[0] = ORYX_EVT_PAIRING_FAILED;
     event[1] = ORYX_STOP_BIT;
     raw_hid_send_oryx(event, sizeof(event));
@@ -76,7 +102,7 @@ void pairing_failed_event(void) {
 
 void pairing_success_event(void) {
     rawhid_state.paired = true;
-    uint8_t event[RAW_EPSIZE];
+    uint8_t event[RAW_EPSIZE] = {0};
     event[0] = ORYX_EVT_PAIRING_SUCCESS;
     event[1] = ORYX_STOP_BIT;
     raw_hid_send_oryx(event, sizeof(event));
@@ -84,14 +110,14 @@ void pairing_success_event(void) {
 }
 
 void toggle_smart_layer(void) {
-    uint8_t event[RAW_EPSIZE];
+    uint8_t event[RAW_EPSIZE] = {0};
     event[0] = ORYX_EVT_TOGGLE_SMART_LAYER;
     event[1] = ORYX_STOP_BIT;
     raw_hid_send_oryx(event, sizeof(event));
 }
 
 void trigger_smart_layer(void) {
-    uint8_t event[RAW_EPSIZE];
+    uint8_t event[RAW_EPSIZE] = {0};
     event[0] = ORYX_EVT_TRIGGER_SMART_LAYER;
     event[1] = ORYX_STOP_BIT;
     raw_hid_send_oryx(event, sizeof(event));
@@ -134,13 +160,13 @@ __attribute__((weak)) void oryx_scan_diag_fill(oryx_scan_diag_t *diag) {
     oryx_scan_diag_reset(diag);
 }
 
-void raw_hid_receive(uint8_t *data, uint8_t length) {
+static void oryx_handle_command(uint8_t *data, uint8_t length) {
     uint8_t  command = data[0];
     uint8_t *param   = &data[1];
 
     switch (command) {
         case ORYX_CMD_GET_FW_VERSION: {
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             uint8_t fw_version_size = sizeof(SERIAL_NUMBER);
             uint8_t stop[1];
 
@@ -155,7 +181,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
 
         case ORYX_GET_PROTOCOL_VERSION: {
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_GET_PROTOCOL_VERSION;
             event[1] = ORYX_PROTOCOL_VERSION;
             event[2] = ORYX_STOP_BIT;
@@ -165,7 +191,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
 
         case ORYX_CMD_GET_TELEMETRY: {
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_TELEMETRY;
             /* No ORYX_STOP_BIT: the payload is binary and fills the report,
              * so a terminator would be indistinguishable from a data byte.
@@ -177,7 +203,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
 
         case ORYX_CMD_GET_CHARGE_TELEMETRY: {
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_CHARGE_TELEMETRY;
             /* No ORYX_STOP_BIT: the payload is binary and fills the report,
              * so a terminator would be indistinguishable from a data byte.
@@ -189,7 +215,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
 
         case ORYX_CMD_GET_PMIC_RAILS: {
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_PMIC_RAILS;
             /* No ORYX_STOP_BIT: the payload is binary and fills the report,
              * so a terminator would be indistinguishable from a data byte.
@@ -201,7 +227,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
 
         case ORYX_CMD_GET_SCAN_DIAG: {
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_SCAN_DIAG;
             /* Binary payload, no ORYX_STOP_BIT; the fill writes every byte. */
             oryx_scan_diag_fill((oryx_scan_diag_t *)&event[1]);
@@ -210,15 +236,27 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         }
 
         case ORYX_CMD_PAIRING_INIT:
+            session_transport = send_transport;
             pairing_success_event();
 
         case ORYX_CMD_PAIRING_VALIDATE:
             break; // Keeping this for backwards compatibility with older versions of Wally / Keymapp
 
+        case ORYX_CMD_DISCONNECT:
+            // BLE only: sent by the nRF when the host unsubscribes from events
+            if (send_transport != ORYX_TRANSPORT_BLE) {
+                oryx_error(ORYX_ERR_UNKNOWN_COMMAND);
+                break;
+            }
+            if (session_transport == ORYX_TRANSPORT_BLE) {
+                rawhid_state.paired = false;
+            }
+            break;
+
         case ORYX_SET_LAYER:
             // The first param's byte is on / off
             // The second param's byte is the layer number
-            if (rawhid_state.paired == true) {
+            if (rawhid_state.paired == true && send_transport == session_transport) {
                 if (param[0] == 0) {
                     layer_off(param[1]);
                 } else {
@@ -234,7 +272,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             } else {
                 set_webhid_effect();
             }
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_RGB_CONTROL;
             event[1] = rawhid_state.rgb_control;
             raw_hid_send_oryx(event, RAW_EPSIZE);
@@ -350,7 +388,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
                 STATUS_LED_6(0);
 #endif
             }
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_STATUS_LED_CONTROL;
             event[1] = rawhid_state.status_led_control;
             raw_hid_send_oryx(event, RAW_EPSIZE);
@@ -367,7 +405,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
         case ORYX_GET_AUTOMOUSE:
 #ifdef COMMUNITY_MODULE_AUTOMOUSE_ENABLE
         {
-            uint8_t event[RAW_EPSIZE];
+            uint8_t event[RAW_EPSIZE] = {0};
             event[0] = ORYX_EVT_AUTOMOUSE;
             event[1] = automouse_get_device_enabled(AUTOMOUSE_DEVICE_TRACKBALL);
             event[2] = automouse_get_device_enabled(AUTOMOUSE_DEVICE_TRACKPAD);
@@ -383,13 +421,32 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
     }
 }
 
+static void oryx_dispatch(uint8_t *data, uint8_t length, oryx_transport_t from) {
+    send_transport = from;
+    oryx_handle_command(data, length);
+    send_transport = session_transport;
+}
+
+void raw_hid_receive(uint8_t *data, uint8_t length) {
+    oryx_dispatch(data, length, ORYX_TRANSPORT_USB);
+}
+
+void oryx_receive_ble(const uint8_t *data, uint8_t length) {
+    if (length != RAW_EPSIZE) {
+        return;
+    }
+    uint8_t report[RAW_EPSIZE];
+    memcpy(report, data, RAW_EPSIZE);
+    oryx_dispatch(report, RAW_EPSIZE, ORYX_TRANSPORT_BLE);
+}
+
 bool pre_process_record_oryx(uint16_t keycode, keyrecord_t *record) {
     if (!pre_process_record_oryx_kb(keycode, record)) {
         return true;
     }
     // While paired, the keyboard sends keystrokes positions to the host
     if (rawhid_state.paired == true) {
-        uint8_t event[RAW_EPSIZE];
+        uint8_t event[RAW_EPSIZE] = {0};
         event[0] = record->event.pressed ? ORYX_EVT_KEYDOWN : ORYX_EVT_KEYUP;
         event[1] = record->event.key.col;
         event[2] = record->event.key.row;
@@ -413,7 +470,7 @@ layer_state_t layer_state_set_oryx(layer_state_t state) {
         // Required for Atmel Boards
         wait_ms(10);
 #endif
-        uint8_t event[RAW_EPSIZE];
+        uint8_t event[RAW_EPSIZE] = {0};
         event[0] = ORYX_EVT_LAYER;
         event[1] = current_layer;
         event[2] = ORYX_STOP_BIT;

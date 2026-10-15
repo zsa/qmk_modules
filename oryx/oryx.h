@@ -115,6 +115,19 @@ typedef struct {
 
 extern rawhid_state_t rawhid_state;
 
+typedef enum {
+    ORYX_TRANSPORT_USB,
+    ORYX_TRANSPORT_BLE,
+} oryx_transport_t;
+
+/* Sends one RAW_EPSIZE report to the BLE host; false if not sent. Weak in
+ * oryx.c, overridden by the wireless module. */
+bool oryx_ble_send(const uint8_t *data);
+/* Feeds one RAW_EPSIZE report received from the BLE host. */
+void oryx_receive_ble(const uint8_t *data, uint8_t length);
+/* Ends a BLE session when the BLE link drops. */
+void oryx_ble_link_down(void);
+
 void oryx_error(uint8_t code);
 void pairing_failed_event(void);
 void pairing_succesful_event(void);
