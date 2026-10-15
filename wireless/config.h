@@ -88,6 +88,13 @@
 #    define ZSA_LEFT_LED_SLICED 1
 #endif
 
+/* Main-loop period without VBUS: each pass ends by waiting for the next
+ * ZSA_ACTIVE_PACE_US boundary of the system time, or a byte from the nRF.
+ * 0 disables it. */
+#ifndef ZSA_ACTIVE_PACE_US
+#    define ZSA_ACTIVE_PACE_US 1000
+#endif
+
 /* ---- LED brightness policy (see wireless.c) ---- */
 
 /* Ceiling on the effective RGB value while VBUS is present (see

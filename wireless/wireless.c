@@ -566,6 +566,7 @@ static void send_trrs_state(bool plugged);
 static void send_idle_state(enum zsa_idle_step step);
 static void right_telemetry_task(void);
 static bool usb_hid_on_usb(void);
+static void active_pace_init(void);
 
 /* A USB host, as opposed to a wall charger or an unplugged cable. VBUS alone
  * is a charger: it raises the D+ pull-up, no host ever resets the bus, and the
@@ -3047,6 +3048,7 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
 
 void bluetooth_init(void) {
     uart_init(ZSA_WIRELESS_BAUD_RATE);
+    active_pace_init();
     zsa_parser_init(&rx_parser);
     link_ready = false;
     last_link_up_ms = timer_read32();
@@ -3272,12 +3274,8 @@ static void scan_diag_task(void) {
     scan_diag_over_20ms  = 0;
 }
 
-void bluetooth_task(void) {
-    watchdog_kick();
-
-    zsa_rtt_loop_tick(); // TEMP DEBUG
-
-    /* Process incoming frames */
+/* Feeds every byte waiting from the nRF to the frame parser. */
+static void uart_rx_drain(void) {
     while (uart_available()) {
         uint8_t byte = uart_read();
         last_rx_ms   = timer_read32();
@@ -3285,6 +3283,54 @@ void bluetooth_task(void) {
             handle_rx_frame(&rx_parser.frame);
         }
     }
+}
+
+#if ZSA_ACTIVE_PACE_US > 0 && defined(MCU_STM32)
+/* ---- Main-loop pacing without VBUS ----
+ *
+ * Each pass ends by waiting for the next ZSA_ACTIVE_PACE_US boundary of the
+ * system time, so the idle thread runs WFI. A byte from the nRF ends the wait
+ * (CHN_INPUT_AVAILABLE, posted by the RX interrupt when the input queue goes
+ * from empty to non-empty) and is drained at once. */
+#    define PACE_RX_EVENT EVENT_MASK(0)
+
+static event_listener_t pace_rx_listener;
+
+static void active_pace_init(void) {
+    chEvtRegisterMaskWithFlags(chnGetEventSource(&UART_DRIVER), &pace_rx_listener, PACE_RX_EVENT, CHN_INPUT_AVAILABLE);
+}
+
+static void active_pace_wait(void) {
+    if (nrf_vbus_present || usbGetDriverStateI(&USB_DRIVER) == USB_ACTIVE) {
+        return;
+    }
+    /* Cleared before the queue check: a byte after the check signals. */
+    chEvtGetAndClearEvents(PACE_RX_EVENT);
+    if (!uart_available()) {
+        sysinterval_t period = TIME_US2I(ZSA_ACTIVE_PACE_US);
+        systime_t     now    = chVTGetSystemTimeX();
+        sysinterval_t left   = period - (sysinterval_t)(now % period);
+        if (chEvtWaitAnyTimeout(PACE_RX_EVENT, left) == 0) {
+            return;
+        }
+    }
+    uart_rx_drain();
+}
+
+void housekeeping_task_wireless(void) {
+    active_pace_wait();
+}
+#else
+static inline void active_pace_init(void) {}
+#endif
+
+void bluetooth_task(void) {
+    watchdog_kick();
+
+    zsa_rtt_loop_tick(); // TEMP DEBUG
+
+    /* Process incoming frames */
+    uart_rx_drain();
 
     /* Periodically send LINK_UP until nRF responds */
     if (!link_ready && timer_elapsed32(last_link_up_ms) >= LINK_UP_INTERVAL_MS) {
