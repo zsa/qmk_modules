@@ -2,7 +2,7 @@
  * ZSA Wireless — BLE status overlay rendering.
  *
  * Draws the status layer's LED readouts: currently a battery fuel gauge for
- * each half on the top rows. Layer selection lives in the keymap; everything
+ * each half on the top rows. Also draws the Bluetooth bank menu. Layer selection lives in the keymap; everything
  * about how the layer looks lives here.
  */
 
@@ -113,7 +113,51 @@ void zsa_wireless_status_render(void) {
     }
 }
 
+/* Full-scale colors, unscaled by the user's brightness and the VBUS cap: the
+ * menu lights five LEDs at most. */
+static RGB ble_menu_color(uint8_t view, uint8_t blink) {
+    switch (view) {
+        case ZSA_BLE_BANK_VIEW_EMPTY:
+            return (RGB){ZSA_BLE_MENU_EMPTY_R, ZSA_BLE_MENU_EMPTY_G, ZSA_BLE_MENU_EMPTY_B};
+        case ZSA_BLE_BANK_VIEW_STORED:
+            return (RGB){0, 0, 255};
+        case ZSA_BLE_BANK_VIEW_CONNECTING:
+            return (RGB){0, blink, 0};
+        case ZSA_BLE_BANK_VIEW_PAIRING:
+            return (RGB){0, 0, blink};
+        case ZSA_BLE_BANK_VIEW_CONNECTED:
+            return (RGB){0, 255, 0};
+        default:
+            return (RGB){ZSA_BLE_MENU_UNKNOWN_VAL, ZSA_BLE_MENU_UNKNOWN_VAL, ZSA_BLE_MENU_UNKNOWN_VAL};
+    }
+}
+
+bool zsa_wireless_ble_menu_render(uint8_t led_min, uint8_t led_max) {
+    if (!zsa_wireless_ble_menu_open()) return false;
+
+    for (uint8_t i = led_min; i < led_max; i++) {
+        rgb_matrix_set_color(i, 0, 0, 0);
+    }
+
+    uint8_t blink = (timer_read32() % ZSA_BLE_MENU_BLINK_MS) < ZSA_BLE_MENU_BLINK_MS / 2 ? 255 : 0;
+
+    for (uint8_t bank = 0; bank < ZSA_BLE_BANK_COUNT; bank++) {
+        uint8_t led = g_led_config.matrix_co[ZSA_BLE_MENU_ROW][ZSA_BLE_MENU_COL + bank];
+        if (led == NO_LED || led < led_min || led >= led_max) continue;
+
+        RGB rgb = ble_menu_color(zsa_wireless_ble_bank_view(bank), blink);
+        rgb_matrix_set_color(led, rgb.r, rgb.g, rgb.b);
+    }
+    return true;
+}
+
 #else /* !RGB_MATRIX_ENABLE */
+
+bool zsa_wireless_ble_menu_render(uint8_t led_min, uint8_t led_max) {
+    (void)led_min;
+    (void)led_max;
+    return false;
+}
 
 void zsa_wireless_status_render(void) {}
 void zsa_wireless_status_draw_gauge(uint8_t first_led, uint8_t soc) {

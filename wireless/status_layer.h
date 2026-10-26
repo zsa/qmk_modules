@@ -32,3 +32,9 @@ void zsa_wireless_status_render(void);
  * want to place a gauge somewhere other than the two default rows. A soc of 0
  * means "unknown" and leaves the row on the background color. */
 void zsa_wireless_status_draw_gauge(uint8_t first_led, uint8_t soc);
+
+/* Bluetooth bank menu (BLE_MENU), drawn over everything else while open: every
+ * LED in [led_min, led_max) dark except the five bank keys. Call it last from
+ * rgb_matrix_indicators_advanced_kb(), after the _user hook. Returns false,
+ * drawing nothing, while the menu is closed. */
+bool zsa_wireless_ble_menu_render(uint8_t led_min, uint8_t led_max);

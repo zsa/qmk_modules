@@ -60,8 +60,8 @@ enum zsa_msg_type {
 
     /* STM32 -> nRF: commands (0x20-0x2F) */
     ZSA_MSG_CMD_HIBERNATE    = 0x20,
-    ZSA_MSG_CMD_PAIR         = 0x21,  /* 0 B: make the nRF discoverable for a
-                                       * bounded pairing window */
+    ZSA_MSG_CMD_PAIR         = 0x21,  /* 0 B: Legacy, ignored. Pairing is
+                                       * ZSA_MSG_CMD_BLE_BANK op PAIR. */
     ZSA_MSG_CMD_IDLE_STATE   = 0x22,
     ZSA_MSG_CMD_USB_STATE    = 0x23,  /* 1 B: 0=no host, 1=USB host (active or suspended) */
     ZSA_MSG_CMD_NAV_ENABLE   = 0x24,  /* 1 B: nav capability bitmask (ZSA_NAV_CAP_*);
@@ -83,16 +83,12 @@ enum zsa_msg_type {
                                        * discoverability now, so QMK never
                                        * sends this. Handler kept for bench
                                        * testing. */
-    ZSA_MSG_CMD_BLE_DISCONNECT = 0x29,  /* 0 B: drop the active BLE link; the
-                                         * nRF re-advertises afterwards */
-    ZSA_MSG_CMD_BLE_UNPAIR   = 0x2A,  /* 0 B: clear all bonds, refresh the BLE
-                                       * identity and re-advertise */
-    ZSA_MSG_CMD_BLE_SWITCH_HOST = 0x2B, /* 0 B: hand over to the next remembered
-                                         * host. The nRF drops the current link
-                                         * and advertises each occupied host
-                                         * slot in turn for a short window. Sent
-                                         * again mid-cycle it skips to the next
-                                         * slot. */
+    ZSA_MSG_CMD_BLE_DISCONNECT = 0x29,  /* 0 B: same as ZSA_MSG_CMD_BLE_BANK
+                                         * op DISCONNECT */
+    ZSA_MSG_CMD_BLE_UNPAIR   = 0x2A,  /* 0 B: Legacy, ignored. Use
+                                       * ZSA_MSG_CMD_BLE_BANK op FORGET. */
+    ZSA_MSG_CMD_BLE_SWITCH_HOST = 0x2B, /* 0 B: Legacy, ignored. Use
+                                         * ZSA_MSG_CMD_BLE_BANK op CONNECT. */
     ZSA_MSG_CMD_RIGHT_TELEMETRY = 0x2C, /* <=ZSA_RIGHT_TLM_SIZE B: struct
                                          * zsa_right_telemetry (see
                                          * zsa_right_telemetry.h), the right
@@ -186,6 +182,10 @@ enum zsa_msg_type {
                                        * every change and as a level every
                                        * ZSA_NAV_STATE_INTERVAL_MS. Not in
                                        * ignition's copy of this header. */
+    ZSA_MSG_CMD_BLE_BANK     = 0x41,  /* 2 B: struct zsa_ble_bank_cmd — act on
+                                       * one host bank (pair, connect,
+                                       * disconnect, forget). Not in ignition's
+                                       * copy of this header. */
 
     /* nRF -> STM32: queries (0x70-0x7F) */
     ZSA_MSG_QUERY_USB_STATE  = 0x70,  /* 0 B: nRF asks STM32 for USB state */
@@ -283,6 +283,11 @@ enum zsa_msg_type {
                                        * raw-HID OUT report from the BLE host,
                                        * zero padded. Other lengths are
                                        * dropped. Not known to ignition. */
+    ZSA_MSG_EVT_BLE_BANKS    = 0xC3,  /* 4 B: struct zsa_ble_banks — host bank
+                                       * table and link state. Sent on every
+                                       * change and as a level every
+                                       * ZSA_BLE_BANKS_INTERVAL_MS. Not known
+                                       * to ignition. */
 };
 
 /* ---- Payload structures ---- */
@@ -568,6 +573,49 @@ struct __attribute__((packed)) zsa_nav_state {
     uint8_t bus;
 };
 #define ZSA_NAV_STATE_SIZE 4
+
+/* ZSA_MSG_CMD_BLE_BANK (2 bytes). */
+#define ZSA_BLE_BANK_COUNT 5u
+#define ZSA_BLE_BANK_NONE  0xFFu
+
+enum zsa_ble_bank_op {
+    ZSA_BLE_BANK_OP_PAIR       = 1, /* empty bank: discoverable for it, 2 min */
+    ZSA_BLE_BANK_OP_CONNECT    = 2, /* stored bank: advertise for its host */
+    ZSA_BLE_BANK_OP_DISCONNECT = 3, /* drop the link, stop advertising */
+    ZSA_BLE_BANK_OP_FORGET     = 4, /* delete the bond, bank becomes empty */
+};
+
+struct __attribute__((packed)) zsa_ble_bank_cmd {
+    uint8_t op;   /* enum zsa_ble_bank_op */
+    uint8_t bank; /* 0-based, < ZSA_BLE_BANK_COUNT */
+};
+#define ZSA_BLE_BANK_CMD_SIZE 2u
+
+/* ZSA_MSG_EVT_BLE_BANKS (4 bytes). The receiver treats the table as unknown
+ * once ZSA_BLE_BANKS_STALE_MS passes without one. */
+#define ZSA_BLE_BANKS_INTERVAL_MS 1000
+#define ZSA_BLE_BANKS_STALE_MS    3000
+
+enum zsa_ble_bank_state {
+    ZSA_BLE_BANK_STATE_IDLE       = 0, /* not advertising, not connected */
+    ZSA_BLE_BANK_STATE_CONNECTING = 1, /* advertising for `active`'s host */
+    ZSA_BLE_BANK_STATE_PAIRING    = 2, /* discoverable for `active` */
+    ZSA_BLE_BANK_STATE_CONNECTED  = 3, /* `active`'s host is connected */
+    ZSA_BLE_BANK_STATE_OFF        = 4, /* BLE stack off (USB host attached) */
+};
+
+struct __attribute__((packed)) zsa_ble_banks {
+    uint8_t stored; /* bit n set: bank n holds a bond */
+    uint8_t active; /* bank `state` applies to, or ZSA_BLE_BANK_NONE */
+    uint8_t state;  /* enum zsa_ble_bank_state */
+    uint8_t rsvd;   /* 0 */
+};
+#define ZSA_BLE_BANKS_SIZE 4u
+
+_Static_assert(sizeof(struct zsa_ble_bank_cmd) == ZSA_BLE_BANK_CMD_SIZE,
+               "zsa_ble_bank_cmd is a wire layout");
+_Static_assert(sizeof(struct zsa_ble_banks) == ZSA_BLE_BANKS_SIZE,
+               "zsa_ble_banks is a wire layout");
 
 /* struct zsa_nav_motion removed with ZSA_MSG_EVT_NAV_MOTION (0x86, reserved). */
 

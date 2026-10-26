@@ -205,20 +205,41 @@
 #    define ZSA_POWER_HIBERNATE_RETRY_MS 3000
 #endif
 
-/* ---- BLE pairing / discoverability indication (see wireless.c) ---- */
+/* ---- Bluetooth bank menu (BLE_MENU, see wireless.c) ---- */
 
-/* Half-period of the green status LED blink: slow while discoverable, fast
- * while an SMP pairing is running. */
-#ifndef ZSA_PAIR_LED_SLOW_MS
-#    define ZSA_PAIR_LED_SLOW_MS 500
+/* Matrix position of bank 0; banks 1-4 follow in the next columns. */
+#ifndef ZSA_BLE_MENU_ROW
+#    define ZSA_BLE_MENU_ROW 0
 #endif
-#ifndef ZSA_PAIR_LED_FAST_MS
-#    define ZSA_PAIR_LED_FAST_MS 125
+#ifndef ZSA_BLE_MENU_COL
+#    define ZSA_BLE_MENU_COL 2
 #endif
 
-/* How long BT_UNPR must be held before the bond-clearing command is sent. */
-#ifndef ZSA_UNPAIR_HOLD_MS
-#    define ZSA_UNPAIR_HOLD_MS 3000
+/* How long a bank key must be held to forget that bank. */
+#ifndef ZSA_BLE_FORGET_HOLD_MS
+#    define ZSA_BLE_FORGET_HOLD_MS 2000
+#endif
+
+/* Blink period of the connecting and pairing bank keys. */
+#ifndef ZSA_BLE_MENU_BLINK_MS
+#    define ZSA_BLE_MENU_BLINK_MS 1000
+#endif
+
+/* Empty-bank color, #28a5cf. */
+#ifndef ZSA_BLE_MENU_EMPTY_R
+#    define ZSA_BLE_MENU_EMPTY_R 0x28
+#endif
+#ifndef ZSA_BLE_MENU_EMPTY_G
+#    define ZSA_BLE_MENU_EMPTY_G 0xA5
+#endif
+#ifndef ZSA_BLE_MENU_EMPTY_B
+#    define ZSA_BLE_MENU_EMPTY_B 0xCF
+#endif
+
+/* Level (0-255) of all five bank keys, a flat dim gray, while the bank table
+ * is unknown. */
+#ifndef ZSA_BLE_MENU_UNKNOWN_VAL
+#    define ZSA_BLE_MENU_UNKNOWN_VAL 40
 #endif
 
 /* How long a reported pair state stays trusted. The nRF refreshes the level

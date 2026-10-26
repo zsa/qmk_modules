@@ -85,20 +85,12 @@ enum zsa_status_led_state {
     ZSA_STATUS_LED_ON      = 2,
 };
 
-/* Weak hook: keyboards override this to drive their own status LED pin. The
- * module owns the blink phase and only calls on a change. */
-void zsa_wireless_pair_led(uint8_t state);
-
-/* True while the module is driving the pairing status LED. Keyboards check
- * this before writing that pin for any other purpose. */
-bool zsa_wireless_pair_led_active(void);
-
 /* Weak hook: the firmware-update indication on the half's two status LEDs,
  * green and red (enum zsa_status_led_state each). Green fast-blinks while
  * this half's image is being written and stays solid while it settles; red is
  * solid on a failed update and slow-blinks on a protocol mismatch. The module
- * owns the blink phase and only calls on a change. Outranks the pairing blink
- * and the layer indicators — see the *_owned() accessors. */
+ * owns the blink phase and only calls on a change. Outranks the layer
+ * indicators — see the *_owned() accessors. */
 void zsa_wireless_dfu_led(uint8_t green, uint8_t red);
 
 /* True while the update indication drives that pin. Keyboards check these
@@ -110,16 +102,34 @@ bool zsa_wireless_dfu_led_red_owned(void);
 void zsa_wireless_query_ble_status(void);
 void zsa_wireless_query_battery(void);
 void zsa_wireless_cmd_hibernate(void);
-/* Enter pairing mode: the nRF advertises as general-discoverable for its
- * pairing window. Sent by BLE_PAIR_MODE. */
-void zsa_wireless_cmd_pair(void);
-/* Drop the active BLE link, keeping the bond. The nRF re-advertises after. */
+/* Drop the active BLE link or stop advertising, keeping the bond
+ * (CMD_BLE_BANK DISCONNECT). Sent by BLE_DISCONNECT. */
 void zsa_wireless_cmd_ble_disconnect(void);
-/* Clear every BLE bond and refresh the identity. Sent by BT_UNPR after a
- * ZSA_UNPAIR_HOLD_MS hold. */
-void zsa_wireless_cmd_ble_unpair(void);
-/* Hand over to the next remembered host. Sent by BLE_SWITCH_HOST. */
-void zsa_wireless_cmd_ble_switch_host(void);
+
+/* ---- Bluetooth bank menu (BLE_MENU) ----
+ *
+ * Open: the matrix shows banks 0-4 on the keys at ZSA_BLE_MENU_ROW,
+ * ZSA_BLE_MENU_COL.. and every other LED is dark. A bank key tap pairs an
+ * empty bank, connects a stored one and disconnects an active one; a
+ * ZSA_BLE_FORGET_HOLD_MS hold forgets it. Any other key closes the menu. Every
+ * key event while open is swallowed, and so is the release of a key pressed
+ * while open. BLE_MENU does nothing with a USB host, and the menu closes when
+ * one appears. */
+
+/* What a bank shows. UNKNOWN: no fresh EVT_BLE_BANKS. */
+enum zsa_ble_bank_view {
+    ZSA_BLE_BANK_VIEW_UNKNOWN = 0,
+    ZSA_BLE_BANK_VIEW_EMPTY,      /* #28a5cf (ZSA_BLE_MENU_EMPTY_R/G/B) */
+    ZSA_BLE_BANK_VIEW_STORED,     /* blue */
+    ZSA_BLE_BANK_VIEW_CONNECTING, /* blinking green */
+    ZSA_BLE_BANK_VIEW_PAIRING,    /* blinking blue */
+    ZSA_BLE_BANK_VIEW_CONNECTED,  /* green */
+};
+
+bool    zsa_wireless_ble_menu_open(void);
+/* enum zsa_ble_bank_view of bank (< ZSA_BLE_BANK_COUNT). With the BLE stack
+ * off (ZSA_BLE_BANK_STATE_OFF) only EMPTY and STORED are reported. */
+uint8_t zsa_wireless_ble_bank_view(uint8_t bank);
 
 /* Power stage: ZSA_IDLE_ACTIVE or ZSA_IDLE_SLEEP. */
 enum zsa_idle_step zsa_wireless_idle_step(void);

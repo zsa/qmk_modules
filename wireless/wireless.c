@@ -110,6 +110,8 @@ static inline void watchdog_start(void) {}
 static inline void watchdog_kick(void) {}
 #endif
 
+static void ble_menu_close(void);
+
 /* ---- Link state ---- */
 
 static bool     link_ready = false;
@@ -124,6 +126,9 @@ static bool     nrf_discovery_active; /* nRF discoverable (pairing mode) */
 static uint8_t  nrf_pair_state;       /* enum zsa_pair_state_val, raw */
 static uint32_t last_pair_state_ms;
 static bool     pair_state_seen;      /* any EVT_PAIR_STATE received yet */
+static struct zsa_ble_banks nrf_banks; /* EVT_BLE_BANKS */
+static uint32_t last_banks_ms;
+static bool     banks_seen;           /* any EVT_BLE_BANKS received yet */
 static uint8_t  nrf_battery_soc;
 static uint8_t  nrf_battery_right_soc;
 static uint8_t  nrf_battery_flags;
@@ -558,6 +563,7 @@ enum sleep_end {
     SE_PAIR_CONFIRM, /* pairing confirmation */
     SE_DFU_START,    /* update started */
     SE_DFU_AWAKE,    /* update session or step under way */
+    SE_BLE_MENU,     /* Bluetooth bank menu open */
 };
 
 static void sleep_exit_for(uint8_t why);
@@ -755,10 +761,9 @@ static bool pair_state_fresh(void) {
     return link_ready && pair_state_seen && timer_elapsed32(last_pair_state_ms) < ZSA_PAIR_STATE_STALE_MS;
 }
 
-/* Discoverable, freshness-gated. Distinct from zsa_wireless_discovery_active(),
- * which reports the raw last-known value. */
-static bool pair_advertising(void) {
-    return nrf_discovery_active && pair_state_fresh();
+/* The bank table is refreshed every ZSA_BLE_BANKS_INTERVAL_MS. */
+static bool banks_fresh(void) {
+    return link_ready && banks_seen && timer_elapsed32(last_banks_ms) < ZSA_BLE_BANKS_STALE_MS;
 }
 
 /* A pairing starting is worth showing: leave Sleep, which restores the matrix
@@ -792,6 +797,7 @@ static void dfu_set_active(bool active) {
      * board power down mid-transfer. */
     if (active) {
         sleep_exit_for(SE_DFU_START);
+        ble_menu_close();
     }
 
     clear_keyboard();
@@ -922,6 +928,14 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 nrf_pair_state     = p->state;
                 last_pair_state_ms = timer_read32();
                 pair_state_seen    = true;
+            }
+            break;
+
+        case ZSA_MSG_EVT_BLE_BANKS:
+            if (frame->len >= sizeof(struct zsa_ble_banks)) {
+                memcpy(&nrf_banks, frame->payload, sizeof(nrf_banks));
+                last_banks_ms = timer_read32();
+                banks_seen    = true;
             }
             break;
 
@@ -1083,6 +1097,25 @@ bool zsa_wireless_pairing_active(void) {
     return nrf_pair_state == ZSA_PAIR_CONFIRM && pair_state_fresh();
 }
 
+uint8_t zsa_wireless_ble_bank_view(uint8_t bank) {
+    if (bank >= ZSA_BLE_BANK_COUNT || !banks_fresh()) {
+        return ZSA_BLE_BANK_VIEW_UNKNOWN;
+    }
+    if (bank == nrf_banks.active) {
+        switch (nrf_banks.state) {
+            case ZSA_BLE_BANK_STATE_CONNECTING:
+                return ZSA_BLE_BANK_VIEW_CONNECTING;
+            case ZSA_BLE_BANK_STATE_PAIRING:
+                return ZSA_BLE_BANK_VIEW_PAIRING;
+            case ZSA_BLE_BANK_STATE_CONNECTED:
+                return ZSA_BLE_BANK_VIEW_CONNECTED;
+            default:
+                break;
+        }
+    }
+    return (nrf_banks.stored & (1u << bank)) ? ZSA_BLE_BANK_VIEW_STORED : ZSA_BLE_BANK_VIEW_EMPTY;
+}
+
 uint8_t zsa_wireless_battery_soc(void) {
     return nrf_battery_soc;
 }
@@ -1151,20 +1184,15 @@ void zsa_wireless_cmd_hibernate(void) {
     send_command(ZSA_MSG_CMD_HIBERNATE);
 }
 
-void zsa_wireless_cmd_pair(void) {
-    send_command(ZSA_MSG_CMD_PAIR);
+static void send_ble_bank(uint8_t op, uint8_t bank) {
+    struct zsa_ble_bank_cmd cmd = {.op = op, .bank = bank};
+    zsa_wireless_send_frame(ZSA_MSG_CMD_BLE_BANK, (const uint8_t *)&cmd, sizeof(cmd));
 }
 
+/* The bank is the active one when known, else 0. */
 void zsa_wireless_cmd_ble_disconnect(void) {
-    send_command(ZSA_MSG_CMD_BLE_DISCONNECT);
-}
-
-void zsa_wireless_cmd_ble_unpair(void) {
-    send_command(ZSA_MSG_CMD_BLE_UNPAIR);
-}
-
-void zsa_wireless_cmd_ble_switch_host(void) {
-    send_command(ZSA_MSG_CMD_BLE_SWITCH_HOST);
+    uint8_t bank = (banks_fresh() && nrf_banks.active < ZSA_BLE_BANK_COUNT) ? nrf_banks.active : 0;
+    send_ble_bank(ZSA_BLE_BANK_OP_DISCONNECT, bank);
 }
 
 bool zsa_wireless_link_ready(void) {
@@ -1802,6 +1830,8 @@ static void sleep_enter(uint32_t idle_ms) {
     sdiag.block_prev   = SB_WINDOW;
     sdiag.block_prev_ms = timer_read32();
 
+    /* Not reached with the menu open (idle_power_task()); kept as a guard. */
+    ble_menu_close();
 #ifdef RGB_MATRIX_ENABLE
     /* rgb_matrix_task() renders and flushes black while disabled. */
     sleep_rgb_on = rgb_matrix_is_enabled();
@@ -1894,8 +1924,7 @@ static uint8_t dfu_left_phase(void) {
  * the image is written and holds solid while it settles; red is solid on a
  * failed update and slow-blinks on a protocol mismatch, which is orthogonal to
  * the phase and shows whenever the phase is not FAILED. Blink phases come from
- * the absolute clock like the pairing blink, so the rate does not depend on
- * how often this runs. */
+ * the absolute clock, so the rate does not depend on how often this runs. */
 static void dfu_led_task(void) {
     uint32_t now   = timer_read32();
     uint8_t  phase = dfu_left_phase();
@@ -1934,60 +1963,6 @@ static void dfu_led_task(void) {
         dfu_led_red_last   = red;
         zsa_wireless_dfu_led(green, red);
     }
-}
-
-/* ---- Pairing status LED ---- */
-
-/* Keyboards override this to drive their own status LED pin. */
-__attribute__((weak)) void zsa_wireless_pair_led(uint8_t state) { (void)state; }
-
-static bool    pair_led_owned;
-static bool    pair_led_deferred; /* the update indication holds the pin */
-static uint8_t pair_led_last = ZSA_STATUS_LED_RELEASE;
-
-bool zsa_wireless_pair_led_active(void) {
-    return pair_led_owned;
-}
-
-/* Blinks the status LED: fast while a pairing is in progress, slow while
- * discoverable, released otherwise. The phase comes from the absolute clock
- * rather than elapsed-time toggling, so the blink rate is independent of how
- * often bluetooth_task() runs.
- *
- * Shares its pin with the update indication, which outranks it: while that
- * owns the green LED nothing is written here, and the current state is
- * re-issued as soon as it hands the pin back. pair_led_owned keeps tracking
- * either way, so the layer indicator stays off the pin. */
-static void pair_led_task(void) {
-    bool    pairing = zsa_wireless_pairing_active();
-    bool    advert  = pair_advertising();
-    uint8_t want;
-
-    if (pairing || advert) {
-        uint32_t half  = pairing ? ZSA_PAIR_LED_FAST_MS : ZSA_PAIR_LED_SLOW_MS;
-        want           = ((timer_read32() / half) & 1u) ? ZSA_STATUS_LED_ON : ZSA_STATUS_LED_OFF;
-        pair_led_owned = true;
-    } else {
-        want           = ZSA_STATUS_LED_RELEASE;
-        pair_led_owned = false;
-    }
-
-    if (zsa_wireless_dfu_led_green_owned()) {
-        pair_led_deferred = true;
-        return;
-    }
-
-    if (want != pair_led_last || pair_led_deferred) {
-        pair_led_deferred = false;
-        pair_led_last     = want;
-        zsa_wireless_pair_led(want);
-    }
-}
-
-/* Both LED engines, in arbitration order. */
-static void status_led_task(void) {
-    dfu_led_task();
-    pair_led_task();
 }
 
 #if defined(MCU_STM32) && defined(STM32F3XX)
@@ -2565,7 +2540,7 @@ static uint8_t sleep_stop_block(void) {
     if (!nav_boost_settled()) {
         return SB_BOOST;
     }
-    if (pair_led_owned || dfu_led_green_owned || dfu_led_red_owned) {
+    if (dfu_led_green_owned || dfu_led_red_owned) {
         return SB_STATUS_LED;
     }
     for (uint8_t row = 0; row < MATRIX_ROWS; row++) {
@@ -2731,6 +2706,12 @@ static void idle_power_task(void) {
     }
     if (nrf_dfu_keep_awake) {
         sleep_exit_for(SE_DFU_AWAKE);
+        idle_floor_ms = timer_read32();
+        return;
+    }
+    /* The idle count restarts when the menu closes. */
+    if (zsa_wireless_ble_menu_open()) {
+        sleep_exit_for(SE_BLE_MENU);
         idle_floor_ms = timer_read32();
         return;
     }
@@ -2951,24 +2932,177 @@ static void left_led_slice_task(void) {
 #    endif
 #endif
 
-/* ---- BT_UNPR hold ---- */
+/* ---- Bluetooth bank menu ---- */
 
-static bool     unpair_held;
-static bool     unpair_sent;
-static uint32_t unpair_press_ms;
+_Static_assert(ZSA_BLE_MENU_ROW < MATRIX_ROWS && ZSA_BLE_MENU_COL + ZSA_BLE_BANK_COUNT <= MATRIX_COLS,
+               "bank keys must be in the matrix");
 
-/* Sends CMD_BLE_UNPAIR once BT_UNPR has been held ZSA_UNPAIR_HOLD_MS, at most
- * once per press. Driven from bluetooth_task() because process_record only
- * runs on key edges, never while a key stays down. */
-static void unpair_hold_task(void) {
-    if (!unpair_held || unpair_sent) {
+static bool     ble_menu_is_open;
+static uint8_t  ble_menu_held;   /* bank keys pressed in the menu, still down */
+static uint8_t  ble_menu_forgot; /* held bank keys whose forget has fired */
+static uint32_t ble_menu_press_ms[ZSA_BLE_BANK_COUNT];
+/* Keys whose press the menu swallowed; their release is swallowed too. */
+static matrix_row_t ble_menu_swallowed[MATRIX_ROWS];
+#ifdef RGB_MATRIX_ENABLE
+static bool ble_menu_rgb_on;     /* matrix enabled at open */
+static bool ble_menu_mode_moved; /* mode moved off RGB_MATRIX_NONE at open */
+#endif
+
+bool zsa_wireless_ble_menu_open(void) {
+    return ble_menu_is_open;
+}
+
+/* The menu draws from the indicator hooks, which rgb_matrix only runs while
+ * enabled with an effect other than NONE. Brightness is left alone: the menu
+ * writes absolute colors over every LED. */
+static void ble_menu_rgb_assert(void) {
+#ifdef RGB_MATRIX_ENABLE
+    if (!power_gate_allows_rgb()) {
         return;
     }
-    if (timer_elapsed32(unpair_press_ms) < ZSA_UNPAIR_HOLD_MS) {
+    if (!rgb_matrix_is_enabled()) {
+        rgb_matrix_enable_noeeprom();
+    }
+    if (rgb_matrix_get_mode() == RGB_MATRIX_NONE) {
+        rgb_matrix_mode_noeeprom(RGB_MATRIX_SOLID_COLOR);
+        ble_menu_mode_moved = true;
+    }
+#endif
+}
+
+static void ble_menu_open(void) {
+    if (ble_menu_is_open) {
         return;
     }
-    zsa_wireless_cmd_ble_unpair();
-    unpair_sent = true;
+    ble_menu_is_open = true;
+    ble_menu_held    = 0;
+    ble_menu_forgot  = 0;
+#ifdef RGB_MATRIX_ENABLE
+    ble_menu_rgb_on     = rgb_matrix_is_enabled();
+    ble_menu_mode_moved = false;
+#endif
+    ble_menu_rgb_assert();
+}
+
+static void ble_menu_close(void) {
+    if (!ble_menu_is_open) {
+        return;
+    }
+    ble_menu_is_open = false;
+    ble_menu_held    = 0;
+    ble_menu_forgot  = 0;
+#ifdef RGB_MATRIX_ENABLE
+    /* rgb_matrix_mode_noeeprom() cannot select NONE. */
+    if (ble_menu_mode_moved) {
+        rgb_matrix_config.mode = RGB_MATRIX_NONE;
+    }
+    if (!ble_menu_rgb_on && rgb_matrix_is_enabled()) {
+        rgb_matrix_disable_noeeprom();
+    }
+#endif
+}
+
+/* Bank of a key position, or ZSA_BLE_BANK_COUNT for a non-bank key. */
+static uint8_t ble_menu_bank_of(keypos_t key) {
+    uint8_t bank = (uint8_t)(key.col - ZSA_BLE_MENU_COL);
+    return (key.row == ZSA_BLE_MENU_ROW && bank < ZSA_BLE_BANK_COUNT) ? bank : ZSA_BLE_BANK_COUNT;
+}
+
+/* Commands need a fresh table with the BLE stack on. */
+static bool ble_banks_actionable(void) {
+    return banks_fresh() && nrf_banks.state != ZSA_BLE_BANK_STATE_OFF;
+}
+
+static void ble_menu_tap(uint8_t bank) {
+    if (!ble_banks_actionable()) {
+        return;
+    }
+    switch (zsa_wireless_ble_bank_view(bank)) {
+        case ZSA_BLE_BANK_VIEW_EMPTY:
+            send_ble_bank(ZSA_BLE_BANK_OP_PAIR, bank);
+            break;
+        case ZSA_BLE_BANK_VIEW_STORED:
+            send_ble_bank(ZSA_BLE_BANK_OP_CONNECT, bank);
+            break;
+        case ZSA_BLE_BANK_VIEW_CONNECTING:
+        case ZSA_BLE_BANK_VIEW_PAIRING:
+        case ZSA_BLE_BANK_VIEW_CONNECTED:
+            send_ble_bank(ZSA_BLE_BANK_OP_DISCONNECT, bank);
+            break;
+        default:
+            break;
+    }
+}
+
+/* Closes the menu when a USB host appears. Fires a bank's forget once its key
+ * has been held ZSA_BLE_FORGET_HOLD_MS. Driven from bluetooth_task() because
+ * key events only arrive on edges. */
+static void ble_menu_task(void) {
+    if (!ble_menu_is_open) {
+        return;
+    }
+    if (usb_host_present()) {
+        ble_menu_close();
+        return;
+    }
+    ble_menu_rgb_assert();
+
+    for (uint8_t bank = 0; bank < ZSA_BLE_BANK_COUNT; bank++) {
+        uint8_t bit = (uint8_t)(1u << bank);
+        if (!(ble_menu_held & bit) || (ble_menu_forgot & bit)) {
+            continue;
+        }
+        if (timer_elapsed32(ble_menu_press_ms[bank]) < ZSA_BLE_FORGET_HOLD_MS) {
+            continue;
+        }
+        ble_menu_forgot |= bit;
+        if (ble_banks_actionable()) {
+            send_ble_bank(ZSA_BLE_BANK_OP_FORGET, bank);
+        }
+    }
+}
+
+/* False swallows the event. While open every press is swallowed: a bank key
+ * starts its tap/hold, any other key closes the menu. A release is swallowed
+ * only if its press was, so keys held from before the menu release normally. */
+static bool ble_menu_filter(keyrecord_t *record) {
+    keypos_t key = record->event.key;
+
+    if (!IS_KEYEVENT(record->event) || key.row >= MATRIX_ROWS || key.col >= MATRIX_COLS) {
+        return true;
+    }
+    matrix_row_t pos  = (matrix_row_t)1 << key.col;
+    uint8_t      bank = ble_menu_bank_of(key);
+    uint8_t      bit  = (bank < ZSA_BLE_BANK_COUNT) ? (uint8_t)(1u << bank) : 0;
+
+    if (!record->event.pressed) {
+        if (!(ble_menu_swallowed[key.row] & pos)) {
+            return true;
+        }
+        ble_menu_swallowed[key.row] &= (matrix_row_t)~pos;
+        if (ble_menu_held & bit) {
+            if (!(ble_menu_forgot & bit)) {
+                ble_menu_tap(bank);
+            }
+            ble_menu_held &= (uint8_t)~bit;
+            ble_menu_forgot &= (uint8_t)~bit;
+        }
+        return false;
+    }
+
+    if (!ble_menu_is_open) {
+        ble_menu_swallowed[key.row] &= (matrix_row_t)~pos;
+        return true;
+    }
+    ble_menu_swallowed[key.row] |= pos;
+    if (bit) {
+        ble_menu_held |= bit;
+        ble_menu_forgot &= (uint8_t)~bit;
+        ble_menu_press_ms[bank] = timer_read32();
+    } else {
+        ble_menu_close();
+    }
+    return false;
 }
 
 /* Auto-generated per-module hook, called from pre_process_record_quantum()
@@ -2978,6 +3112,9 @@ static void unpair_hold_task(void) {
  * keys, tap-hold resolution, combos and mouse keys in one place. */
 bool pre_process_record_wireless(uint16_t keycode, keyrecord_t *record) {
     if (zsa_wireless_dfu_active()) {
+        return false;
+    }
+    if (!ble_menu_filter(record)) {
         return false;
     }
     return pre_process_record_wireless_kb(keycode, record);
@@ -3008,35 +3145,20 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
                 zsa_wireless_cmd_ble_disconnect();
             }
             return false;
-        /* Makes the board discoverable for the nRF's pairing-mode window. */
-        case BLE_PAIR_MODE:
-            if (record->event.pressed) {
-                zsa_wireless_cmd_pair();
+        /* No-op with a USB host. */
+        case BLE_MENU:
+            if (record->event.pressed && !usb_host_present()) {
+                ble_menu_open();
             }
             return false;
-        /* Drops the current host and cycles through the remembered ones until
-         * one answers. */
+        /* Legacy, replaced by the bank menu. */
+        case BLE_PAIR_MODE:
         case BLE_SWITCH_HOST:
-            if (record->event.pressed) {
-                zsa_wireless_cmd_ble_switch_host();
-            }
             return false;
         /* Powers both halves off. The nRF refuses while USB is connected. */
         case ZSA_SHIP_MODE:
             if (record->event.pressed) {
                 zsa_wireless_cmd_hibernate();
-            }
-            return false;
-        /* Core's BT_UNPR, left an unimplemented stub by process_connection().
-         * Modules run first, so this arm owns it. Destructive:
-         * unpair_hold_task() fires it after the hold. */
-        case QK_BLUETOOTH_UNPAIR:
-            if (record->event.pressed) {
-                unpair_held     = true;
-                unpair_sent     = false;
-                unpair_press_ms = timer_read32();
-            } else {
-                unpair_held = false;
             }
             return false;
     }
@@ -3348,8 +3470,8 @@ void bluetooth_task(void) {
     /* Nav presence level to the nRF */
     nav_state_task();
 
-    /* Fire BT_UNPR once its hold completes */
-    unpair_hold_task();
+    /* Bank menu: forget holds, matrix kept on */
+    ble_menu_task();
 
     /* Unblank if the nRF stopped refreshing the update state */
     dfu_state_task();
@@ -3378,7 +3500,7 @@ void bluetooth_task(void) {
     /* Main-loop regularity and link counters */
     scan_diag_task();
 
-    status_led_task();
+    dfu_led_task();
 
     /* LSI frequency for the time spent in STOP */
     lsi_cal_task();

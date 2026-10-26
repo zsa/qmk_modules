@@ -21,6 +21,10 @@
         {
             "key": "ZSA_SHIP_MODE",
             "aliases": ["ZSA_SHP"]
+        },
+        {
+            "key": "BLE_MENU",
+            "aliases": ["BT_MENU"]
         }
     ]
 }
