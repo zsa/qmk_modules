@@ -145,6 +145,7 @@ static RGB diag_color(uint8_t color) {
         case ZSA_DIAG_YELLOW:
             return (RGB){255, 200, 0};
         case ZSA_DIAG_ORANGE:
+        case ZSA_DIAG_NA:
             return (RGB){255, 80, 0};
         default:
             return (RGB){0, 0, 0};

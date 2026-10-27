@@ -175,6 +175,7 @@ enum zsa_diag_color {
     ZSA_DIAG_BLUE,
     ZSA_DIAG_YELLOW,
     ZSA_DIAG_ORANGE,
+    ZSA_DIAG_NA, /* does not apply in this mode; shown as orange */
 };
 
 /* {row, col} of each indicator, from ZSA_DIAG_KEYS. */

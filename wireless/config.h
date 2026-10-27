@@ -4,6 +4,20 @@
 #    define ZSA_WIRELESS_BAUD_RATE 1000000
 #endif
 
+/* USART1 RX DMA ring (zsa_uart.c), a power of two. The longest main-loop stall
+ * (~9 ms right-mirror flush) is ~900 B at 1 Mbaud. */
+#ifndef ZSA_UART_RX_RING_SIZE
+#    define ZSA_UART_RX_RING_SIZE 2048
+#endif
+/* USART1 TX queue; zsa_uart_transmit() blocks while it is full. */
+#ifndef ZSA_UART_TX_QUEUE_SIZE
+#    define ZSA_UART_TX_QUEUE_SIZE 64
+#endif
+/* NVIC priority of the USART1 and RX DMA interrupts. */
+#ifndef ZSA_UART_IRQ_PRIORITY
+#    define ZSA_UART_IRQ_PRIORITY 12
+#endif
+
 /* Power stages: Active -> Sleep after ZSA_SLEEP_TIMEOUT_MS without input ->
  * Hibernate (both halves in PMIC ship mode) after ZSA_HIBERNATE_TIMEOUT_MS
  * without input. Both count from the last input. Define ZSA_DEV_NO_SLEEP to

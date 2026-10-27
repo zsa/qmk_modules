@@ -43,11 +43,11 @@ struct __attribute__((packed)) zsa_stm32_diag {
     uint8_t  right_link;     /* EVT_LINK_STATE value or ..._UNKNOWN */
     uint8_t  power_gate;     /* 0 wait, 1 ok, 2 critical, 3 done */
     uint16_t link_ups;       /* LINK_UP frames received */
-    uint16_t sd_overruns;    /* passes that saw SD_OVERRUN_ERROR */
-    uint16_t sd_framing;     /* SD_FRAMING_ERROR */
-    uint16_t sd_noise;       /* SD_NOISE_ERROR */
-    uint16_t sd_parity;      /* SD_PARITY_ERROR */
-    uint16_t sd_queue_full;  /* SD_QUEUE_FULL_ERROR: 64 B RX queue overflowed */
+    uint16_t sd_overruns;    /* passes that saw USART1 ORE */
+    uint16_t sd_framing;     /* USART1 FE */
+    uint16_t sd_noise;       /* USART1 NE */
+    uint16_t sd_parity;      /* USART1 PE */
+    uint16_t sd_queue_full;  /* RX DMA ring laps (the old "RX queue full" slot) */
     uint16_t parser_resyncs; /* frames dropped: bad escape, length or CRC */
     uint16_t crc_errors;     /* of which bad CRC */
     uint16_t frame_aborts;   /* frames cut short by a new SYNC */

@@ -13,7 +13,7 @@
 #include "wireless.h"
 #include "bluetooth.h"
 #include "report.h"
-#include "uart.h"
+#include "zsa_uart.h"
 #include "usb_util.h"
 #include "keyboard.h"
 #include "timer.h"
@@ -402,7 +402,7 @@ static struct {
     uint16_t sd_framing;
     uint16_t sd_noise;
     uint16_t sd_parity;
-    uint16_t sd_queue_full;
+    uint16_t sd_queue_full; /* RX DMA ring laps; keeps the record's RX-queue-full slot */
     uint16_t parser_resyncs;
     uint16_t crc_errors;
     uint16_t frame_aborts;
@@ -560,7 +560,7 @@ void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len)
     }
     uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
     uint32_t rtt_t0    = zsa_rtt_cycles(); // TEMP DEBUG
-    uart_transmit(buf, frame_len);
+    zsa_uart_transmit(buf, frame_len);
     ldiag.frames_tx++;
     zsa_rtt_tx(type, frame_len, rtt_t0);   // TEMP DEBUG
 }
@@ -2245,14 +2245,15 @@ static void stop_uart_drain(void) {
     uint32_t start = timer_read32();
 
     while (timer_elapsed32(start) < 5) {
-        if (oqIsEmptyI(&UART_DRIVER.oqueue) && (UART_DRIVER.usart->ISR & USART_ISR_TC)) {
+        if (zsa_uart_tx_done()) {
             return;
         }
     }
 }
 
+/* System locked. */
 static bool stop_rx_pending(void) {
-    return !iqIsEmptyI(&UART_DRIVER.iqueue) || (UART_DRIVER.usart->ISR & (USART_ISR_RXNE | USART_ISR_BUSY));
+    return zsa_uart_rx_pendingI();
 }
 
 #    if HAL_USE_I2C == TRUE && STM32_I2C_USE_I2C1 == TRUE
@@ -2563,9 +2564,7 @@ restore:
 
     if (why != STOP_WAKE_NONE) {
         /* What arrived while the clocks were restarting is noise. */
-        while (uart_available()) {
-            (void)uart_read();
-        }
+        zsa_uart_rx_discard();
         zsa_parser_init(&rx_parser);
         diag_sd_errors_discard();
     }
@@ -3284,12 +3283,6 @@ static uint16_t stm32_boot_count;
 static uint8_t  stm32_reset_flags; /* RCC_CSR[31:24] at boot */
 static uint32_t stm32_diag_saved_ms;
 
-#if defined(MCU_STM32)
-#    define SD_ERR_EVENT EVENT_MASK(1)
-#    define SD_ERR_FLAGS (SD_OVERRUN_ERROR | SD_FRAMING_ERROR | SD_NOISE_ERROR | SD_PARITY_ERROR | SD_QUEUE_FULL_ERROR)
-static event_listener_t sd_err_listener;
-#endif
-
 static uint32_t diag_crc32(const uint8_t *p, size_t n) {
     uint32_t crc = 0xFFFFFFFFu;
     while (n--) {
@@ -3365,12 +3358,11 @@ static void stm32_diag_save(void) {
     stm32_diag_saved_ms = timer_read32();
 }
 
-/* bluetooth_init(), after uart_init(). */
+/* bluetooth_init(), after zsa_uart_init(). */
 static void stm32_diag_boot(void) {
 #if defined(MCU_STM32)
     stm32_reset_flags = (uint8_t)(RCC->CSR >> 24);
     RCC->CSR |= RCC_CSR_RMVF;
-    chEvtRegisterMaskWithFlags(chnGetEventSource(&UART_DRIVER), &sd_err_listener, SD_ERR_EVENT, SD_ERR_FLAGS);
 #endif
     if (stm32_slot_valid(&stm32_diag_ret[0])) {
         stm32_diag_ret[1] = stm32_diag_ret[0];
@@ -3385,25 +3377,18 @@ static void stm32_diag_boot(void) {
     stm32_diag_save();
 }
 
-/* Counts the serial driver's error flags raised since the last pass. */
+/* Counts the USART1 error flags raised since the last pass. */
 static void diag_sd_errors_poll(void) {
-#if defined(MCU_STM32)
-    eventflags_t f = chEvtGetAndClearFlags(&sd_err_listener);
-    chEvtGetAndClearEvents(SD_ERR_EVENT);
-    if (f & SD_OVERRUN_ERROR) ldiag_inc(&ldiag.sd_overruns);
-    if (f & SD_FRAMING_ERROR) ldiag_inc(&ldiag.sd_framing);
-    if (f & SD_NOISE_ERROR) ldiag_inc(&ldiag.sd_noise);
-    if (f & SD_PARITY_ERROR) ldiag_inc(&ldiag.sd_parity);
-    if (f & SD_QUEUE_FULL_ERROR) ldiag_inc(&ldiag.sd_queue_full);
-#endif
+    uint8_t f = zsa_uart_errors_take();
+    if (f & ZSA_UART_ERR_OVERRUN) ldiag_inc(&ldiag.sd_overruns);
+    if (f & ZSA_UART_ERR_FRAMING) ldiag_inc(&ldiag.sd_framing);
+    if (f & ZSA_UART_ERR_NOISE) ldiag_inc(&ldiag.sd_noise);
+    if (f & ZSA_UART_ERR_PARITY) ldiag_inc(&ldiag.sd_parity);
 }
 
 /* Drops the flags raised while the clocks restarted after STOP. */
 static void diag_sd_errors_discard(void) {
-#if defined(MCU_STM32)
-    (void)chEvtGetAndClearFlags(&sd_err_listener);
-    chEvtGetAndClearEvents(SD_ERR_EVENT);
-#endif
+    (void)zsa_uart_errors_take();
 }
 
 /* ---- Left nRF record fetch ---- */
@@ -3756,6 +3741,21 @@ void zsa_wireless_diag_colors(uint8_t colors[ZSA_DIAG_KEY_COUNT]) {
     }
     colors[ZSA_DIAG_KEY_RIGHT_LED] = diag_ok(voyager_right_led_up());
 
+    switch (usb_transport()) {
+        case UT_BLE:
+            colors[ZSA_DIAG_KEY_VBUS]     = ZSA_DIAG_NA;
+            colors[ZSA_DIAG_KEY_USB_HOST] = ZSA_DIAG_NA;
+            break;
+        case UT_USB:
+            colors[ZSA_DIAG_KEY_BLE] = ZSA_DIAG_NA;
+            break;
+        default:
+            break;
+    }
+    if (zsa_trrs_plugged()) {
+        colors[ZSA_DIAG_KEY_RIGHT_LINK] = ZSA_DIAG_NA;
+    }
+
     /* Bar: one more key lit per bucket, colored by the bucket. */
     static const uint32_t bucket_ms[] = {1000u, 5000u, 30000u, 300000u};
     static const uint8_t  bucket_color[] = {ZSA_DIAG_GREEN, ZSA_DIAG_YELLOW, ZSA_DIAG_ORANGE, ZSA_DIAG_RED, ZSA_DIAG_RED};
@@ -3840,7 +3840,7 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
 /* ---- bluetooth.h weak function implementations ---- */
 
 void bluetooth_init(void) {
-    uart_init(ZSA_WIRELESS_BAUD_RATE);
+    zsa_uart_init(ZSA_WIRELESS_BAUD_RATE);
     active_pace_init();
     zsa_parser_init(&rx_parser);
     stm32_diag_boot();
@@ -4069,36 +4069,55 @@ static void scan_diag_task(void) {
     scan_diag_over_20ms  = 0;
 }
 
-/* Feeds every byte waiting from the nRF to the frame parser. */
-static void uart_rx_drain(void) {
-    while (uart_available()) {
-        uint8_t byte = uart_read();
-        last_rx_ms   = timer_read32();
+/* Feeds one byte from the nRF to the frame parser. */
+static void uart_rx_byte(uint8_t byte) {
+    enum zsa_parse_state state   = rx_parser.state;
+    uint8_t              esc     = rx_parser.esc;
+    uint16_t             resyncs = rx_parser.resyncs;
+    if (byte == ZSA_SYNC_BYTE && state != ZSA_PARSE_HUNT) {
+        ldiag_inc(&ldiag.frame_aborts);
+    }
+    int done = zsa_parser_feed(&rx_parser, byte);
+    if (rx_parser.resyncs != resyncs) {
+        ldiag_inc(&ldiag.parser_resyncs);
+        if (state == ZSA_PARSE_CRC && !esc) {
+            ldiag_inc(&ldiag.crc_errors);
+        }
+    }
+    if (done) {
+        if (ldiag.gap_armed) {
+            uint32_t gap = last_rx_ms - ldiag.last_frame_ms;
+            if (gap > ldiag.max_rx_gap_ms) {
+                ldiag.max_rx_gap_ms = gap;
+            }
+        }
+        ldiag.frames_rx++;
+        ldiag.last_frame_ms = last_rx_ms;
+        ldiag.gap_armed     = idle_step == ZSA_IDLE_ACTIVE;
+        handle_rx_frame(&rx_parser.frame);
+    }
+}
 
-        enum zsa_parse_state state   = rx_parser.state;
-        uint8_t              esc     = rx_parser.esc;
-        uint16_t             resyncs = rx_parser.resyncs;
-        if (byte == ZSA_SYNC_BYTE && state != ZSA_PARSE_HUNT) {
-            ldiag_inc(&ldiag.frame_aborts);
+/* Feeds every byte waiting from the nRF to the frame parser. A lap of the RX
+ * ring counts in sd_queue_full and restarts the parser. */
+static void uart_rx_drain(void) {
+    /* static: called only from bluetooth_task() and active_pace_wait(). */
+    static uint8_t chunk[64];
+
+    for (;;) {
+        bool     lapped = false;
+        uint16_t n      = zsa_uart_read(chunk, sizeof(chunk), &lapped);
+        if (lapped) {
+            ldiag_inc(&ldiag.sd_queue_full);
+            zsa_parser_init(&rx_parser);
+            continue;
         }
-        int done = zsa_parser_feed(&rx_parser, byte);
-        if (rx_parser.resyncs != resyncs) {
-            ldiag_inc(&ldiag.parser_resyncs);
-            if (state == ZSA_PARSE_CRC && !esc) {
-                ldiag_inc(&ldiag.crc_errors);
-            }
+        if (n == 0) {
+            break;
         }
-        if (done) {
-            if (ldiag.gap_armed) {
-                uint32_t gap = last_rx_ms - ldiag.last_frame_ms;
-                if (gap > ldiag.max_rx_gap_ms) {
-                    ldiag.max_rx_gap_ms = gap;
-                }
-            }
-            ldiag.frames_rx++;
-            ldiag.last_frame_ms = last_rx_ms;
-            ldiag.gap_armed     = idle_step == ZSA_IDLE_ACTIVE;
-            handle_rx_frame(&rx_parser.frame);
+        last_rx_ms = timer_read32();
+        for (uint16_t i = 0; i < n; i++) {
+            uart_rx_byte(chunk[i]);
         }
     }
 }
@@ -4107,24 +4126,27 @@ static void uart_rx_drain(void) {
 /* ---- Main-loop pacing without VBUS ----
  *
  * Each pass ends by waiting for the next ZSA_ACTIVE_PACE_US boundary of the
- * system time, so the idle thread runs WFI. A byte from the nRF ends the wait
- * (CHN_INPUT_AVAILABLE, posted by the RX interrupt when the input queue goes
- * from empty to non-empty) and is drained at once. */
+ * system time, so the idle thread runs WFI. Reception from the nRF ends the
+ * wait (zsa_uart_rx_event: idle line after a burst, or the RX DMA crossing half
+ * or the end of its ring) and is drained at once. */
 #    define PACE_RX_EVENT EVENT_MASK(0)
 
 static event_listener_t pace_rx_listener;
 
 static void active_pace_init(void) {
-    chEvtRegisterMaskWithFlags(chnGetEventSource(&UART_DRIVER), &pace_rx_listener, PACE_RX_EVENT, CHN_INPUT_AVAILABLE);
+    chEvtRegisterMask(zsa_uart_rx_event(), &pace_rx_listener, PACE_RX_EVENT);
 }
 
 static void active_pace_wait(void) {
     if (nrf_vbus_present || usbGetDriverStateI(&USB_DRIVER) == USB_ACTIVE) {
         return;
     }
-    /* Cleared before the queue check: a byte after the check signals. */
+    /* Cleared before the ring check: a burst ending after the check signals. */
     chEvtGetAndClearEvents(PACE_RX_EVENT);
-    if (!uart_available()) {
+    osalSysLock();
+    bool pending = zsa_uart_rx_pendingI();
+    osalSysUnlock();
+    if (!pending) {
         sysinterval_t period = TIME_US2I(ZSA_ACTIVE_PACE_US);
         systime_t     now    = chVTGetSystemTimeX();
         sysinterval_t left   = period - (sysinterval_t)(now % period);
