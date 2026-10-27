@@ -270,3 +270,42 @@
 #ifndef ZSA_PAIR_STATE_STALE_MS
 #    define ZSA_PAIR_STATE_STALE_MS 5000
 #endif
+
+/* ---- Diagnostic view (hold BLE_MENU, see wireless.c) ---- */
+
+/* How long BLE_MENU must be held to open the diagnostic view. */
+#ifndef ZSA_DIAG_HOLD_MS
+#    define ZSA_DIAG_HOLD_MS 3000
+#endif
+
+/* The open view closes itself after this long. */
+#ifndef ZSA_DIAG_VIEW_TIMEOUT_MS
+#    define ZSA_DIAG_VIEW_TIMEOUT_MS 60000
+#endif
+
+/* Indicator keys, {row, col}, in the order of enum zsa_diag_key (wireless.h).
+ * Defaults to the Voyager 2 left half: keys 1-5, Q-T, A-F and Z-B. */
+#ifndef ZSA_DIAG_KEYS
+#    define ZSA_DIAG_KEYS                                                  \
+        {                                                                  \
+            {0, 2}, {0, 3}, {0, 4}, {0, 5}, {0, 6},                        \
+            {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6},                        \
+            {2, 2}, {2, 3}, {2, 4}, {2, 5},                                \
+            {3, 2}, {3, 3}, {3, 4}, {3, 5}, {4, 4},                        \
+        }
+#endif
+
+/* Level (0-255) of an indicator whose state is unknown, a flat dim gray. */
+#ifndef ZSA_DIAG_UNKNOWN_VAL
+#    define ZSA_DIAG_UNKNOWN_VAL 40
+#endif
+
+/* An nRF frame within this long counts as the link being alive. */
+#ifndef ZSA_DIAG_RX_FRESH_MS
+#    define ZSA_DIAG_RX_FRESH_MS 2000
+#endif
+
+/* How often the STM32 diagnostic record is saved to CCM SRAM. */
+#ifndef ZSA_STM32_DIAG_SAVE_MS
+#    define ZSA_STM32_DIAG_SAVE_MS 1000
+#endif

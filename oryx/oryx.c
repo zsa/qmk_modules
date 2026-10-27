@@ -8,6 +8,7 @@
 #include "oryx_charge_telemetry.h"
 #include "oryx_pmic_rails.h"
 #include "oryx_scan_diag.h"
+#include "oryx_diag.h"
 #include "action_util.h"
 
 #ifdef COMMUNITY_MODULE_AUTOMOUSE_ENABLE
@@ -160,6 +161,13 @@ __attribute__((weak)) void oryx_scan_diag_fill(oryx_scan_diag_t *diag) {
     oryx_scan_diag_reset(diag);
 }
 
+__attribute__((weak)) void oryx_diag_fill(oryx_diag_t *d, uint8_t record, uint8_t page, uint8_t flags) {
+    (void)record;
+    (void)page;
+    (void)flags;
+    oryx_diag_reset(d);
+}
+
 static void oryx_handle_command(uint8_t *data, uint8_t length) {
     uint8_t  command = data[0];
     uint8_t *param   = &data[1];
@@ -231,6 +239,15 @@ static void oryx_handle_command(uint8_t *data, uint8_t length) {
             event[0] = ORYX_EVT_SCAN_DIAG;
             /* Binary payload, no ORYX_STOP_BIT; the fill writes every byte. */
             oryx_scan_diag_fill((oryx_scan_diag_t *)&event[1]);
+            raw_hid_send_oryx(event, RAW_EPSIZE);
+            break;
+        }
+
+        case ORYX_CMD_GET_DIAG: {
+            uint8_t event[RAW_EPSIZE] = {0};
+            event[0] = ORYX_EVT_DIAG;
+            /* Binary payload, no ORYX_STOP_BIT; the fill writes every byte. */
+            oryx_diag_fill((oryx_diag_t *)&event[1], param[0], param[1], param[2]);
             raw_hid_send_oryx(event, RAW_EPSIZE);
             break;
         }

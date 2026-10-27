@@ -34,7 +34,8 @@ void zsa_wireless_status_render(void);
 void zsa_wireless_status_draw_gauge(uint8_t first_led, uint8_t soc);
 
 /* Bluetooth bank menu (BLE_MENU), drawn over everything else while open: every
- * LED in [led_min, led_max) dark except the five bank keys. Call it last from
+ * LED in [led_min, led_max) dark except the five bank keys. The diagnostic view
+ * (hold BLE_MENU) is drawn here too, in its place. Call it last from
  * rgb_matrix_indicators_advanced_kb(), after the _user hook. Returns false,
- * drawing nothing, while the menu is closed. */
+ * drawing nothing, while neither is open. */
 bool zsa_wireless_ble_menu_render(uint8_t led_min, uint8_t led_max);

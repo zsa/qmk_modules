@@ -26,8 +26,10 @@
 /* rtt_debug.h resolves to no-op static inlines unless ZSA_RTT_DEBUG is set. */
 #include "rtt_debug.h"
 #include "busdev.h"
+#include "zsa_stm32_diag.h"
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
 #    include "oryx.h"
+#    include "oryx_diag.h"
 #endif
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
@@ -391,6 +393,35 @@ static uint32_t last_nav_announce_ms = 0;
 
 static struct zsa_parser rx_parser;
 
+/* ---- Field diagnostics (see "Diagnostic records" below) ---- */
+
+/* This boot's link counters; uint16 ones saturate. */
+static struct {
+    uint16_t link_ups;
+    uint16_t sd_overruns;
+    uint16_t sd_framing;
+    uint16_t sd_noise;
+    uint16_t sd_parity;
+    uint16_t sd_queue_full;
+    uint16_t parser_resyncs;
+    uint16_t crc_errors;
+    uint16_t frame_aborts;
+    uint32_t frames_rx;
+    uint32_t frames_tx;
+    uint32_t last_frame_ms; /* valid once frames_rx > 0 */
+    uint32_t max_rx_gap_ms;
+    bool     gap_armed;     /* the last frame arrived while Active */
+} ldiag;
+
+static inline void ldiag_inc(uint16_t *counter) {
+    if (*counter != UINT16_MAX) {
+        (*counter)++;
+    }
+}
+
+static void diag_left_page_rx(const uint8_t *payload, uint16_t len);
+static void diag_sd_errors_discard(void);
+
 /* ---- Power stage (declared early for use in handle_rx_frame) ---- */
 
 static enum zsa_idle_step idle_step = ZSA_IDLE_ACTIVE;
@@ -530,6 +561,7 @@ void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len)
     uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
     uint32_t rtt_t0    = zsa_rtt_cycles(); // TEMP DEBUG
     uart_transmit(buf, frame_len);
+    ldiag.frames_tx++;
     zsa_rtt_tx(type, frame_len, rtt_t0);   // TEMP DEBUG
 }
 
@@ -569,6 +601,7 @@ enum sleep_end {
     SE_DFU_START,    /* update started */
     SE_DFU_AWAKE,    /* update session or step under way */
     SE_BLE_MENU,     /* Bluetooth bank menu open */
+    SE_DIAG_VIEW,    /* diagnostic view open */
 };
 
 static void sleep_exit_for(uint8_t why);
@@ -858,6 +891,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 vbus_wait_ms = timer_read32();
             }
             link_ready = true;
+            ldiag_inc(&ldiag.link_ups);
             /* Reply (rate-limited) so the nRF's link-probe loop latches even
              * when we were already up: after an nRF-only reboot it probes
              * LINK_UP every 100 ms and stops only on receiving ours — without
@@ -1118,6 +1152,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 link_state_seen    = true;
                 zsa_nav_link_received(&nav_link_age, last_link_state_ms);
             }
+            break;
+
+        case ZSA_MSG_EVT_DIAG:
+            diag_left_page_rx(frame->payload, frame->len);
             break;
 
         case ZSA_MSG_DFU_ENTER:
@@ -1863,6 +1901,7 @@ __attribute__((weak)) void zsa_wireless_sleep_changed(bool sleeping) { (void)sle
 static void sleep_enter(uint32_t idle_ms) {
     zsa_log("power: sleep");
     idle_step = ZSA_IDLE_SLEEP;
+    ldiag.gap_armed = false;
     send_idle_state(idle_step);
     zsa_nav_link_sleep(&nav_link_age, true, timer_read32(), ZSA_LINK_STATE_STALE_MS);
 
@@ -2528,6 +2567,7 @@ restore:
             (void)uart_read();
         }
         zsa_parser_init(&rx_parser);
+        diag_sd_errors_discard();
     }
 
     if (why != STOP_WAKE_NONE) {
@@ -2778,9 +2818,14 @@ static void idle_power_task(void) {
         idle_floor_ms = timer_read32();
         return;
     }
-    /* The idle count restarts when the menu closes. */
+    /* The idle count restarts when the menu or the diagnostic view closes. */
     if (zsa_wireless_ble_menu_open()) {
         sleep_exit_for(SE_BLE_MENU);
+        idle_floor_ms = timer_read32();
+        return;
+    }
+    if (zsa_wireless_diag_view_open()) {
+        sleep_exit_for(SE_DIAG_VIEW);
         idle_floor_ms = timer_read32();
         return;
     }
@@ -3209,6 +3254,520 @@ static bool ble_menu_filter(keyrecord_t *record) {
     return false;
 }
 
+/* ---- Diagnostic records ----
+ *
+ * STM32 record (struct zsa_stm32_diag): built from ldiag and the link state.
+ * Saved every ZSA_STM32_DIAG_SAVE_MS with a magic and a CRC into CCM SRAM
+ * (.ram4, no-init), so the copy from the boot before is still there after a
+ * software, watchdog or pin reset; at boot it moves to the previous slot.
+ *
+ * Left nRF records (struct zsa_left_diag): fetched over UART a page at a time
+ * with ZSA_MSG_QUERY_DIAG, one query in flight, and cached for the raw-HID
+ * ORYX_CMD_GET_DIAG. */
+
+#define STM32_DIAG_MAGIC 0x5A445347u /* "GSDZ" */
+
+struct stm32_diag_slot {
+    uint32_t              magic;
+    struct zsa_stm32_diag rec;
+    uint32_t              crc; /* diag_crc32 of magic and rec */
+};
+
+/* [0] this boot, [1] the boot before. */
+#if defined(MCU_STM32)
+static struct stm32_diag_slot stm32_diag_ret[2] __attribute__((section(".ram4")));
+#else
+static struct stm32_diag_slot stm32_diag_ret[2];
+#endif
+
+static uint16_t stm32_boot_count;
+static uint8_t  stm32_reset_flags; /* RCC_CSR[31:24] at boot */
+static uint32_t stm32_diag_saved_ms;
+
+#if defined(MCU_STM32)
+#    define SD_ERR_EVENT EVENT_MASK(1)
+#    define SD_ERR_FLAGS (SD_OVERRUN_ERROR | SD_FRAMING_ERROR | SD_NOISE_ERROR | SD_PARITY_ERROR | SD_QUEUE_FULL_ERROR)
+static event_listener_t sd_err_listener;
+#endif
+
+static uint32_t diag_crc32(const uint8_t *p, size_t n) {
+    uint32_t crc = 0xFFFFFFFFu;
+    while (n--) {
+        crc ^= *p++;
+        for (uint8_t bit = 0; bit < 8; bit++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+static uint32_t stm32_slot_crc(const struct stm32_diag_slot *slot) {
+    return diag_crc32((const uint8_t *)slot, offsetof(struct stm32_diag_slot, crc));
+}
+
+static bool stm32_slot_valid(const struct stm32_diag_slot *slot) {
+    return slot->magic == STM32_DIAG_MAGIC && slot->rec.version == ZSA_STM32_DIAG_VERSION && slot->crc == stm32_slot_crc(slot);
+}
+
+static uint8_t stm32_diag_transport(void) {
+    switch (usb_transport()) {
+        case UT_USB:
+            return ZSA_STM32_DIAG_TRANSPORT_USB;
+        case UT_BLE:
+            return ZSA_STM32_DIAG_TRANSPORT_BLE;
+        default:
+            return ZSA_STM32_DIAG_TRANSPORT_PENDING;
+    }
+}
+
+static void stm32_diag_build(struct zsa_stm32_diag *r) {
+    memset(r, 0, sizeof(*r));
+    r->version     = ZSA_STM32_DIAG_VERSION;
+    r->len         = ZSA_STM32_DIAG_LEN;
+    r->boot_count  = stm32_boot_count;
+    r->uptime_s    = timer_read32() / 1000u;
+    r->reset_flags = stm32_reset_flags;
+
+    uint8_t f = 0;
+    if (link_ready) f |= ZSA_STM32_DIAG_F_LINK;
+    if (nrf_vbus_present) f |= ZSA_STM32_DIAG_F_VBUS;
+    if (usb_host_present()) f |= ZSA_STM32_DIAG_F_USB_HOST;
+    if (link_ready && nrf_ble_connected) f |= ZSA_STM32_DIAG_F_BLE_CONN;
+    if (zsa_trrs_plugged()) f |= ZSA_STM32_DIAG_F_TRRS;
+    if (voyager_right_led_up()) f |= ZSA_STM32_DIAG_F_RIGHT_LED;
+    if (vbus_seen) f |= ZSA_STM32_DIAG_F_VBUS_SEEN;
+    r->flags = f;
+
+    r->transport      = stm32_diag_transport();
+    r->idle_step      = (uint8_t)idle_step;
+    r->right_link     = link_state_fresh() ? nrf_link_state : ZSA_STM32_DIAG_RIGHT_LINK_UNKNOWN;
+    r->power_gate     = (uint8_t)power_gate;
+    r->link_ups       = ldiag.link_ups;
+    r->sd_overruns    = ldiag.sd_overruns;
+    r->sd_framing     = ldiag.sd_framing;
+    r->sd_noise       = ldiag.sd_noise;
+    r->sd_parity      = ldiag.sd_parity;
+    r->sd_queue_full  = ldiag.sd_queue_full;
+    r->parser_resyncs = ldiag.parser_resyncs;
+    r->crc_errors     = ldiag.crc_errors;
+    r->frame_aborts   = ldiag.frame_aborts;
+    r->frames_rx      = ldiag.frames_rx;
+    r->frames_tx      = ldiag.frames_tx;
+    r->rx_age_ms      = ldiag.frames_rx ? timer_elapsed32(ldiag.last_frame_ms) : ZSA_STM32_DIAG_AGE_NEVER;
+    r->max_rx_gap_ms  = ldiag.max_rx_gap_ms;
+}
+
+static void stm32_diag_save(void) {
+    struct stm32_diag_slot *slot = &stm32_diag_ret[0];
+    slot->magic                  = STM32_DIAG_MAGIC;
+    stm32_diag_build(&slot->rec);
+    slot->crc           = stm32_slot_crc(slot);
+    stm32_diag_saved_ms = timer_read32();
+}
+
+/* bluetooth_init(), after uart_init(). */
+static void stm32_diag_boot(void) {
+#if defined(MCU_STM32)
+    stm32_reset_flags = (uint8_t)(RCC->CSR >> 24);
+    RCC->CSR |= RCC_CSR_RMVF;
+    chEvtRegisterMaskWithFlags(chnGetEventSource(&UART_DRIVER), &sd_err_listener, SD_ERR_EVENT, SD_ERR_FLAGS);
+#endif
+    if (stm32_slot_valid(&stm32_diag_ret[0])) {
+        stm32_diag_ret[1] = stm32_diag_ret[0];
+        stm32_boot_count  = (uint16_t)(stm32_diag_ret[0].rec.boot_count + 1u);
+    } else {
+        if (!stm32_slot_valid(&stm32_diag_ret[1])) {
+            memset(&stm32_diag_ret[1], 0, sizeof(stm32_diag_ret[1]));
+        }
+        stm32_boot_count = 1;
+    }
+    memset(&stm32_diag_ret[0], 0, sizeof(stm32_diag_ret[0]));
+    stm32_diag_save();
+}
+
+/* Counts the serial driver's error flags raised since the last pass. */
+static void diag_sd_errors_poll(void) {
+#if defined(MCU_STM32)
+    eventflags_t f = chEvtGetAndClearFlags(&sd_err_listener);
+    chEvtGetAndClearEvents(SD_ERR_EVENT);
+    if (f & SD_OVERRUN_ERROR) ldiag_inc(&ldiag.sd_overruns);
+    if (f & SD_FRAMING_ERROR) ldiag_inc(&ldiag.sd_framing);
+    if (f & SD_NOISE_ERROR) ldiag_inc(&ldiag.sd_noise);
+    if (f & SD_PARITY_ERROR) ldiag_inc(&ldiag.sd_parity);
+    if (f & SD_QUEUE_FULL_ERROR) ldiag_inc(&ldiag.sd_queue_full);
+#endif
+}
+
+/* Drops the flags raised while the clocks restarted after STOP. */
+static void diag_sd_errors_discard(void) {
+#if defined(MCU_STM32)
+    (void)chEvtGetAndClearFlags(&sd_err_listener);
+    chEvtGetAndClearEvents(SD_ERR_EVENT);
+#endif
+}
+
+/* ---- Left nRF record fetch ---- */
+
+#define LEFT_DIAG_RECORDS 2u
+#define LEFT_DIAG_PAGES   ((ZSA_LEFT_DIAG_SIZE + ZSA_DIAG_PAGE_DATA - 1u) / ZSA_DIAG_PAGE_DATA)
+#define LEFT_DIAG_STEPS   (LEFT_DIAG_RECORDS * LEFT_DIAG_PAGES)
+/* Wait for one answer, and tries per page. */
+#define LEFT_DIAG_REPLY_MS 50u
+#define LEFT_DIAG_TRIES    3u
+
+_Static_assert(LEFT_DIAG_PAGES <= 8, "page bits fit a uint8_t");
+
+static uint8_t  left_diag_data[LEFT_DIAG_RECORDS][LEFT_DIAG_PAGES * ZSA_DIAG_PAGE_DATA];
+static uint32_t left_diag_page_ms[LEFT_DIAG_RECORDS][LEFT_DIAG_PAGES];
+static uint8_t  left_diag_pages_ok[LEFT_DIAG_RECORDS]; /* bit per page held */
+static uint8_t  left_diag_len[LEFT_DIAG_RECORDS];      /* record size from the nRF */
+static bool     left_diag_none[LEFT_DIAG_RECORDS];     /* the nRF has no such record */
+
+static bool     left_fetch_active;
+static uint8_t  left_fetch_step; /* record * LEFT_DIAG_PAGES + page */
+static uint8_t  left_fetch_tries;
+static bool     left_fetch_waiting;
+static uint32_t left_fetch_sent_ms;
+static bool     left_answered; /* an EVT_DIAG arrived since the last fetch start */
+
+static void left_fetch_start(void) {
+    left_fetch_active  = true;
+    left_fetch_step    = 0;
+    left_fetch_tries   = 0;
+    left_fetch_waiting = false;
+    left_answered      = false;
+}
+
+static void left_fetch_next(void) {
+    left_fetch_step++;
+    left_fetch_tries   = 0;
+    left_fetch_waiting = false;
+}
+
+static void diag_left_page_rx(const uint8_t *payload, uint16_t len) {
+    struct zsa_diag_page p;
+    if (len < sizeof(p)) {
+        return;
+    }
+    memcpy(&p, payload, sizeof(p));
+    if (p.record >= LEFT_DIAG_RECORDS || p.page >= LEFT_DIAG_PAGES) {
+        return;
+    }
+    left_answered = true;
+
+    uint8_t bit = (uint8_t)(1u << p.page);
+    if (p.status == ZSA_DIAG_PAGE_OK) {
+        memcpy(&left_diag_data[p.record][p.page * ZSA_DIAG_PAGE_DATA], p.data, ZSA_DIAG_PAGE_DATA);
+        left_diag_page_ms[p.record][p.page] = timer_read32();
+        left_diag_pages_ok[p.record] |= bit;
+        left_diag_len[p.record]  = p.total_len;
+        left_diag_none[p.record] = false;
+    } else if (p.status == ZSA_DIAG_PAGE_NO_REC) {
+        left_diag_pages_ok[p.record] = 0;
+        left_diag_none[p.record]     = true;
+    }
+
+    if (left_fetch_active && left_fetch_waiting && left_fetch_step == p.record * LEFT_DIAG_PAGES + p.page) {
+        if (p.status != ZSA_DIAG_PAGE_OK) {
+            /* Nothing more in this record. */
+            left_fetch_step = (uint8_t)((p.record + 1u) * LEFT_DIAG_PAGES - 1u);
+        }
+        left_fetch_next();
+    }
+}
+
+/* One query in flight; its answer is at most 28 B of payload. */
+static void left_fetch_task(void) {
+    if (!left_fetch_active) {
+        return;
+    }
+    if (left_fetch_waiting) {
+        if (timer_elapsed32(left_fetch_sent_ms) < LEFT_DIAG_REPLY_MS) {
+            return;
+        }
+        left_fetch_waiting = false;
+        if (++left_fetch_tries >= LEFT_DIAG_TRIES) {
+            left_fetch_next();
+        }
+    }
+    for (;;) {
+        if (left_fetch_step >= LEFT_DIAG_STEPS) {
+            left_fetch_active = false;
+            return;
+        }
+        uint8_t rec  = left_fetch_step / LEFT_DIAG_PAGES;
+        uint8_t page = left_fetch_step % LEFT_DIAG_PAGES;
+        /* Pages past the record's reported size are skipped. */
+        if (page > 0 && (left_diag_pages_ok[rec] & 1u) && (uint16_t)page * ZSA_DIAG_PAGE_DATA >= left_diag_len[rec]) {
+            left_fetch_step++;
+            continue;
+        }
+        struct zsa_diag_query q = {.record = rec, .page = page};
+        zsa_wireless_send_frame(ZSA_MSG_QUERY_DIAG, (const uint8_t *)&q, sizeof(q));
+        left_fetch_waiting = true;
+        left_fetch_sent_ms = timer_read32();
+        return;
+    }
+}
+
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+static void diag_page_copy(oryx_diag_t *d, const uint8_t *rec, uint8_t rec_len, uint8_t page) {
+    uint16_t off = (uint16_t)page * ORYX_DIAG_PAGE_DATA;
+    if (off >= rec_len) {
+        d->status = ORYX_DIAG_RANGE;
+        return;
+    }
+    uint16_t n = rec_len - off;
+    if (n > ORYX_DIAG_PAGE_DATA) {
+        n = ORYX_DIAG_PAGE_DATA;
+    }
+    d->status    = ORYX_DIAG_OK;
+    d->total_len = rec_len;
+    memcpy(d->data, rec + off, n);
+}
+
+_Static_assert(ORYX_DIAG_PAGE_DATA == ZSA_DIAG_PAGE_DATA, "oryx pages carry whole UART pages");
+
+/* Strong override of oryx.c's weak hook. */
+void oryx_diag_fill(oryx_diag_t *d, uint8_t record, uint8_t page, uint8_t flags) {
+    oryx_diag_reset(d);
+    d->version = ORYX_DIAG_VERSION;
+    d->record  = record;
+    d->page    = page;
+
+    if (flags & ORYX_DIAG_FLAG_FETCH) {
+        left_fetch_start();
+    }
+
+    switch (record) {
+        case ORYX_DIAG_REC_STM32: {
+            struct zsa_stm32_diag r;
+            stm32_diag_build(&r);
+            diag_page_copy(d, (const uint8_t *)&r, sizeof(r), page);
+            break;
+        }
+        case ORYX_DIAG_REC_STM32_PREV:
+            if (!stm32_slot_valid(&stm32_diag_ret[1])) {
+                d->status = ORYX_DIAG_NONE;
+                break;
+            }
+            diag_page_copy(d, (const uint8_t *)&stm32_diag_ret[1].rec, sizeof(stm32_diag_ret[1].rec), page);
+            break;
+        case ORYX_DIAG_REC_LEFT:
+        case ORYX_DIAG_REC_LEFT_PREV: {
+            uint8_t rec = record - ORYX_DIAG_REC_LEFT;
+            d->age_ms   = ORYX_DIAG_AGE_MAX;
+            if (page >= LEFT_DIAG_PAGES) {
+                d->status = ORYX_DIAG_RANGE;
+            } else if (!(left_diag_pages_ok[rec] & (1u << page))) {
+                d->status = ORYX_DIAG_NONE;
+            } else {
+                uint8_t len = left_diag_len[rec];
+                if (len > sizeof(left_diag_data[rec])) {
+                    len = sizeof(left_diag_data[rec]);
+                }
+                diag_page_copy(d, left_diag_data[rec], len, page);
+                uint32_t age = timer_elapsed32(left_diag_page_ms[rec][page]);
+                d->age_ms    = age > ORYX_DIAG_AGE_MAX ? ORYX_DIAG_AGE_MAX : (uint16_t)age;
+            }
+            break;
+        }
+        default:
+            d->status = ORYX_DIAG_RANGE;
+            break;
+    }
+}
+#endif // COMMUNITY_MODULE_ORYX_ENABLE
+
+/* ---- Diagnostic view ---- */
+
+const uint8_t zsa_diag_keys[ZSA_DIAG_KEY_COUNT][2] = ZSA_DIAG_KEYS;
+
+static bool         diag_view_is_open;
+static uint32_t     diag_view_ms;  /* when it opened */
+static bool         diag_holding;  /* BLE_MENU down, hold not yet resolved */
+static keypos_t     diag_hold_key;
+static uint32_t     diag_hold_ms;
+/* Keys whose press the view swallowed; their release is swallowed too. */
+static matrix_row_t diag_swallowed[MATRIX_ROWS];
+#ifdef RGB_MATRIX_ENABLE
+static bool diag_rgb_on;     /* matrix enabled at open */
+static bool diag_mode_moved; /* mode moved off RGB_MATRIX_NONE at open */
+#endif
+
+bool zsa_wireless_diag_view_open(void) {
+    return diag_view_is_open;
+}
+
+/* As ble_menu_rgb_assert(): the boot power gate keeps the matrix dark. */
+static void diag_rgb_assert(void) {
+#ifdef RGB_MATRIX_ENABLE
+    if (!power_gate_allows_rgb()) {
+        return;
+    }
+    if (!rgb_matrix_is_enabled()) {
+        rgb_matrix_enable_noeeprom();
+    }
+    if (rgb_matrix_get_mode() == RGB_MATRIX_NONE) {
+        rgb_matrix_mode_noeeprom(RGB_MATRIX_SOLID_COLOR);
+        diag_mode_moved = true;
+    }
+#endif
+}
+
+static void diag_view_open(void) {
+    if (diag_view_is_open) {
+        return;
+    }
+    diag_view_is_open = true;
+    diag_view_ms      = timer_read32();
+#ifdef RGB_MATRIX_ENABLE
+    diag_rgb_on     = rgb_matrix_is_enabled();
+    diag_mode_moved = false;
+#endif
+    diag_rgb_assert();
+    left_fetch_start();
+}
+
+static void diag_view_close(void) {
+    if (!diag_view_is_open) {
+        return;
+    }
+    diag_view_is_open = false;
+#ifdef RGB_MATRIX_ENABLE
+    if (diag_mode_moved) {
+        rgb_matrix_config.mode = RGB_MATRIX_NONE;
+    }
+    if (!diag_rgb_on && rgb_matrix_is_enabled()) {
+        rgb_matrix_disable_noeeprom();
+    }
+#endif
+}
+
+static void diag_hold_start(keypos_t key) {
+    diag_holding  = true;
+    diag_hold_key = key;
+    diag_hold_ms  = timer_read32();
+}
+
+static void diag_hold_end(keypos_t key) {
+    if (diag_holding && diag_hold_key.row == key.row && diag_hold_key.col == key.col) {
+        diag_holding = false;
+    }
+}
+
+/* False swallows the event. While open any press closes the view and is
+ * swallowed with its release; keys held from before release normally. */
+static bool diag_view_filter(keyrecord_t *record) {
+    keypos_t key = record->event.key;
+
+    if (!IS_KEYEVENT(record->event) || key.row >= MATRIX_ROWS || key.col >= MATRIX_COLS) {
+        return true;
+    }
+    matrix_row_t pos = (matrix_row_t)1 << key.col;
+
+    if (!record->event.pressed) {
+        if (!(diag_swallowed[key.row] & pos)) {
+            return true;
+        }
+        diag_swallowed[key.row] &= (matrix_row_t)~pos;
+        return false;
+    }
+    if (!diag_view_is_open) {
+        diag_swallowed[key.row] &= (matrix_row_t)~pos;
+        return true;
+    }
+    diag_swallowed[key.row] |= pos;
+    diag_view_close();
+    return false;
+}
+
+static void diag_view_task(void) {
+    if (diag_holding && timer_elapsed32(diag_hold_ms) >= ZSA_DIAG_HOLD_MS) {
+        diag_holding = false;
+        if (!zsa_wireless_dfu_active()) {
+            ble_menu_close();
+            diag_view_open();
+        }
+    }
+    if (!diag_view_is_open) {
+        return;
+    }
+    if (zsa_wireless_dfu_active() || timer_elapsed32(diag_view_ms) >= ZSA_DIAG_VIEW_TIMEOUT_MS) {
+        diag_view_close();
+        return;
+    }
+    diag_rgb_assert();
+}
+
+static void diag_task(void) {
+    diag_sd_errors_poll();
+    diag_view_task();
+    if (!zsa_wireless_dfu_active()) {
+        left_fetch_task();
+    }
+    if (timer_elapsed32(stm32_diag_saved_ms) >= ZSA_STM32_DIAG_SAVE_MS) {
+        stm32_diag_save();
+    }
+}
+
+static uint8_t diag_ok(bool ok) {
+    return ok ? ZSA_DIAG_GREEN : ZSA_DIAG_RED;
+}
+
+void zsa_wireless_diag_colors(uint8_t colors[ZSA_DIAG_KEY_COUNT]) {
+    bool rx_seen = ldiag.frames_rx != 0;
+    uint32_t age = rx_seen ? timer_elapsed32(ldiag.last_frame_ms) : 0;
+    bool fresh_link = link_state_fresh();
+
+    colors[ZSA_DIAG_KEY_LINK]        = diag_ok(link_ready);
+    colors[ZSA_DIAG_KEY_RX_FRESH]    = diag_ok(rx_seen && age < ZSA_DIAG_RX_FRESH_MS);
+    colors[ZSA_DIAG_KEY_NRF_ANSWERS] = left_answered ? ZSA_DIAG_GREEN : left_fetch_active ? ZSA_DIAG_UNKNOWN : ZSA_DIAG_RED;
+    colors[ZSA_DIAG_KEY_SERIAL_OK]   = diag_ok((ldiag.sd_overruns | ldiag.sd_framing | ldiag.sd_noise | ldiag.sd_parity | ldiag.sd_queue_full) == 0);
+    colors[ZSA_DIAG_KEY_FRAMES_OK]   = diag_ok((ldiag.parser_resyncs | ldiag.frame_aborts) == 0);
+    colors[ZSA_DIAG_KEY_VBUS]        = vbus_seen ? diag_ok(nrf_vbus_present) : ZSA_DIAG_UNKNOWN;
+    colors[ZSA_DIAG_KEY_USB_HOST]    = diag_ok(usb_host_present());
+
+    switch (usb_transport()) {
+        case UT_USB:
+            colors[ZSA_DIAG_KEY_TRANSPORT] = ZSA_DIAG_GREEN;
+            break;
+        case UT_BLE:
+            colors[ZSA_DIAG_KEY_TRANSPORT] = ZSA_DIAG_BLUE;
+            break;
+        default:
+            colors[ZSA_DIAG_KEY_TRANSPORT] = ZSA_DIAG_YELLOW;
+            break;
+    }
+
+    colors[ZSA_DIAG_KEY_POWER_GATE]  = power_gate == PG_OK ? ZSA_DIAG_GREEN : power_gate == PG_WAIT ? ZSA_DIAG_YELLOW : ZSA_DIAG_RED;
+    colors[ZSA_DIAG_KEY_NO_WATCHDOG] = diag_ok(!(stm32_reset_flags & (ZSA_STM32_RESET_IWDG | ZSA_STM32_RESET_WWDG)));
+    colors[ZSA_DIAG_KEY_BLE]         = link_ready ? diag_ok(nrf_ble_connected) : ZSA_DIAG_UNKNOWN;
+    colors[ZSA_DIAG_KEY_BATTERY]     = diag_ok(zsa_wireless_battery_fresh());
+
+    if (!fresh_link) {
+        colors[ZSA_DIAG_KEY_RIGHT_LINK] = ZSA_DIAG_UNKNOWN;
+    } else if (nrf_link_state == ZSA_LINK_STATE_OK) {
+        colors[ZSA_DIAG_KEY_RIGHT_LINK] = ZSA_DIAG_GREEN;
+    } else if (nrf_link_state == ZSA_LINK_STATE_MISMATCH) {
+        colors[ZSA_DIAG_KEY_RIGHT_LINK] = ZSA_DIAG_YELLOW;
+    } else {
+        colors[ZSA_DIAG_KEY_RIGHT_LINK] = ZSA_DIAG_RED;
+    }
+    colors[ZSA_DIAG_KEY_RIGHT_LED] = diag_ok(voyager_right_led_up());
+
+    /* Bar: one more key lit per bucket, colored by the bucket. */
+    static const uint32_t bucket_ms[] = {1000u, 5000u, 30000u, 300000u};
+    static const uint8_t  bucket_color[] = {ZSA_DIAG_GREEN, ZSA_DIAG_YELLOW, ZSA_DIAG_ORANGE, ZSA_DIAG_RED, ZSA_DIAG_RED};
+    uint8_t bucket = 0;
+    while (bucket < 4 && age >= bucket_ms[bucket]) {
+        bucket++;
+    }
+    for (uint8_t i = 0; i <= ZSA_DIAG_KEY_AGE_OLDER - ZSA_DIAG_KEY_AGE_1S; i++) {
+        colors[ZSA_DIAG_KEY_AGE_1S + i] = !rx_seen ? ZSA_DIAG_UNKNOWN : i <= bucket ? bucket_color[bucket] : ZSA_DIAG_OFF;
+    }
+}
+
 /* Auto-generated per-module hook, called from pre_process_record_quantum()
  * before the tapping state machine and process_record_quantum() — returning
  * false drops the event before any keycode handling at all. This is the
@@ -3216,6 +3775,9 @@ static bool ble_menu_filter(keyrecord_t *record) {
  * keys, tap-hold resolution, combos and mouse keys in one place. */
 bool pre_process_record_wireless(uint16_t keycode, keyrecord_t *record) {
     if (zsa_wireless_dfu_active()) {
+        return false;
+    }
+    if (!diag_view_filter(record)) {
         return false;
     }
     if (!ble_menu_filter(record)) {
@@ -3251,8 +3813,13 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
             return false;
         /* No-op with a USB host. */
         case BLE_MENU:
-            if (record->event.pressed && !usb_host_present()) {
-                ble_menu_open();
+            if (record->event.pressed) {
+                diag_hold_start(record->event.key);
+                if (!usb_host_present()) {
+                    ble_menu_open();
+                }
+            } else {
+                diag_hold_end(record->event.key);
             }
             return false;
         /* Legacy, replaced by the bank menu. */
@@ -3276,6 +3843,7 @@ void bluetooth_init(void) {
     uart_init(ZSA_WIRELESS_BAUD_RATE);
     active_pace_init();
     zsa_parser_init(&rx_parser);
+    stm32_diag_boot();
     link_ready = false;
     last_link_up_ms = timer_read32();
     vbus_wait_ms    = timer_read32();
@@ -3506,7 +4074,30 @@ static void uart_rx_drain(void) {
     while (uart_available()) {
         uint8_t byte = uart_read();
         last_rx_ms   = timer_read32();
-        if (zsa_parser_feed(&rx_parser, byte)) {
+
+        enum zsa_parse_state state   = rx_parser.state;
+        uint8_t              esc     = rx_parser.esc;
+        uint16_t             resyncs = rx_parser.resyncs;
+        if (byte == ZSA_SYNC_BYTE && state != ZSA_PARSE_HUNT) {
+            ldiag_inc(&ldiag.frame_aborts);
+        }
+        int done = zsa_parser_feed(&rx_parser, byte);
+        if (rx_parser.resyncs != resyncs) {
+            ldiag_inc(&ldiag.parser_resyncs);
+            if (state == ZSA_PARSE_CRC && !esc) {
+                ldiag_inc(&ldiag.crc_errors);
+            }
+        }
+        if (done) {
+            if (ldiag.gap_armed) {
+                uint32_t gap = last_rx_ms - ldiag.last_frame_ms;
+                if (gap > ldiag.max_rx_gap_ms) {
+                    ldiag.max_rx_gap_ms = gap;
+                }
+            }
+            ldiag.frames_rx++;
+            ldiag.last_frame_ms = last_rx_ms;
+            ldiag.gap_armed     = idle_step == ZSA_IDLE_ACTIVE;
             handle_rx_frame(&rx_parser.frame);
         }
     }
@@ -3577,6 +4168,9 @@ void bluetooth_task(void) {
 
     /* Bank menu: forget holds, matrix kept on */
     ble_menu_task();
+
+    /* Diagnostic view, UART error counts, left record fetch, CCM snapshot */
+    diag_task();
 
     /* Unblank if the nRF stopped refreshing the update state */
     dfu_state_task();

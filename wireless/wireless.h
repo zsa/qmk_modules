@@ -136,6 +136,54 @@ extern const uint8_t zsa_ble_menu_keys[ZSA_BLE_BANK_COUNT][ZSA_BLE_MENU_BANK_KEY
  * off (ZSA_BLE_BANK_STATE_OFF) only EMPTY and STORED are reported. */
 uint8_t zsa_wireless_ble_bank_view(uint8_t bank);
 
+/* ---- Diagnostic view (hold BLE_MENU) ----
+ *
+ * Holding BLE_MENU for ZSA_DIAG_HOLD_MS closes the bank menu and lights the
+ * ZSA_DIAG_KEYS indicators, every other LED dark. It works with or without a
+ * USB host. Any key press closes it and is swallowed, as is that key's
+ * release; it also closes after ZSA_DIAG_VIEW_TIMEOUT_MS. */
+
+/* Indicators, in ZSA_DIAG_KEYS order. */
+enum zsa_diag_key {
+    ZSA_DIAG_KEY_LINK = 0,     /* LINK_UP handshake with the left nRF done */
+    ZSA_DIAG_KEY_RX_FRESH,     /* a frame from the left nRF within ZSA_DIAG_RX_FRESH_MS */
+    ZSA_DIAG_KEY_NRF_ANSWERS,  /* the left nRF answered a query since the view opened */
+    ZSA_DIAG_KEY_SERIAL_OK,    /* no STM32 UART errors this boot */
+    ZSA_DIAG_KEY_FRAMES_OK,    /* no dropped or cut-short frames this boot */
+    ZSA_DIAG_KEY_VBUS,         /* the left nRF reports USB power */
+    ZSA_DIAG_KEY_USB_HOST,     /* a USB host enumerated the keyboard */
+    ZSA_DIAG_KEY_TRANSPORT,    /* reports go to USB, Bluetooth, or not decided */
+    ZSA_DIAG_KEY_POWER_GATE,   /* boot power verdict */
+    ZSA_DIAG_KEY_NO_WATCHDOG,  /* this boot was not a watchdog reset */
+    ZSA_DIAG_KEY_BLE,          /* the left nRF reports a Bluetooth host */
+    ZSA_DIAG_KEY_BATTERY,      /* battery levels are fresh */
+    ZSA_DIAG_KEY_RIGHT_LINK,   /* the right half's radio link */
+    ZSA_DIAG_KEY_RIGHT_LED,    /* the right half's LED driver */
+    ZSA_DIAG_KEY_AGE_1S,       /* last left nRF frame: < 1 s */
+    ZSA_DIAG_KEY_AGE_5S,       /* < 5 s */
+    ZSA_DIAG_KEY_AGE_30S,      /* < 30 s */
+    ZSA_DIAG_KEY_AGE_5MIN,     /* < 5 min */
+    ZSA_DIAG_KEY_AGE_OLDER,    /* 5 min or more */
+    ZSA_DIAG_KEY_COUNT,
+};
+
+enum zsa_diag_color {
+    ZSA_DIAG_OFF = 0,
+    ZSA_DIAG_GREEN,
+    ZSA_DIAG_RED,
+    ZSA_DIAG_UNKNOWN, /* dim gray */
+    ZSA_DIAG_BLUE,
+    ZSA_DIAG_YELLOW,
+    ZSA_DIAG_ORANGE,
+};
+
+/* {row, col} of each indicator, from ZSA_DIAG_KEYS. */
+extern const uint8_t zsa_diag_keys[ZSA_DIAG_KEY_COUNT][2];
+
+bool zsa_wireless_diag_view_open(void);
+/* enum zsa_diag_color of each indicator. */
+void zsa_wireless_diag_colors(uint8_t colors[ZSA_DIAG_KEY_COUNT]);
+
 /* Power stage: ZSA_IDLE_ACTIVE or ZSA_IDLE_SLEEP. */
 enum zsa_idle_step zsa_wireless_idle_step(void);
 

@@ -57,6 +57,12 @@ enum zsa_msg_type {
     ZSA_MSG_QUERY_BLE_STATUS = 0x10,
     ZSA_MSG_QUERY_BATTERY    = 0x11,
     ZSA_MSG_QUERY_PAIR_STATE = 0x12,
+    ZSA_MSG_QUERY_DIAG       = 0x13,  /* 2 B: struct zsa_diag_query — one page
+                                       * of the left's diagnostic record, this
+                                       * boot's or the previous boot's.
+                                       * Answered with one EVT_DIAG. Sent on
+                                       * demand only, one page at a time. Not
+                                       * in ignition's copy of this header. */
 
     /* STM32 -> nRF: commands (0x20-0x2F) */
     ZSA_MSG_CMD_HIBERNATE    = 0x20,
@@ -288,6 +294,9 @@ enum zsa_msg_type {
                                        * change and as a level every
                                        * ZSA_BLE_BANKS_INTERVAL_MS. Not known
                                        * to ignition. */
+    ZSA_MSG_EVT_DIAG         = 0xC4,  /* 28 B: struct zsa_diag_page — the answer
+                                       * to QUERY_DIAG. Not known to
+                                       * ignition. */
 };
 
 /* ---- Payload structures ---- */
@@ -949,6 +958,114 @@ struct __attribute__((packed)) zsa_nrf_diag {
 
 _Static_assert(sizeof(struct zsa_nrf_diag) == ZSA_NRF_DIAG_SIZE,
                "zsa_nrf_diag is a wire layout");
+
+/* ---- Left diagnostic record (QUERY_DIAG / EVT_DIAG) ---- */
+
+/* zsa_diag_query.record */
+#define ZSA_DIAG_REC_NOW  0u /* this boot, refreshed every second */
+#define ZSA_DIAG_REC_PREV 1u /* the boot before this one */
+
+/* Record bytes per page: page n carries bytes [n * 24, n * 24 + 24). */
+#define ZSA_DIAG_PAGE_DATA 24u
+
+/* zsa_diag_page.status */
+#define ZSA_DIAG_PAGE_OK     0u
+#define ZSA_DIAG_PAGE_NO_REC 1u /* no such record */
+#define ZSA_DIAG_PAGE_RANGE  2u /* unknown record id or page past the end */
+
+/* ZSA_MSG_QUERY_DIAG (2 bytes) */
+struct __attribute__((packed)) zsa_diag_query {
+    uint8_t record; /* ZSA_DIAG_REC_* */
+    uint8_t page;
+};
+
+/* ZSA_MSG_EVT_DIAG (28 bytes) */
+struct __attribute__((packed)) zsa_diag_page {
+    uint8_t record;    /* as queried */
+    uint8_t page;      /* as queried */
+    uint8_t status;    /* ZSA_DIAG_PAGE_* */
+    uint8_t total_len; /* record size in bytes; 0 unless status is OK */
+    uint8_t data[ZSA_DIAG_PAGE_DATA]; /* zero past the end of the record */
+};
+
+#define ZSA_DIAG_QUERY_SIZE 2u
+#define ZSA_DIAG_PAGE_SIZE  28u
+
+_Static_assert(sizeof(struct zsa_diag_query) == ZSA_DIAG_QUERY_SIZE,
+               "zsa_diag_query is a wire layout");
+_Static_assert(sizeof(struct zsa_diag_page) == ZSA_DIAG_PAGE_SIZE,
+               "zsa_diag_page is a wire layout");
+
+/* zsa_left_diag.threads[] order. */
+enum zsa_diag_thread_id {
+    ZSA_DIAG_THREAD_MAIN = 0, /* main status loop: time since its last pass */
+    ZSA_DIAG_THREAD_HID_WQ,   /* hid_wq: wait of the queued heartbeat item */
+    ZSA_DIAG_THREAD_SYS_WQ,   /* system work queue: same */
+    ZSA_DIAG_THREAD_UART_RX,  /* uart_stm_rx: time in the batch being dispatched */
+    ZSA_DIAG_THREAD_COUNT,
+};
+
+struct __attribute__((packed)) zsa_diag_thread {
+    uint32_t stall_ms;     /* current wait, 0 = none */
+    uint32_t max_stall_ms; /* longest wait this boot, current one included */
+};
+
+#define ZSA_LEFT_DIAG_VERSION 1u
+
+/* zsa_left_diag.flags */
+#define ZSA_LEFT_DIAG_F_STM32_LINK  0x01u /* LINK_UP handshake done */
+#define ZSA_LEFT_DIAG_F_STM32_SLEEP 0x02u /* the STM32 reported Sleep */
+#define ZSA_LEFT_DIAG_F_STM32_USB   0x04u /* the STM32 reported a USB host */
+#define ZSA_LEFT_DIAG_F_TRRS        0x08u /* the STM32 reported the cable plugged */
+#define ZSA_LEFT_DIAG_F_BLE_CONN    0x10u /* a BLE host is connected */
+#define ZSA_LEFT_DIAG_F_UART_RX_OFF 0x20u /* UART RX re-enable failed */
+#define ZSA_LEFT_DIAG_F_VBUS        0x40u /* VBUS present */
+
+/* An age that has no event to count from. */
+#define ZSA_DIAG_AGE_NEVER 0xFFFFFFFFu
+
+/* The left nRF's diagnostic record. Lives in RAM that survives a pin or soft
+ * reset; at boot the stored copy becomes ZSA_DIAG_REC_PREV. Counters are this
+ * boot's, uint16 and wrapping. */
+struct __attribute__((packed)) zsa_left_diag {
+    uint8_t  version;             /* ZSA_LEFT_DIAG_VERSION */
+    uint8_t  len;                 /* bytes after this one: 88 */
+    uint16_t boot_count;          /* app boots since the record was last lost */
+    uint32_t uptime_s;
+    uint32_t resetreas;           /* RESET.RESETREAS at boot, 0 = power-on */
+    uint8_t  flags;               /* ZSA_LEFT_DIAG_F_* */
+    uint8_t  ble_slot;            /* connected host slot, 0xFF = none */
+    uint8_t  esb_link;            /* right link: 0 absent, 1 OK, 2 mismatch */
+    uint8_t  stm32_idle_step;     /* last CMD_IDLE_STATE step */
+    uint16_t conn_interval;       /* 1.25 ms units, 0 = no host */
+    uint16_t conn_latency;
+    uint16_t conn_timeout;        /* 10 ms units */
+    uint16_t uart_frames;         /* as in zsa_nrf_diag */
+    uint16_t uart_bad_frames;
+    uint16_t uart_rx_errors;
+    uint16_t uart_rx_overruns;
+    uint16_t uart_rx_line_errors;
+    uint16_t uart_ring_drops;     /* RX ring overflows */
+    uint16_t uart_rx_restarts;    /* RX re-enabled after it stopped */
+    uint16_t kbd_reports;
+    uint16_t kbd_dropped;
+    uint16_t ble_send_errors;     /* failed HID input reports */
+    uint16_t notify_errors;       /* failed battery notifications */
+    uint16_t esb_hops;
+    uint16_t esb_timeouts;
+    uint16_t hid_send_max_ms;     /* longest single HID report send call */
+    uint32_t uart_rx_age_ms;      /* since the last byte from the STM32 */
+    uint32_t esb_rx_age_ms;       /* since the last packet from the right half */
+    struct zsa_diag_thread threads[ZSA_DIAG_THREAD_COUNT];
+};
+
+#define ZSA_LEFT_DIAG_SIZE 90u
+#define ZSA_LEFT_DIAG_LEN  88u
+
+_Static_assert(sizeof(struct zsa_left_diag) == ZSA_LEFT_DIAG_SIZE,
+               "zsa_left_diag is a wire layout");
+_Static_assert(ZSA_LEFT_DIAG_SIZE <= 4u * ZSA_DIAG_PAGE_DATA,
+               "zsa_left_diag fits four pages");
 
 /* ---- DFU state / error codes ---- */
 

@@ -132,7 +132,50 @@ static RGB ble_menu_color(uint8_t view, uint8_t blink) {
     }
 }
 
+static RGB diag_color(uint8_t color) {
+    switch (color) {
+        case ZSA_DIAG_GREEN:
+            return (RGB){0, 255, 0};
+        case ZSA_DIAG_RED:
+            return (RGB){255, 0, 0};
+        case ZSA_DIAG_UNKNOWN:
+            return (RGB){ZSA_DIAG_UNKNOWN_VAL, ZSA_DIAG_UNKNOWN_VAL, ZSA_DIAG_UNKNOWN_VAL};
+        case ZSA_DIAG_BLUE:
+            return (RGB){0, 0, 255};
+        case ZSA_DIAG_YELLOW:
+            return (RGB){255, 200, 0};
+        case ZSA_DIAG_ORANGE:
+            return (RGB){255, 80, 0};
+        default:
+            return (RGB){0, 0, 0};
+    }
+}
+
+/* Diagnostic view: every LED dark except the ZSA_DIAG_KEYS indicators. */
+static bool diag_view_render(uint8_t led_min, uint8_t led_max) {
+    if (!zsa_wireless_diag_view_open()) return false;
+
+    uint8_t colors[ZSA_DIAG_KEY_COUNT];
+    zsa_wireless_diag_colors(colors);
+
+    for (uint8_t i = led_min; i < led_max; i++) {
+        rgb_matrix_set_color(i, 0, 0, 0);
+    }
+    for (uint8_t k = 0; k < ZSA_DIAG_KEY_COUNT; k++) {
+        uint8_t row = zsa_diag_keys[k][0];
+        uint8_t col = zsa_diag_keys[k][1];
+        if (row >= MATRIX_ROWS || col >= MATRIX_COLS) continue;
+
+        uint8_t led = g_led_config.matrix_co[row][col];
+        if (led == NO_LED || led < led_min || led >= led_max) continue;
+        RGB rgb = diag_color(colors[k]);
+        rgb_matrix_set_color(led, rgb.r, rgb.g, rgb.b);
+    }
+    return true;
+}
+
 bool zsa_wireless_ble_menu_render(uint8_t led_min, uint8_t led_max) {
+    if (diag_view_render(led_min, led_max)) return true;
     if (!zsa_wireless_ble_menu_open()) return false;
 
     for (uint8_t i = led_min; i < led_max; i++) {

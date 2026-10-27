@@ -61,6 +61,11 @@ enum Oryx_Command_Code {
      * reports handed to the wireless half. Answered with ORYX_EVT_SCAN_DIAG
      * carrying an oryx_scan_diag_t. Unpaired-safe, like the other queries. */
     ORYX_CMD_GET_SCAN_DIAG,
+    /* Ask for one page of a field diagnostic record (oryx_diag.h): the
+     * keyboard MCU's or the left nRF's, this boot's or the previous one.
+     * Answered with ORYX_EVT_DIAG carrying an oryx_diag_t. Unpaired-safe,
+     * like the other queries. */
+    ORYX_CMD_GET_DIAG,
     ORYX_GET_PROTOCOL_VERSION = 0xFE,
 };
 
@@ -91,6 +96,9 @@ enum Oryx_Event_Code {
     /* Answer to ORYX_CMD_GET_SCAN_DIAG: an oryx_scan_diag_t in bytes 1..31.
      * Binary, so it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
     ORYX_EVT_SCAN_DIAG,
+    /* Answer to ORYX_CMD_GET_DIAG: an oryx_diag_t in bytes 1..31. Binary, so
+     * it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
+    ORYX_EVT_DIAG,
     ORYX_EVT_GET_PROTOCOL_VERSION = 0XFE,
     ORYX_EVT_ERROR                = 0xFF,
 };
