@@ -896,14 +896,18 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
         case ZSA_MSG_EVT_BLE_STATUS:
             if (frame->len >= sizeof(struct zsa_ble_status)) {
                 const struct zsa_ble_status *s = (const struct zsa_ble_status *)frame->payload;
-                zsa_rtt_event(s->connected ? "BLE_STATUS connected" : "BLE_STATUS disconnected"); // TEMP DEBUG
-                nrf_ble_connected  = s->connected != 0;
-                nrf_ble_device_idx = s->device_idx;
+                bool connected = s->connected != 0;
+                /* Re-sent as a level every second: act on changes only. */
+                if (connected != nrf_ble_connected) {
+                    zsa_rtt_event(connected ? "BLE_STATUS connected" : "BLE_STATUS disconnected"); // TEMP DEBUG
+                    nrf_ble_connected = connected;
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
-                if (!nrf_ble_connected) {
-                    oryx_ble_link_down();
-                }
+                    if (!connected) {
+                        oryx_ble_link_down();
+                    }
 #endif
+                }
+                nrf_ble_device_idx = s->device_idx;
             }
             break;
 
