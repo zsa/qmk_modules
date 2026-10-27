@@ -289,6 +289,11 @@ static bool    left_led_cycle_active; /* a frame is part-sent */
 static bool    left_frame_ready;      /* left_led_frame holds a whole frame to send */
 static uint8_t left_led_frame[IS31FL3731_PWM_REGISTER_COUNT]; /* the frame the cycle sends */
 
+/* Set at Sleep entry until the black frame has been fully written to the left
+ * chip (or ZSA_SLEEP_LED_SETTLE_MS has passed): left_led_slice_task() keeps
+ * sending while it is set, even with the rail reported off. */
+static bool sleep_left_black_pending;
+
 /* Drops a part-sent left frame and asks for the whole frame again. */
 static void left_led_slice_abandon(void) {
     left_led_cycle_active = false;
@@ -1839,6 +1844,9 @@ static void sleep_enter(uint32_t idle_ms) {
         rgb_matrix_disable_noeeprom();
     }
     rgb_matrix_set_color_all(0, 0, 0);
+#    if ZSA_LEFT_LED_SLICED
+    sleep_left_black_pending = true;
+#    endif
 #endif
     zsa_wireless_sleep_changed(true);
 }
@@ -1859,6 +1867,9 @@ static void sleep_exit_for(uint8_t why) {
     nav_sleep_end();
 
 #ifdef RGB_MATRIX_ENABLE
+#    if ZSA_LEFT_LED_SLICED
+    sleep_left_black_pending = false;
+#    endif
     if (sleep_rgb_on && power_gate_allows_rgb()) {
         rgb_matrix_enable_noeeprom();
     }
@@ -2558,6 +2569,11 @@ static bool sleep_leds_settled(void) {
     if (timer_elapsed32(sleep_entered_ms) >= ZSA_SLEEP_LED_SETTLE_MS) {
         return true;
     }
+#    if ZSA_LEFT_LED_SLICED
+    if (sleep_left_black_pending) {
+        return false;
+    }
+#    endif
     if (left_led_rail_on && is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT)) {
         return false;
     }
@@ -2889,8 +2905,14 @@ static void right_led_slice_task(void) {
  * to the function page and back between passes, and a failed walk back would
  * otherwise send PWM data into the function registers. */
 static void left_led_slice_task(void) {
-    /* Rail off: the chip is unpowered; the rail-on resync resends. */
-    if (usb_hid_on_usb() || !left_led_rail_on) {
+    /* No cycle running and nothing dirty: the chip holds the live buffer,
+     * black since Sleep entry. */
+    if (sleep_left_black_pending && ((!left_led_cycle_active && !is31fl3731_pwm_buffer_dirty(ZSA_LED_DRIVER_LEFT)) || timer_elapsed32(sleep_entered_ms) >= ZSA_SLEEP_LED_SETTLE_MS)) {
+        sleep_left_black_pending = false;
+    }
+    /* Rail off: the chip is unpowered; the rail-on resync resends. A pending
+     * Sleep black frame is still sent. */
+    if (usb_hid_on_usb() || (!left_led_rail_on && !sleep_left_black_pending)) {
         if (left_led_cycle_active) {
             left_led_slice_abandon();
         }
