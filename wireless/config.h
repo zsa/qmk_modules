@@ -15,6 +15,13 @@
 #    define ZSA_HIBERNATE_TIMEOUT_MS 600000
 #endif
 
+/* After boot, how long VBUS may be present without a USB host enumerating
+ * before the transport is reported as BLE. Also how long after link-up the
+ * STM32 waits for a first EVT_VBUS_STATE before deciding without it. */
+#ifndef ZSA_USB_HANDOVER_GRACE_MS
+#    define ZSA_USB_HANDOVER_GRACE_MS 5000
+#endif
+
 /* How long the STM32 stays running after a wake from STOP, or after the last
  * byte from the nRF, before it may stop again. Covers the debounce and the
  * first read of the mirrored right half and nav devices. */

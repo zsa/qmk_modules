@@ -604,9 +604,42 @@ static bool usb_host_present(void) {
            (state == USB_ACTIVE || (state == USB_SUSPENDED && USB_DRIVER.saved_state == USB_ACTIVE));
 }
 
+/* Transport reported to the nRF as CMD_USB_STATE. PENDING exists only until
+ * the first decision after boot: VBUS present without enumeration yet, or no
+ * EVT_VBUS_STATE yet. Each wait lasts ZSA_USB_HANDOVER_GRACE_MS. */
+enum usb_transport {
+    UT_PENDING,
+    UT_BLE,
+    UT_USB,
+};
+
+static bool     vbus_seen;          /* any EVT_VBUS_STATE received since boot */
+static uint32_t vbus_present_ms;    /* VBUS last became present */
+static uint32_t vbus_wait_ms;       /* boot, then link-up: start of the wait for a first EVT_VBUS_STATE */
+static bool     transport_decided;  /* left PENDING since boot */
+
+static enum usb_transport usb_transport(void) {
+    if (usb_host_present()) {
+        transport_decided = true;
+        return UT_USB;
+    }
+    if (!transport_decided) {
+        bool waiting = vbus_seen ? nrf_vbus_present && timer_elapsed32(vbus_present_ms) < ZSA_USB_HANDOVER_GRACE_MS
+                                 : timer_elapsed32(vbus_wait_ms) < ZSA_USB_HANDOVER_GRACE_MS;
+        if (waiting) {
+            return UT_PENDING;
+        }
+        transport_decided = true;
+    }
+    return UT_BLE;
+}
+
 /* Send all current STM32 state to nRF — called on link establishment */
 static void send_full_state(void) {
-    send_usb_state(usb_host_present());
+    enum usb_transport t = usb_transport();
+    if (t != UT_PENDING) {
+        send_usb_state(t == UT_USB);
+    }
     send_trrs_state(zsa_trrs_plugged());
     send_idle_state(idle_step);
 }
@@ -821,6 +854,9 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
     switch (frame->type) {
         case ZSA_MSG_LINK_UP:
             if (!link_ready) zsa_rtt_event("LINK_UP latched"); // TEMP DEBUG
+            if (!link_ready) {
+                vbus_wait_ms = timer_read32();
+            }
             link_ready = true;
             /* Reply (rate-limited) so the nRF's link-probe loop latches even
              * when we were already up: after an nRF-only reboot it probes
@@ -981,9 +1017,13 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             }
             break;
 
-        case ZSA_MSG_QUERY_USB_STATE:
-            send_usb_state(usb_host_present());
+        case ZSA_MSG_QUERY_USB_STATE: {
+            enum usb_transport t = usb_transport();
+            if (t != UT_PENDING) {
+                send_usb_state(t == UT_USB);
+            }
             break;
+        }
 
         case ZSA_MSG_EVT_NAV_PRESENT:
             /* The nRF acks a capability announce with the currently detected
@@ -1026,9 +1066,12 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
             if (frame->len >= sizeof(struct zsa_vbus_state)) {
                 const struct zsa_vbus_state *v = (const struct zsa_vbus_state *)frame->payload;
                 bool present = v->present != 0;
+                vbus_seen    = true;
                 if (present != nrf_vbus_present) {
                     nrf_vbus_present = present;
-                    if (!present) {
+                    if (present) {
+                        vbus_present_ms = timer_read32();
+                    } else {
                         usb_configured = false;
                     }
                     /* The PMICs dropped their input limit back to the startup
@@ -2691,13 +2734,19 @@ static void sleep_stop_task(uint32_t idle_ms) {
 
 static void idle_power_task(void) {
     static bool was_bluetooth = false;
+    static bool usb_sent      = false;
 
-    /* Only manage power stages when running wirelessly */
-    if (usb_host_present()) {
-        if (was_bluetooth) {
-            was_bluetooth = false;
+    /* Only manage power stages when running wirelessly. PENDING stays awake
+     * and reports nothing. */
+    enum usb_transport t = usb_transport();
+    if (t != UT_BLE) {
+        if (t == UT_USB && (was_bluetooth || !usb_sent)) {
+            usb_sent = true;
             send_usb_state(true);
-            zsa_nav_transport_changed();
+            if (was_bluetooth) {
+                was_bluetooth = false;
+                zsa_nav_transport_changed();
+            }
         }
         sleep_exit_for(SE_USB);
         return;
@@ -3225,6 +3274,7 @@ void bluetooth_init(void) {
     zsa_parser_init(&rx_parser);
     link_ready = false;
     last_link_up_ms = timer_read32();
+    vbus_wait_ms    = timer_read32();
     power_gate_ms   = timer_read32();
     zsa_rtt_init(); // TEMP DEBUG
 #ifdef ZSA_BLE_LOG
