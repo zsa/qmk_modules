@@ -2934,13 +2934,16 @@ static void left_led_slice_task(void) {
 
 /* ---- Bluetooth bank menu ---- */
 
-_Static_assert(ZSA_BLE_MENU_ROW < MATRIX_ROWS && ZSA_BLE_MENU_COL + ZSA_BLE_BANK_COUNT <= MATRIX_COLS,
-               "bank keys must be in the matrix");
+_Static_assert(ZSA_BLE_MENU_BANK_KEYS >= 1, "each bank needs its number key");
+
+const uint8_t zsa_ble_menu_keys[ZSA_BLE_BANK_COUNT][ZSA_BLE_MENU_BANK_KEYS][2] = ZSA_BLE_MENU_KEYS;
 
 static bool     ble_menu_is_open;
-static uint8_t  ble_menu_held;   /* bank keys pressed in the menu, still down */
-static uint8_t  ble_menu_forgot; /* held bank keys whose forget has fired */
+static uint8_t  ble_menu_held;   /* banks with a key pressed in the menu, still down */
+static uint8_t  ble_menu_forgot; /* held banks whose forget has fired */
+static uint32_t ble_menu_active_ms; /* last open, press or held bank key */
 static uint32_t ble_menu_press_ms[ZSA_BLE_BANK_COUNT];
+static keypos_t ble_menu_hold_key[ZSA_BLE_BANK_COUNT]; /* key that started each hold */
 /* Keys whose press the menu swallowed; their release is swallowed too. */
 static matrix_row_t ble_menu_swallowed[MATRIX_ROWS];
 #ifdef RGB_MATRIX_ENABLE
@@ -2974,9 +2977,10 @@ static void ble_menu_open(void) {
     if (ble_menu_is_open) {
         return;
     }
-    ble_menu_is_open = true;
-    ble_menu_held    = 0;
-    ble_menu_forgot  = 0;
+    ble_menu_is_open   = true;
+    ble_menu_held      = 0;
+    ble_menu_forgot    = 0;
+    ble_menu_active_ms = timer_read32();
 #ifdef RGB_MATRIX_ENABLE
     ble_menu_rgb_on     = rgb_matrix_is_enabled();
     ble_menu_mode_moved = false;
@@ -2991,6 +2995,12 @@ static void ble_menu_close(void) {
     ble_menu_is_open = false;
     ble_menu_held    = 0;
     ble_menu_forgot  = 0;
+    /* A bank left pairing stops advertising. */
+    for (uint8_t bank = 0; bank < ZSA_BLE_BANK_COUNT; bank++) {
+        if (zsa_wireless_ble_bank_view(bank) == ZSA_BLE_BANK_VIEW_PAIRING) {
+            send_ble_bank(ZSA_BLE_BANK_OP_CANCEL, bank);
+        }
+    }
 #ifdef RGB_MATRIX_ENABLE
     /* rgb_matrix_mode_noeeprom() cannot select NONE. */
     if (ble_menu_mode_moved) {
@@ -3004,8 +3014,14 @@ static void ble_menu_close(void) {
 
 /* Bank of a key position, or ZSA_BLE_BANK_COUNT for a non-bank key. */
 static uint8_t ble_menu_bank_of(keypos_t key) {
-    uint8_t bank = (uint8_t)(key.col - ZSA_BLE_MENU_COL);
-    return (key.row == ZSA_BLE_MENU_ROW && bank < ZSA_BLE_BANK_COUNT) ? bank : ZSA_BLE_BANK_COUNT;
+    for (uint8_t bank = 0; bank < ZSA_BLE_BANK_COUNT; bank++) {
+        for (uint8_t k = 0; k < ZSA_BLE_MENU_BANK_KEYS; k++) {
+            if (zsa_ble_menu_keys[bank][k][0] == key.row && zsa_ble_menu_keys[bank][k][1] == key.col) {
+                return bank;
+            }
+        }
+    }
+    return ZSA_BLE_BANK_COUNT;
 }
 
 /* Commands need a fresh table with the BLE stack on. */
@@ -3034,14 +3050,21 @@ static void ble_menu_tap(uint8_t bank) {
     }
 }
 
-/* Closes the menu when a USB host appears. Fires a bank's forget once its key
- * has been held ZSA_BLE_FORGET_HOLD_MS. Driven from bluetooth_task() because
- * key events only arrive on edges. */
+/* Closes the menu when a USB host appears or after ZSA_BLE_MENU_IDLE_MS
+ * without a press or a held bank key. Fires a bank's forget once its hold has
+ * lasted ZSA_BLE_FORGET_HOLD_MS. Driven from bluetooth_task() because key
+ * events only arrive on edges. */
 static void ble_menu_task(void) {
     if (!ble_menu_is_open) {
         return;
     }
     if (usb_host_present()) {
+        ble_menu_close();
+        return;
+    }
+    if (ble_menu_held) {
+        ble_menu_active_ms = timer_read32();
+    } else if (timer_elapsed32(ble_menu_active_ms) >= ZSA_BLE_MENU_IDLE_MS) {
         ble_menu_close();
         return;
     }
@@ -3063,8 +3086,10 @@ static void ble_menu_task(void) {
 }
 
 /* False swallows the event. While open every press is swallowed: a bank key
- * starts its tap/hold, any other key closes the menu. A release is swallowed
- * only if its press was, so keys held from before the menu release normally. */
+ * starts its bank's tap/hold unless another key of that bank already did, any
+ * other key closes the menu. A release is swallowed only if its press was, so
+ * keys held from before the menu release normally. Only the release of the key
+ * that started a hold resolves it. */
 static bool ble_menu_filter(keyrecord_t *record) {
     keypos_t key = record->event.key;
 
@@ -3080,7 +3105,7 @@ static bool ble_menu_filter(keyrecord_t *record) {
             return true;
         }
         ble_menu_swallowed[key.row] &= (matrix_row_t)~pos;
-        if (ble_menu_held & bit) {
+        if ((ble_menu_held & bit) && ble_menu_hold_key[bank].row == key.row && ble_menu_hold_key[bank].col == key.col) {
             if (!(ble_menu_forgot & bit)) {
                 ble_menu_tap(bank);
             }
@@ -3095,10 +3120,14 @@ static bool ble_menu_filter(keyrecord_t *record) {
         return true;
     }
     ble_menu_swallowed[key.row] |= pos;
+    ble_menu_active_ms = timer_read32();
     if (bit) {
-        ble_menu_held |= bit;
-        ble_menu_forgot &= (uint8_t)~bit;
-        ble_menu_press_ms[bank] = timer_read32();
+        if (!(ble_menu_held & bit)) {
+            ble_menu_held |= bit;
+            ble_menu_forgot &= (uint8_t)~bit;
+            ble_menu_press_ms[bank] = timer_read32();
+            ble_menu_hold_key[bank] = key;
+        }
     } else {
         ble_menu_close();
     }

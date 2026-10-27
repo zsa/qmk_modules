@@ -114,7 +114,7 @@ void zsa_wireless_status_render(void) {
 }
 
 /* Full-scale colors, unscaled by the user's brightness and the VBUS cap: the
- * menu lights five LEDs at most. */
+ * menu lights up to 20 LEDs, and only on battery. */
 static RGB ble_menu_color(uint8_t view, uint8_t blink) {
     switch (view) {
         case ZSA_BLE_BANK_VIEW_EMPTY:
@@ -142,11 +142,19 @@ bool zsa_wireless_ble_menu_render(uint8_t led_min, uint8_t led_max) {
     uint8_t blink = (timer_read32() % ZSA_BLE_MENU_BLINK_MS) < ZSA_BLE_MENU_BLINK_MS / 2 ? 255 : 0;
 
     for (uint8_t bank = 0; bank < ZSA_BLE_BANK_COUNT; bank++) {
-        uint8_t led = g_led_config.matrix_co[ZSA_BLE_MENU_ROW][ZSA_BLE_MENU_COL + bank];
-        if (led == NO_LED || led < led_min || led >= led_max) continue;
+        uint8_t view  = zsa_wireless_ble_bank_view(bank);
+        RGB     rgb   = ble_menu_color(view, blink);
+        uint8_t nkeys = view == ZSA_BLE_BANK_VIEW_UNKNOWN ? 1 : ZSA_BLE_MENU_BANK_KEYS;
 
-        RGB rgb = ble_menu_color(zsa_wireless_ble_bank_view(bank), blink);
-        rgb_matrix_set_color(led, rgb.r, rgb.g, rgb.b);
+        for (uint8_t k = 0; k < nkeys; k++) {
+            uint8_t row = zsa_ble_menu_keys[bank][k][0];
+            uint8_t col = zsa_ble_menu_keys[bank][k][1];
+            if (row >= MATRIX_ROWS || col >= MATRIX_COLS) continue;
+
+            uint8_t led = g_led_config.matrix_co[row][col];
+            if (led == NO_LED || led < led_min || led >= led_max) continue;
+            rgb_matrix_set_color(led, rgb.r, rgb.g, rgb.b);
+        }
     }
     return true;
 }

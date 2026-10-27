@@ -108,10 +108,13 @@ void zsa_wireless_cmd_ble_disconnect(void);
 
 /* ---- Bluetooth bank menu (BLE_MENU) ----
  *
- * Open: the matrix shows banks 0-4 on the keys at ZSA_BLE_MENU_ROW,
- * ZSA_BLE_MENU_COL.. and every other LED is dark. A bank key tap pairs an
- * empty bank, connects a stored one and disconnects an active one; a
- * ZSA_BLE_FORGET_HOLD_MS hold forgets it. Any other key closes the menu. Every
+ * Open: the matrix shows banks 0-4 on the key columns of ZSA_BLE_MENU_KEYS
+ * and every other LED is dark. An unknown bank lights its number key in gray,
+ * any other bank its whole column. A tap
+ * on any key of a bank pairs an empty bank, connects a stored one and
+ * disconnects an active one; a ZSA_BLE_FORGET_HOLD_MS hold forgets it. Further
+ * keys of a bank pressed during its hold are ignored. Any other key closes the
+ * menu. Every
  * key event while open is swallowed, and so is the release of a key pressed
  * while open. BLE_MENU does nothing with a USB host, and the menu closes when
  * one appears. */
@@ -127,6 +130,8 @@ enum zsa_ble_bank_view {
 };
 
 bool    zsa_wireless_ble_menu_open(void);
+/* {row, col} of each bank's keys, from ZSA_BLE_MENU_KEYS. */
+extern const uint8_t zsa_ble_menu_keys[ZSA_BLE_BANK_COUNT][ZSA_BLE_MENU_BANK_KEYS][2];
 /* enum zsa_ble_bank_view of bank (< ZSA_BLE_BANK_COUNT). With the BLE stack
  * off (ZSA_BLE_BANK_STATE_OFF) only EMPTY and STORED are reported. */
 uint8_t zsa_wireless_ble_bank_view(uint8_t bank);

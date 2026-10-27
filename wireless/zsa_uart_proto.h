@@ -583,6 +583,7 @@ enum zsa_ble_bank_op {
     ZSA_BLE_BANK_OP_CONNECT    = 2, /* stored bank: advertise for its host */
     ZSA_BLE_BANK_OP_DISCONNECT = 3, /* drop the link, stop advertising */
     ZSA_BLE_BANK_OP_FORGET     = 4, /* delete the bond, bank becomes empty */
+    ZSA_BLE_BANK_OP_CANCEL     = 5, /* end pairing on that bank, else no-op */
 };
 
 struct __attribute__((packed)) zsa_ble_bank_cmd {

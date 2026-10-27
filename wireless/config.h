@@ -207,20 +207,35 @@
 
 /* ---- Bluetooth bank menu (BLE_MENU, see wireless.c) ---- */
 
-/* Matrix position of bank 0; banks 1-4 follow in the next columns. */
-#ifndef ZSA_BLE_MENU_ROW
-#    define ZSA_BLE_MENU_ROW 0
+/* Keys of each bank, as {row, col} matrix positions: one column of
+ * ZSA_BLE_MENU_BANK_KEYS keys per bank, the first being the bank's number key.
+ * An entry outside the matrix (e.g. {0xFF, 0xFF}) is unused. Defaults to the
+ * columns under keys 1-5 on the Voyager 2 left half. */
+#ifndef ZSA_BLE_MENU_BANK_KEYS
+#    define ZSA_BLE_MENU_BANK_KEYS 4
 #endif
-#ifndef ZSA_BLE_MENU_COL
-#    define ZSA_BLE_MENU_COL 2
+#ifndef ZSA_BLE_MENU_KEYS
+#    define ZSA_BLE_MENU_KEYS                \
+        {                                    \
+            {{0, 2}, {1, 2}, {2, 2}, {3, 2}}, \
+            {{0, 3}, {1, 3}, {2, 3}, {3, 3}}, \
+            {{0, 4}, {1, 4}, {2, 4}, {3, 4}}, \
+            {{0, 5}, {1, 5}, {2, 5}, {3, 5}}, \
+            {{0, 6}, {1, 6}, {2, 6}, {4, 4}}, \
+        }
 #endif
 
-/* How long a bank key must be held to forget that bank. */
+/* How long a bank's key must be held to forget that bank. */
 #ifndef ZSA_BLE_FORGET_HOLD_MS
 #    define ZSA_BLE_FORGET_HOLD_MS 2000
 #endif
 
-/* Blink period of the connecting and pairing bank keys. */
+/* Idle time after which the open menu closes itself. */
+#ifndef ZSA_BLE_MENU_IDLE_MS
+#    define ZSA_BLE_MENU_IDLE_MS 60000
+#endif
+
+/* Blink period of the connecting and pairing banks. */
 #ifndef ZSA_BLE_MENU_BLINK_MS
 #    define ZSA_BLE_MENU_BLINK_MS 1000
 #endif
@@ -236,7 +251,7 @@
 #    define ZSA_BLE_MENU_EMPTY_B 0xCF
 #endif
 
-/* Level (0-255) of all five bank keys, a flat dim gray, while the bank table
+/* Level (0-255) of the five number keys, a flat dim gray, while the bank table
  * is unknown. */
 #ifndef ZSA_BLE_MENU_UNKNOWN_VAL
 #    define ZSA_BLE_MENU_UNKNOWN_VAL 40
