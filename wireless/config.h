@@ -29,6 +29,12 @@
 #    define ZSA_HIBERNATE_TIMEOUT_MS 600000
 #endif
 
+/* On the TRRS cable, spacing of the right-half ship command retries at the
+ * hibernate step. */
+#ifndef ZSA_HIBERNATE_RIGHT_RETRY_MS
+#    define ZSA_HIBERNATE_RIGHT_RETRY_MS 1000
+#endif
+
 /* After boot, how long VBUS may be present without a USB host enumerating
  * before the transport is reported as BLE. Also how long after link-up the
  * STM32 waits for a first EVT_VBUS_STATE before deciding without it. */

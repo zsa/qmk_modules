@@ -246,6 +246,7 @@ static bool                     limits_commanded;
 /* Board-provided (voyager_tng.c) right-half charge command; extern rather
  * than including the board header to keep the module decoupled. */
 extern bool voyager_right_nrf_set_charge_limits(uint16_t vbus_limit_ma, uint16_t charge_ma);
+extern bool voyager_right_nrf_ship(void);
 extern bool is_transport_connected(void);
 /* Bus ownership decision, made in the keyboard's matrix.c by probing the real
  * expander. The grant must follow the same signal. */
@@ -431,6 +432,22 @@ static uint32_t last_rx_ms;
 /* CMD_HIBERNATE went out for the current Sleep. Cleared when VBUS changes,
  * since the nRF refuses it while VBUS is present. */
 static bool hibernate_sent;
+/* Last right-half ship command attempt on the cable, 0 for none. */
+static uint32_t right_ship_ms;
+
+/* On the cable, sends the right half its ship command over I2C. True when
+ * off the cable or the write was ACKed. */
+static bool right_ship_on_cable(void) {
+    if (!zsa_stm32_owns_right_bus()) {
+        return true;
+    }
+    if (!voyager_right_nrf_ship()) {
+        zsa_log("power: right ship NAK");
+        return false;
+    }
+    zsa_log("power: right ship sent");
+    return true;
+}
 
 /* ---- Boot power gate ---- *
  *
@@ -531,6 +548,8 @@ static void power_gate_task(void) {
         case PG_CRITICAL:
             if (timer_elapsed32(power_gate_ms) >= POWER_PULSE_TOTAL_MS) {
                 power_gate_enter(PG_DONE);
+                /* Best effort: the left goes down whatever the right answers. */
+                right_ship_on_cable();
                 zsa_wireless_cmd_hibernate();
                 power_hibernate_ms = timer_read32();
             }
@@ -538,6 +557,7 @@ static void power_gate_task(void) {
 
         case PG_DONE:
             if (timer_elapsed32(power_hibernate_ms) >= ZSA_POWER_HIBERNATE_RETRY_MS) {
+                right_ship_on_cable();
                 zsa_wireless_cmd_hibernate();
                 power_hibernate_ms = timer_read32();
             }
@@ -2861,9 +2881,22 @@ static void idle_power_task(void) {
     uint32_t idle_ms = sleep_idle_base_ms + sleep_clock_ms();
 
     /* Sent once per Sleep: the nRF refuses with VBUS present, and a VBUS
-     * change re-arms it. Not on the cable: the right half's radio is off, so
-     * the ship request cannot reach it and it would be left running. */
-    if (idle_ms >= ZSA_HIBERNATE_TIMEOUT_MS && !hibernate_sent && !nrf_vbus_present && link_ready && !zsa_stm32_owns_right_bus()) {
+     * change re-arms it. On the cable the right half's radio is off, so it is
+     * told over I2C first, and the left only once that write is ACKed; a
+     * failed write is retried every ZSA_HIBERNATE_RIGHT_RETRY_MS. Off the
+     * cable the left nRF asks the right over ESB. */
+    if (idle_ms >= ZSA_HIBERNATE_TIMEOUT_MS && !hibernate_sent && !nrf_vbus_present && link_ready) {
+        if (zsa_stm32_owns_right_bus()) {
+            if (right_ship_ms != 0 && timer_elapsed32(right_ship_ms) < ZSA_HIBERNATE_RIGHT_RETRY_MS) {
+                sleep_stop_task(idle_ms);
+                return;
+            }
+            right_ship_ms = timer_read32();
+        }
+        if (!right_ship_on_cable()) {
+            sleep_stop_task(idle_ms);
+            return;
+        }
         zsa_log("power: hibernate");
         zsa_wireless_cmd_hibernate();
         hibernate_sent = true;
@@ -3826,9 +3859,10 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
         case BLE_PAIR_MODE:
         case BLE_SWITCH_HOST:
             return false;
-        /* Powers both halves off. The nRF refuses while USB is connected. */
+        /* Powers both halves off. The nRF refuses while USB is connected. On
+         * the cable the right is told first, and the left only on its ACK. */
         case ZSA_SHIP_MODE:
-            if (record->event.pressed) {
+            if (record->event.pressed && right_ship_on_cable()) {
                 zsa_wireless_cmd_hibernate();
             }
             return false;
