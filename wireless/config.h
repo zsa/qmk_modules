@@ -35,6 +35,12 @@
 #    define ZSA_HIBERNATE_RIGHT_RETRY_MS 1000
 #endif
 
+/* Spacing of CMD_HIBERNATE resends while the board stays in Sleep past
+ * ZSA_HIBERNATE_TIMEOUT_MS. */
+#ifndef ZSA_HIBERNATE_RESEND_MS
+#    define ZSA_HIBERNATE_RESEND_MS 60000
+#endif
+
 /* After boot, how long VBUS may be present without a USB host enumerating
  * before the transport is reported as BLE. Also how long after link-up the
  * STM32 waits for a first EVT_VBUS_STATE before deciding without it. */

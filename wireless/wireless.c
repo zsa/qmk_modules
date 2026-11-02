@@ -429,9 +429,10 @@ static enum zsa_idle_step idle_step = ZSA_IDLE_ACTIVE;
 /* Last byte received from the nRF; a sleeping STM32 stays up a window after
  * it. */
 static uint32_t last_rx_ms;
-/* CMD_HIBERNATE went out for the current Sleep. Cleared when VBUS changes,
- * since the nRF refuses it while VBUS is present. */
-static bool hibernate_sent;
+/* Idle time at which the next CMD_HIBERNATE is due. */
+static uint32_t hibernate_due_ms;
+/* The right half ACKed its cable ship command during this Sleep. */
+static bool right_ship_acked;
 /* Last right-half ship command attempt on the cable, 0 for none. */
 static uint32_t right_ship_ms;
 
@@ -1139,7 +1140,8 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                      * leaves the board on the default profile until the next
                      * 5 s tick. */
                     limits_commanded = false;
-                    hibernate_sent   = false;
+                    hibernate_due_ms = ZSA_HIBERNATE_TIMEOUT_MS;
+                    right_ship_acked = false;
                     zsa_wireless_vbus_changed(present);
                 }
             }
@@ -1698,8 +1700,9 @@ static void trrs_state_task(void) {
  * Active: everything on. Sleep, after ZSA_SLEEP_TIMEOUT_MS without input: the
  * matrix and status LEDs off, the nRF told (CMD_IDLE_STATE 2), and, wireless on
  * battery, the STM32 in STOP between wakes (sleep_stop_task). Hibernate, after
- * ZSA_HIBERNATE_TIMEOUT_MS without input: CMD_HIBERNATE, and the nRF ships both
- * halves. Any input in Sleep goes back to Active; nothing comes back from
+ * ZSA_HIBERNATE_TIMEOUT_MS without input: CMD_HIBERNATE, resent every
+ * ZSA_HIBERNATE_RESEND_MS while still in Sleep, and the nRF ships both halves.
+ * Any input in Sleep goes back to Active; nothing comes back from
  * Hibernate but the hardware wake.
  *
  * QMK's timer does not run in STOP, so time spent there is counted separately
@@ -1931,7 +1934,8 @@ static void sleep_enter(uint32_t idle_ms) {
     sleep_window_ms    = ZSA_SLEEP_WAKE_WINDOW_MS;
     sleep_stop_ms      = 0;
     sleep_input_mark   = last_input_activity_time();
-    hibernate_sent     = false;
+    hibernate_due_ms   = ZSA_HIBERNATE_TIMEOUT_MS;
+    right_ship_acked   = false;
     nav_sleep_due_ms   = ZSA_NAV_PROBE_SLEEP_INTERVAL_MS;
     nav_sleep_failed   = false;
     nav_sleep_errors   = 0;
@@ -2717,13 +2721,13 @@ static void sleep_stop_task(uint32_t idle_ms) {
     }
 
     uint32_t max_ms = UINT32_MAX;
-    if (!hibernate_sent && link_ready) {
+    if (link_ready) {
         /* The last stretch before the hibernate step is spent running. */
-        if (idle_ms + ZSA_SLEEP_WAKE_WINDOW_MS >= ZSA_HIBERNATE_TIMEOUT_MS) {
+        if (idle_ms + ZSA_SLEEP_WAKE_WINDOW_MS >= hibernate_due_ms) {
             sdiag_block(SB_STRETCH);
             return;
         }
-        max_ms = ZSA_HIBERNATE_TIMEOUT_MS - idle_ms;
+        max_ms = hibernate_due_ms - idle_ms;
     }
     if (nav_sleep_windows() && !nav_left_local()) {
         /* Likewise the last stretch before the next left nav window. */
@@ -2880,26 +2884,28 @@ static void idle_power_task(void) {
 
     uint32_t idle_ms = sleep_idle_base_ms + sleep_clock_ms();
 
-    /* Sent once per Sleep: the nRF refuses with VBUS present, and a VBUS
-     * change re-arms it. On the cable the right half's radio is off, so it is
-     * told over I2C first, and the left only once that write is ACKed; a
-     * failed write is retried every ZSA_HIBERNATE_RIGHT_RETRY_MS. Off the
+    /* Resent every ZSA_HIBERNATE_RESEND_MS while in Sleep, since the nRF can
+     * refuse or fail without telling us. The nRF refuses with VBUS present,
+     * and a VBUS change re-arms it. On the cable the right half is told over
+     * I2C first, once per Sleep, and the left only once that write is ACKed;
+     * a failed write is retried every ZSA_HIBERNATE_RIGHT_RETRY_MS. Off the
      * cable the left nRF asks the right over ESB. */
-    if (idle_ms >= ZSA_HIBERNATE_TIMEOUT_MS && !hibernate_sent && !nrf_vbus_present && link_ready) {
-        if (zsa_stm32_owns_right_bus()) {
+    if (idle_ms >= hibernate_due_ms && !nrf_vbus_present && link_ready) {
+        if (zsa_stm32_owns_right_bus() && !right_ship_acked) {
             if (right_ship_ms != 0 && timer_elapsed32(right_ship_ms) < ZSA_HIBERNATE_RIGHT_RETRY_MS) {
                 sleep_stop_task(idle_ms);
                 return;
             }
             right_ship_ms = timer_read32();
-        }
-        if (!right_ship_on_cable()) {
-            sleep_stop_task(idle_ms);
-            return;
+            if (!right_ship_on_cable()) {
+                sleep_stop_task(idle_ms);
+                return;
+            }
+            right_ship_acked = true;
         }
         zsa_log("power: hibernate");
         zsa_wireless_cmd_hibernate();
-        hibernate_sent = true;
+        hibernate_due_ms = idle_ms + ZSA_HIBERNATE_RESEND_MS;
         return;
     }
 
