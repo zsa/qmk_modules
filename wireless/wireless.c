@@ -4309,20 +4309,36 @@ void bluetooth_send_nkro(report_nkro_t *report) {
 
 void bluetooth_send_mouse(report_mouse_t *report) {
     /*
-     * Send the report_mouse_t as raw bytes, skipping the report_id
-     * if MOUSE_SHARED_EP is defined. The payload layout depends on
-     * the keymap's mouse configuration (MOUSE_EXTENDED_REPORT, etc.).
+     * 9-byte payload: buttons, boot_x int8, boot_y int8, x int16 LE,
+     * y int16 LE, wheel int8, pan int8. Wheel/pan clamped to -127..127.
      */
-    const uint8_t *start = (const uint8_t *)report;
-    uint8_t        len   = sizeof(report_mouse_t);
+    uint8_t frame[9];
+    int16_t x = (int16_t)report->x;
+    int16_t y = (int16_t)report->y;
+    int16_t v = (int16_t)report->v;
+    int16_t h = (int16_t)report->h;
 
-#ifdef MOUSE_SHARED_EP
-    /* Skip the leading report_id byte */
-    start += 1;
-    len -= 1;
+    if (v > 127) v = 127;
+    if (v < -127) v = -127;
+    if (h > 127) h = 127;
+    if (h < -127) h = -127;
+
+    frame[0] = report->buttons;
+#ifdef MOUSE_EXTENDED_REPORT
+    frame[1] = (uint8_t)report->boot_x;
+    frame[2] = (uint8_t)report->boot_y;
+#else
+    frame[1] = (uint8_t)(int8_t)x;
+    frame[2] = (uint8_t)(int8_t)y;
 #endif
+    frame[3] = (uint8_t)((uint16_t)x & 0xFF);
+    frame[4] = (uint8_t)((uint16_t)x >> 8);
+    frame[5] = (uint8_t)((uint16_t)y & 0xFF);
+    frame[6] = (uint8_t)((uint16_t)y >> 8);
+    frame[7] = (uint8_t)(int8_t)v;
+    frame[8] = (uint8_t)(int8_t)h;
 
-    zsa_wireless_send_frame(ZSA_MSG_HID_MOUSE, start, len);
+    zsa_wireless_send_frame(ZSA_MSG_HID_MOUSE, frame, sizeof(frame));
 }
 
 #ifdef DIGITIZER_MODE_TOUCHPAD
