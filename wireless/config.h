@@ -335,3 +335,12 @@
 #ifndef ZSA_STM32_DIAG_SAVE_MS
 #    define ZSA_STM32_DIAG_SAVE_MS 1000
 #endif
+
+/* ---- Bench diagnostics (off by default) ---- */
+
+/* ZSA_SCAN_DIAG: main-loop gap and link counters, sent to the left nRF as
+ * CMD_SCAN_DIAG every ZSA_SCAN_DIAG_INTERVAL_MS and served for
+ * ORYX_CMD_GET_SCAN_DIAG. Without it that query answers version 0 (nothing
+ * measured). ZSA_SLEEP_DIAG: STOP-path counters in Sleep, sent in place of the
+ * CMD_SCAN_DIAG block (tools/sleep_diag.py); implies ZSA_SCAN_DIAG
+ * (post_config.h). */

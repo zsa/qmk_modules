@@ -23,8 +23,6 @@
 /* log_tap.h resolves zsa_log()/zsa_log_tap_init() to real symbols under
  * ZSA_BLE_LOG and to no-op static inlines otherwise, so include it always. */
 #include "log_tap.h"
-/* rtt_debug.h resolves to no-op static inlines unless ZSA_RTT_DEBUG is set. */
-#include "rtt_debug.h"
 #include "busdev.h"
 #include "zsa_stm32_diag.h"
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
@@ -254,9 +252,11 @@ extern bool zsa_stm32_owns_right_bus(void);
 /* TRRS cable presence, from the same probe: an ACK from the real right-half
  * expander is the only evidence the cable is plugged. */
 extern bool zsa_trrs_plugged(void);
+#ifdef ZSA_SCAN_DIAG
 /* Failed right-half expander scan reads, cumulative, kept by the same
  * matrix.c. Reported in the scan diagnostics below. */
 extern uint16_t zsa_matrix_right_read_errors(void);
+#endif
 /* Right LED driver, supervised by the keyboard (voyager_tng.c). */
 extern void voyager_right_led_resync(void);
 extern bool voyager_right_led_up(void);
@@ -326,13 +326,15 @@ static uint32_t last_right_tlm_ms;
 /* Board-provided (voyager_tng.c), like voyager_right_nrf_set_charge_limits(). */
 extern bool voyager_right_nrf_read_telemetry(struct zsa_right_telemetry *out);
 
-/* ---- Scan diagnostics ---- *
+/* ---- Scan diagnostics (ZSA_SCAN_DIAG) ---- *
  *
  * Per-window pass and gap counters plus cumulative right-half read failures
  * and keyboard reports sent to the nRF. Finalized every
  * ZSA_SCAN_DIAG_INTERVAL_MS into scan_diag_last, sent as CMD_SCAN_DIAG and
  * served as the answer to ORYX_CMD_GET_SCAN_DIAG. Zero (version 0) until the
- * first window completes. */
+ * first window completes. Without ZSA_SCAN_DIAG none of it is built and the
+ * oryx query answers version 0. */
+#ifdef ZSA_SCAN_DIAG
 static struct zsa_scan_diag scan_diag_last;
 static uint32_t scan_diag_prev_ms;   /* previous pass */
 static uint32_t scan_diag_window_ms; /* window start */
@@ -342,8 +344,15 @@ static uint16_t scan_diag_max_gap_ms;
 static uint16_t scan_diag_over_5ms;
 static uint16_t scan_diag_over_20ms;
 static uint16_t scan_diag_kbd_reports; /* cumulative */
-#define SCAN_DIAG_GAP_5MS  5u
-#define SCAN_DIAG_GAP_20MS 20u
+#    define SCAN_DIAG_GAP_5MS  5u
+#    define SCAN_DIAG_GAP_20MS 20u
+
+static inline void scan_diag_note_kbd_report(void) {
+    scan_diag_kbd_reports++;
+}
+#else
+static inline void scan_diag_note_kbd_report(void) {}
+#endif
 
 #ifdef DIGITIZER_MODE_TOUCHPAD
 /* ---- Digitizer/PTP report + input-mode routing ---- *
@@ -580,10 +589,8 @@ void zsa_wireless_send_frame(uint8_t type, const uint8_t *payload, uint16_t len)
         return;
     }
     uint16_t frame_len = zsa_frame_encode(buf, type, payload, len);
-    uint32_t rtt_t0    = zsa_rtt_cycles(); // TEMP DEBUG
     zsa_uart_transmit(buf, frame_len);
     ldiag.frames_tx++;
-    zsa_rtt_tx(type, frame_len, rtt_t0);   // TEMP DEBUG
 }
 
 static void send_command(uint8_t type) {
@@ -904,10 +911,8 @@ static void dfu_state_task(void) {
 }
 
 static void handle_rx_frame(const struct zsa_frame *frame) {
-    zsa_rtt_rx(frame->type); // TEMP DEBUG
     switch (frame->type) {
         case ZSA_MSG_LINK_UP:
-            if (!link_ready) zsa_rtt_event("LINK_UP latched"); // TEMP DEBUG
             if (!link_ready) {
                 vbus_wait_ms = timer_read32();
             }
@@ -954,7 +959,6 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 bool connected = s->connected != 0;
                 /* Re-sent as a level every second: act on changes only. */
                 if (connected != nrf_ble_connected) {
-                    zsa_rtt_event(connected ? "BLE_STATUS connected" : "BLE_STATUS disconnected"); // TEMP DEBUG
                     nrf_ble_connected = connected;
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
                     if (!connected) {
@@ -1055,7 +1059,6 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 // idle_step), so only resync on the OFF->ON edge - rail power actually
                 // returning after Sleep. A repeated "on" report is a no-op.
                 if (rail_on && !left_led_rail_on && idle_step == ZSA_IDLE_ACTIVE && power_gate_allows_rgb()) {
-                    zsa_rtt_event("LED_RAIL -> resync"); // TEMP DEBUG
                     // The rail powers the left chip, which is not supervised:
                     // resync it here. The right one goes through the supervisor.
                     // The resync clears the chip's PWM registers, so a
@@ -1357,7 +1360,7 @@ __attribute__((weak)) const zsa_nav_sleep_ops_t *zsa_nav_trackpad_sleep_ops(void
  * ZSA_NAV_RIGHT_SETTLE_MS after that and the announce ack both hold, so the
  * right has had time to probe. The level goes to the nRF on every change and
  * every ZSA_NAV_STATE_INTERVAL_MS, at least NAV_STATE_STAGGER_MS after the
- * last 1 s periodic frame (TRRS_STATE, SCAN_DIAG, RIGHT_TELEMETRY). */
+ * last 1 s periodic frame (TRRS_STATE, RIGHT_TELEMETRY, SCAN_DIAG if built). */
 #define NAV_STATE_STAGGER_MS 250
 #define NAV_STATE_MIN_GAP_MS 100
 
@@ -1626,11 +1629,14 @@ void oryx_pmic_rails_fill(oryx_pmic_rails_t *rails) {
 /* The oryx block re-declares the wire struct; both are visible here. */
 _Static_assert(sizeof(oryx_scan_diag_block_t) == sizeof(struct zsa_scan_diag), "oryx scan diag block must match the wire block");
 
-/* Strong override of oryx.c's weak hook: the last finalized window. */
+#    ifdef ZSA_SCAN_DIAG
+/* Strong override of oryx.c's weak hook: the last finalized window. Without
+ * it the weak hook answers version 0. */
 void oryx_scan_diag_fill(oryx_scan_diag_t *diag) {
     oryx_scan_diag_reset(diag);
     memcpy(&diag->diag, &scan_diag_last, sizeof(diag->diag));
 }
+#    endif
 #endif // COMMUNITY_MODULE_ORYX_ENABLE
 
 /* ---- Idle power management ---- */
@@ -1721,13 +1727,15 @@ static bool sleep_rgb_on; /* the matrix was on when Sleep began */
  * or the end of an update, a pairing or a Sleep left for another reason. */
 static uint32_t idle_floor_ms;
 
-/* ---- Sleep diagnostics ----
+/* ---- Sleep diagnostics (ZSA_SLEEP_DIAG) ----
  *
- * Counters since boot for the STOP path in Sleep. With ZSA_SLEEP_DIAG they
- * replace the CMD_SCAN_DIAG block: one page per window, version
- * SLEEP_DIAG_PAGE_BASE + 1..SLEEP_DIAG_PAGES (tools/sleep_diag.py). */
-#define SLEEP_DIAG_PAGE_BASE 0xA0u
-#define SLEEP_DIAG_PAGES 6u
+ * Counters since boot for the STOP path in Sleep. They replace the
+ * CMD_SCAN_DIAG block: one page per window, version
+ * SLEEP_DIAG_PAGE_BASE + 1..SLEEP_DIAG_PAGES (tools/sleep_diag.py). Without
+ * ZSA_SLEEP_DIAG the helpers below are no-ops. */
+#ifdef ZSA_SLEEP_DIAG
+#    define SLEEP_DIAG_PAGE_BASE 0xA0u
+#    define SLEEP_DIAG_PAGES 6u
 
 static struct {
     uint16_t stop_entries;
@@ -1798,6 +1806,32 @@ static void sdiag_inc(uint16_t *v) {
     }
 }
 
+/* Field store and saturating count. */
+#    define SDIAG_SET(field, v) (sdiag.field = (v))
+#    define SDIAG_INC(field) sdiag_inc(&sdiag.field)
+
+static void sdiag_sleep_begin(void) {
+    sdiag.sleeps++;
+    sdiag.block_timing  = true;
+    sdiag.block_prev    = SB_WINDOW;
+    sdiag.block_prev_ms = timer_read32();
+}
+
+static void sdiag_note_lsi(uint64_t hz, bool accepted) {
+    sdiag.lsi_last_hz = (uint16_t)(hz > UINT16_MAX ? UINT16_MAX : hz);
+    if (accepted) {
+        sdiag.lsi_hz = (uint16_t)hz;
+        sdiag_inc(&sdiag.lsi_ok);
+    } else {
+        sdiag_inc(&sdiag.lsi_bad);
+    }
+}
+
+static void sdiag_note_poll(uint8_t nav) {
+    sdiag.last_poll = nav;
+    sdiag_inc(nav == ZSA_NAV_SLEEP_IDLE ? &sdiag.polls_idle : nav == ZSA_NAV_SLEEP_ACTIVITY ? &sdiag.polls_activity : &sdiag.polls_error);
+}
+
 void zsa_nav_sleep_note_raw(const uint8_t *raw, uint8_t len) {
     for (uint8_t i = 0; i < sizeof(sdiag.raw); i++) {
         sdiag.raw[i] = i < len ? raw[i] : 0;
@@ -1812,6 +1846,24 @@ void zsa_nav_sleep_note_motion(int16_t x, int16_t y) {
     sdiag.motion_y = y;
     sdiag_inc(&sdiag.motion_reads);
 }
+#else
+static inline void sdiag_block(uint8_t reason) {
+    (void)reason;
+}
+static inline void sdiag_end(uint8_t why) {
+    (void)why;
+}
+#    define SDIAG_SET(field, v) ((void)0)
+#    define SDIAG_INC(field) ((void)0)
+static inline void sdiag_sleep_begin(void) {}
+static inline void sdiag_note_lsi(uint64_t hz, bool accepted) {
+    (void)hz;
+    (void)accepted;
+}
+static inline void sdiag_note_poll(uint8_t nav) {
+    (void)nav;
+}
+#endif
 
 
 /* ---- Left nav device in Sleep (see wireless.h) ---- */
@@ -1826,7 +1878,7 @@ static struct {
 
 static inline void nav_wake_filter_drop(void) {
     if (nav_wake_filter.polls != 0) {
-        sdiag_inc(&sdiag.nav_noise_drops);
+        SDIAG_INC(nav_noise_drops);
     }
     nav_wake_filter.dx    = 0;
     nav_wake_filter.dy    = 0;
@@ -1901,7 +1953,7 @@ static uint8_t nav_sleep_prepare(uint8_t (**poll)(void)) {
         if (!ops->enter()) {
             zsa_log("power: left nav refused sleep polling");
             nav_sleep_failed = true;
-            sdiag.nav_fail   = 1;
+            SDIAG_SET(nav_fail, 1);
             return SB_NAV_FAILED;
         }
         nav_sleep_ops = ops;
@@ -1940,10 +1992,7 @@ static void sleep_enter(uint32_t idle_ms) {
     nav_sleep_failed   = false;
     nav_sleep_errors   = 0;
 
-    sdiag.sleeps++;
-    sdiag.block_timing = true;
-    sdiag.block_prev   = SB_WINDOW;
-    sdiag.block_prev_ms = timer_read32();
+    sdiag_sleep_begin();
 
     /* Not reached with the menu open (idle_power_task()); kept as a guard. */
     ble_menu_close();
@@ -1991,15 +2040,6 @@ static void sleep_exit_for(uint8_t why) {
  * re-init their sensor: the transport switch resets the shared i2c bus, which
  * leaves the sensor unconfigured without raising an i2c error. */
 __attribute__((weak)) void zsa_nav_transport_changed(void) {}
-
-#ifdef ZSA_RTT_DEBUG
-/* Strong override of busdev's weak transition hook: every device state change
- * on the shared bus, with its reason and the address in use, onto the RTT
- * trace. */
-void busdev_on_transition(busdev_id_t id, busdev_state_t old_state, busdev_state_t new_state, uint8_t reason) {
-    zsa_rtt_event3(busdev_name(id), ((int)old_state << 8) | (int)new_state, reason, busdev_addr(id));
-}
-#endif
 
 /* Keyboards override this to drive their own USB D+ pullup from VBUS state. */
 __attribute__((weak)) void zsa_wireless_vbus_changed(bool present) { (void)present; }
@@ -2201,14 +2241,11 @@ static void lsi_cal_task(void) {
         struct rtc_stamp prev = {.ticks = lsi_cal_ticks, .day = st.day, .a_div = st.a_div};
         uint32_t         dt   = now - lsi_cal_ms;
         uint64_t         hz   = ((uint64_t)rtc_ticks_between(&prev, &st) * st.a_div * 1000u + dt / 2u) / dt;
-        sdiag.lsi_last_hz     = (uint16_t)(hz > UINT16_MAX ? UINT16_MAX : hz);
-        if (hz >= LSI_MIN_HZ && hz <= LSI_MAX_HZ) {
-            lsi_hz       = (uint32_t)hz;
-            sdiag.lsi_hz = (uint16_t)hz;
-            sdiag_inc(&sdiag.lsi_ok);
-        } else {
-            sdiag_inc(&sdiag.lsi_bad);
+        bool             ok   = hz >= LSI_MIN_HZ && hz <= LSI_MAX_HZ;
+        if (ok) {
+            lsi_hz = (uint32_t)hz;
         }
+        sdiag_note_lsi(hz, ok);
     }
     lsi_cal_ms    = now;
     lsi_cal_ticks = st.ticks;
@@ -2312,7 +2349,7 @@ static bool stop_i2c_available(void) {
 }
 
 static void sdiag_i2c_snapshot(void) {
-    sdiag.i2c_snap = (uint8_t)(I2CD1.state & 0x0Fu) | ((I2C1->CR1 & I2C_CR1_PE) ? 0x10u : 0u) | ((I2C1->ISR & I2C_ISR_BUSY) ? 0x20u : 0u);
+    SDIAG_SET(i2c_snap, (uint8_t)(I2CD1.state & 0x0Fu) | ((I2C1->CR1 & I2C_CR1_PE) ? 0x10u : 0u) | ((I2C1->ISR & I2C_ISR_BUSY) ? 0x20u : 0u));
 }
 
 static void stop_i2c_begin(void) {
@@ -2338,14 +2375,26 @@ static bool stop_i2c_timed_out(rtcnt_t start) {
     return (rtcnt_t)(chSysGetRealtimeCounterX() - start) > STOP_I2C_TIMEOUT_US * STOP_HSI_CYCLES_PER_US;
 }
 
+#        ifdef ZSA_SLEEP_DIAG
 /* Context of the next wait, for sdiag.i2c_err: 0x10 read, 0x20 first byte,
  * 0x40 the closing STOP. */
 static uint8_t stop_i2c_ctx;
+#            define STOP_I2C_CTX_SET(v) (stop_i2c_ctx = (v))
+#            define STOP_I2C_CTX_OR(v) (stop_i2c_ctx |= (v))
+#        else
+#            define STOP_I2C_CTX_SET(v) ((void)0)
+#            define STOP_I2C_CTX_OR(v) ((void)0)
+#        endif
 
 /* sdiag.i2c_err: stop_i2c_ctx | 0x01 NACK | 0x02 bus error | 0x04 lost
  * arbitration | 0x08 timeout. */
 static void stop_i2c_note_error(uint32_t isr, bool timeout) {
+#        ifdef ZSA_SLEEP_DIAG
     sdiag.i2c_err = stop_i2c_ctx | ((isr & I2C_ISR_NACKF) ? 0x01u : 0u) | ((isr & I2C_ISR_BERR) ? 0x02u : 0u) | ((isr & I2C_ISR_ARLO) ? 0x04u : 0u) | (timeout ? 0x08u : 0u);
+#        else
+    (void)isr;
+    (void)timeout;
+#        endif
 }
 
 /* Waits for flag; false on NACK, bus error, lost arbitration or timeout. */
@@ -2368,7 +2417,7 @@ static bool stop_i2c_wait(uint32_t flag) {
  * the hardware sends on a NACK, else a peripheral reset. */
 static bool stop_i2c_finish(bool ok) {
     if (ok) {
-        stop_i2c_ctx |= 0x40u;
+        STOP_I2C_CTX_OR(0x40u);
         ok = stop_i2c_wait(I2C_ISR_STOPF);
     }
     if (!ok) {
@@ -2396,7 +2445,7 @@ bool zsa_stop_i2c_write(uint8_t addr, const uint8_t *data, uint8_t len) {
     stop_i2c_start(addr, len, false);
     bool ok = true;
     for (uint8_t i = 0; i < len && ok; i++) {
-        stop_i2c_ctx = (i == 0) ? 0x20u : 0u;
+        STOP_I2C_CTX_SET((i == 0) ? 0x20u : 0u);
         ok           = stop_i2c_wait(I2C_ISR_TXIS);
         if (ok) {
             I2C1->TXDR = data[i];
@@ -2412,7 +2461,7 @@ bool zsa_stop_i2c_read(uint8_t addr, uint8_t *data, uint8_t len) {
     stop_i2c_start(addr, len, true);
     bool ok = true;
     for (uint8_t i = 0; i < len && ok; i++) {
-        stop_i2c_ctx = (i == 0) ? 0x30u : 0x10u;
+        STOP_I2C_CTX_SET((i == 0) ? 0x30u : 0x10u);
         ok           = stop_i2c_wait(I2C_ISR_RXNE);
         if (ok) {
             data[i] = (uint8_t)I2C1->RXDR;
@@ -2543,8 +2592,7 @@ static enum stop_wake stm32_stop(uint32_t max_ms, uint8_t (*poll)(void), uint8_t
                 if (!nav_wake_filter.fed || *nav == ZSA_NAV_SLEEP_ERROR) {
                     nav_wake_filter_drop();
                 }
-                sdiag.last_poll = *nav;
-                sdiag_inc(*nav == ZSA_NAV_SLEEP_IDLE ? &sdiag.polls_idle : *nav == ZSA_NAV_SLEEP_ACTIVITY ? &sdiag.polls_activity : &sdiag.polls_error);
+                sdiag_note_poll(*nav);
                 if (*nav != ZSA_NAV_SLEEP_IDLE) {
                     why = STOP_WAKE_NAV;
                     break;
@@ -2606,7 +2654,11 @@ restore:
                 t1_ok = false;
             }
         }
-        sdiag_inc(t1_ok ? &sdiag.stop_by_rtc : &sdiag.stop_by_wakes);
+        if (t1_ok) {
+            SDIAG_INC(stop_by_rtc);
+        } else {
+            SDIAG_INC(stop_by_wakes);
+        }
         *stopped_ms = stop_lsi_to_ms(lsi);
     }
     return why;
@@ -2704,6 +2756,31 @@ static bool sleep_leds_settled(void) {
     return true;
 }
 
+#ifdef ZSA_SLEEP_DIAG
+static void sdiag_note_stop(enum stop_wake why, uint8_t nav, bool polled, uint32_t stopped_ms) {
+    sdiag.stop_ms += stopped_ms;
+    sdiag.block_prev_ms = sleep_awake_ms;
+    if (why == STOP_WAKE_NONE) {
+        if (sdiag.wake_none != UINT8_MAX) {
+            sdiag.wake_none++;
+        }
+    } else {
+        sdiag_inc(&sdiag.stop_entries);
+        if (polled) {
+            sdiag_inc(&sdiag.stop_nav_entries);
+        }
+        sdiag_inc(why == STOP_WAKE_INPUT ? &sdiag.wake_input : why == STOP_WAKE_UART ? &sdiag.wake_uart : why == STOP_WAKE_TIMEOUT ? &sdiag.wake_timeout : nav == ZSA_NAV_SLEEP_ACTIVITY ? &sdiag.wake_nav_activity : &sdiag.wake_nav_error);
+    }
+}
+#else
+static inline void sdiag_note_stop(enum stop_wake why, uint8_t nav, bool polled, uint32_t stopped_ms) {
+    (void)why;
+    (void)nav;
+    (void)polled;
+    (void)stopped_ms;
+}
+#endif
+
 /* Stops once the running window has passed. idle_ms is the idle time so far;
  * a pending hibernate bounds the stop. */
 static void sleep_stop_task(uint32_t idle_ms) {
@@ -2768,26 +2845,14 @@ static void sleep_stop_task(uint32_t idle_ms) {
 
     sleep_stop_ms += stopped_ms;
     sleep_awake_ms  = timer_read32();
-    sdiag.stop_ms += stopped_ms;
-    sdiag.block_prev_ms = sleep_awake_ms;
-    if (why == STOP_WAKE_NONE) {
-        if (sdiag.wake_none != UINT8_MAX) {
-            sdiag.wake_none++;
-        }
-    } else {
-        sdiag_inc(&sdiag.stop_entries);
-        if (poll != NULL) {
-            sdiag_inc(&sdiag.stop_nav_entries);
-        }
-        sdiag_inc(why == STOP_WAKE_INPUT ? &sdiag.wake_input : why == STOP_WAKE_UART ? &sdiag.wake_uart : why == STOP_WAKE_TIMEOUT ? &sdiag.wake_timeout : nav == ZSA_NAV_SLEEP_ACTIVITY ? &sdiag.wake_nav_activity : &sdiag.wake_nav_error);
-    }
+    sdiag_note_stop(why, nav, poll != NULL, stopped_ms);
     sleep_window_ms = (why == STOP_WAKE_UART) ? SLEEP_UART_WAKE_WINDOW_MS : ZSA_SLEEP_WAKE_WINDOW_MS;
 
     if (why == STOP_WAKE_NAV && nav == ZSA_NAV_SLEEP_ERROR) {
         if (++nav_sleep_errors >= NAV_SLEEP_MAX_POLL_ERRORS) {
             zsa_log("power: left nav poll failing, staying awake");
             nav_sleep_failed = true;
-            sdiag.nav_fail   = 2;
+            SDIAG_SET(nav_fail, 2);
         }
     } else if (poll != NULL && stopped_ms != 0) {
         nav_sleep_errors = 0;
@@ -3888,7 +3953,6 @@ void bluetooth_init(void) {
     last_link_up_ms = timer_read32();
     vbus_wait_ms    = timer_read32();
     power_gate_ms   = timer_read32();
-    zsa_rtt_init(); // TEMP DEBUG
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();
     zsa_log("zsa_wireless: init (ZSA_BLE_LOG=on)");
@@ -3971,7 +4035,8 @@ static void right_telemetry_task(void) {
     }
 }
 
-#ifdef ZSA_SLEEP_DIAG
+#ifdef ZSA_SCAN_DIAG
+#    ifdef ZSA_SLEEP_DIAG
 static uint16_t sdiag_sat16(uint32_t v) {
     return v > UINT16_MAX ? UINT16_MAX : (uint16_t)v;
 }
@@ -4042,7 +4107,7 @@ static void sleep_diag_page(uint8_t *out) {
             break;
     }
 }
-#endif
+#    endif
 
 /* One main-loop pass: fold the gap since the previous one into the window
  * and finalize the window every ZSA_SCAN_DIAG_INTERVAL_MS. */
@@ -4094,13 +4159,13 @@ static void scan_diag_task(void) {
     scan_diag_last.kbd_reports       = scan_diag_kbd_reports;
     scan_diag_last.flags             = flags;
 
-#ifdef ZSA_SLEEP_DIAG
+#    ifdef ZSA_SLEEP_DIAG
     uint8_t page[ZSA_SCAN_DIAG_SIZE];
     sleep_diag_page(page);
     zsa_wireless_send_frame(ZSA_MSG_CMD_SCAN_DIAG, page, sizeof(page));
-#else
+#    else
     zsa_wireless_send_frame(ZSA_MSG_CMD_SCAN_DIAG, (const uint8_t *)&scan_diag_last, sizeof(scan_diag_last));
-#endif
+#    endif
     periodic_tx_ms = timer_read32();
 
     scan_diag_scans      = 0;
@@ -4108,6 +4173,9 @@ static void scan_diag_task(void) {
     scan_diag_over_5ms   = 0;
     scan_diag_over_20ms  = 0;
 }
+#else
+static inline void scan_diag_task(void) {}
+#endif
 
 /* Feeds one byte from the nRF to the frame parser. */
 static void uart_rx_byte(uint8_t byte) {
@@ -4207,8 +4275,6 @@ static inline void active_pace_init(void) {}
 void bluetooth_task(void) {
     watchdog_kick();
 
-    zsa_rtt_loop_tick(); // TEMP DEBUG
-
     /* Process incoming frames */
     uart_rx_drain();
 
@@ -4305,7 +4371,7 @@ void bluetooth_send_keyboard(report_keyboard_t *report) {
         payload[2 + i] = report->keys[i];
     }
     zsa_wireless_send_frame(ZSA_MSG_HID_KEYBOARD, payload, sizeof(payload));
-    scan_diag_kbd_reports++;
+    scan_diag_note_kbd_report();
 }
 
 void bluetooth_send_nkro(report_nkro_t *report) {

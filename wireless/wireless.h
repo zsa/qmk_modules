@@ -281,6 +281,17 @@ void zsa_stop_delay_us(uint16_t us);
 uint8_t zsa_nav_sleep_filter(int16_t dx, int16_t dy, int32_t *wake_dx, int32_t *wake_dy);
 
 /* Sleep diagnostics (ZSA_SLEEP_DIAG): the last poll's raw bytes, up to 6, and
- * a motion read by the normal path. Safe from a poll. */
+ * a motion read by the normal path. Safe from a poll. No-ops otherwise. */
+#ifdef ZSA_SLEEP_DIAG
 void zsa_nav_sleep_note_raw(const uint8_t *raw, uint8_t len);
 void zsa_nav_sleep_note_motion(int16_t x, int16_t y);
+#else
+static inline void zsa_nav_sleep_note_raw(const uint8_t *raw, uint8_t len) {
+    (void)raw;
+    (void)len;
+}
+static inline void zsa_nav_sleep_note_motion(int16_t x, int16_t y) {
+    (void)x;
+    (void)y;
+}
+#endif
