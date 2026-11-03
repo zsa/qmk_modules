@@ -3178,6 +3178,20 @@ bool zsa_wireless_ble_menu_open(void) {
     return ble_menu_is_open;
 }
 
+#ifdef RGB_MATRIX_ENABLE
+/* Matrix state an overlay restores on close: Sleep's saved state while asleep,
+ * on while the boot power gate holds it off (PG_OK enables it), else current. */
+static bool rgb_on_after_overlay(void) {
+    if (idle_step != ZSA_IDLE_ACTIVE) {
+        return sleep_rgb_on;
+    }
+    if (power_gate != PG_OK) {
+        return true;
+    }
+    return rgb_matrix_is_enabled();
+}
+#endif
+
 /* The menu draws from the indicator hooks, which rgb_matrix only runs while
  * enabled with an effect other than NONE. Brightness is left alone: the menu
  * writes absolute colors over every LED. */
@@ -3205,7 +3219,7 @@ static void ble_menu_open(void) {
     ble_menu_forgot    = 0;
     ble_menu_active_ms = timer_read32();
 #ifdef RGB_MATRIX_ENABLE
-    ble_menu_rgb_on     = rgb_matrix_is_enabled();
+    ble_menu_rgb_on     = rgb_on_after_overlay();
     ble_menu_mode_moved = false;
 #endif
     ble_menu_rgb_assert();
@@ -3711,7 +3725,7 @@ static void diag_view_open(void) {
     diag_view_is_open = true;
     diag_view_ms      = timer_read32();
 #ifdef RGB_MATRIX_ENABLE
-    diag_rgb_on     = rgb_matrix_is_enabled();
+    diag_rgb_on     = rgb_on_after_overlay();
     diag_mode_moved = false;
 #endif
     diag_rgb_assert();
