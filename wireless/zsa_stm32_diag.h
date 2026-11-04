@@ -33,7 +33,7 @@
 
 struct __attribute__((packed)) zsa_stm32_diag {
     uint8_t  version;        /* ZSA_STM32_DIAG_VERSION */
-    uint8_t  len;            /* bytes after this one: 46 */
+    uint8_t  len;            /* bytes after this one: 48 */
     uint16_t boot_count;     /* boots since the record was last lost */
     uint32_t uptime_s;
     uint8_t  reset_flags;    /* RCC_CSR[31:24] at boot */
@@ -55,10 +55,12 @@ struct __attribute__((packed)) zsa_stm32_diag {
     uint32_t frames_tx;      /* frames sent to the nRF */
     uint32_t rx_age_ms;      /* since the last frame from the nRF */
     uint32_t max_rx_gap_ms;  /* longest gap between frames, awake only */
+    uint8_t  left_probes;    /* MCUboot probes sent to the silent left nRF; saturates */
+    uint8_t  left_resets;    /* left nRF resets after MCUboot answered; saturates */
 };
 
-#define ZSA_STM32_DIAG_SIZE 48u
-#define ZSA_STM32_DIAG_LEN  46u
+#define ZSA_STM32_DIAG_SIZE 50u
+#define ZSA_STM32_DIAG_LEN  48u
 
 _Static_assert(sizeof(struct zsa_stm32_diag) == ZSA_STM32_DIAG_SIZE, "zsa_stm32_diag is a wire layout");
 

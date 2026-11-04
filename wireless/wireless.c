@@ -422,6 +422,8 @@ static struct {
     uint32_t last_frame_ms; /* valid once frames_rx > 0 */
     uint32_t max_rx_gap_ms;
     bool     gap_armed;     /* the last frame arrived while Active */
+    uint8_t  left_probes;   /* MCUboot probes sent (left rescue) */
+    uint8_t  left_resets;   /* left nRF resets after an MCUboot answer */
 } ldiag;
 
 static inline void ldiag_inc(uint16_t *counter) {
@@ -2092,6 +2094,10 @@ __attribute__((weak)) void zsa_wireless_vbus_changed(bool present) { (void)prese
 /* Keyboards with a bootloader QMK can hand off to override this. */
 __attribute__((weak)) void zsa_wireless_enter_bootloader(void) {}
 
+__attribute__((weak)) bool zsa_wireless_left_nrf_reset_kb(void) {
+    return false;
+}
+
 /* ---- Firmware-update status LEDs ---- */
 
 /* Keyboards override this to drive their own two status LED pins. */
@@ -3511,6 +3517,8 @@ static void stm32_diag_build(struct zsa_stm32_diag *r) {
     r->frames_tx      = ldiag.frames_tx;
     r->rx_age_ms      = ldiag.frames_rx ? timer_elapsed32(ldiag.last_frame_ms) : ZSA_STM32_DIAG_AGE_NEVER;
     r->max_rx_gap_ms  = ldiag.max_rx_gap_ms;
+    r->left_probes    = ldiag.left_probes;
+    r->left_resets    = ldiag.left_resets;
 }
 
 static void stm32_diag_save(void) {
@@ -4427,6 +4435,132 @@ static void scan_diag_task(void) {
 static inline void scan_diag_task(void) {}
 #endif
 
+/* ---- Left nRF rescue ----
+ *
+ * An ignition update session that ends without restarting the left nRF leaves
+ * it in MCUboot serial recovery, which only a reset leaves, and the keyboard
+ * without USB or Bluetooth. After ZSA_LEFT_RESCUE_QUIET_MS of Active time with
+ * no frame from it, an SMP request goes out on the shared UART (same uart00,
+ * same 1 Mbaud in MCUboot). Only an NLIP answer leads to a reset: MCUboot does
+ * not listen while it swaps, and the application ignores the line. Time in
+ * Sleep, an update and the boot power gate's ship sequence restart the count.
+ * At most ZSA_LEFT_RESCUE_MAX_PROBES probes and ZSA_LEFT_RESCUE_MAX_RESETS
+ * resets per STM32 boot. */
+
+/* "\n" ends any partial line, then NLIP: SMP v1 write, group 0, id 1 (console
+ * echo control, answered rc 0 without side effects), payload {}. */
+static const uint8_t left_rescue_probe[] = {
+    0x0a, 0x06, 0x09, 0x41, 0x41, 0x73, 0x4b, 0x41, 0x41, 0x41, 0x42, 0x41, 0x41,
+    0x41, 0x41, 0x41, 0x61, 0x41, 0x73, 0x34, 0x77, 0x3d, 0x3d, 0x0a,
+};
+
+static struct {
+    uint32_t frames_seen;  /* ldiag.frames_rx at the last pass */
+    uint32_t quiet_ms;     /* start of the counted silence */
+    uint32_t due_ms;       /* silence before the next probe */
+    uint32_t probe_ms;
+    bool     probing;
+    bool     answered;
+    bool     no_hook;      /* the keyboard cannot reset the left nRF */
+    bool     log_back;     /* log the first frame after a reset */
+    uint8_t  nlip;         /* answer match: 0 hunt, 1 after 0x06, 2 in base64 */
+    uint8_t  b64;          /* base64 characters in the matched line */
+} rescue = {.due_ms = ZSA_LEFT_RESCUE_QUIET_MS};
+
+static bool nlip_b64(uint8_t c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+}
+
+/* Raw UART bytes while a probe is out: 0x06 0x09, base64, '\n'. */
+static void left_rescue_rx(const uint8_t *p, uint16_t n) {
+    if (!rescue.probing) {
+        return;
+    }
+    for (uint16_t i = 0; i < n; i++) {
+        uint8_t c = p[i];
+        if (rescue.nlip == 2) {
+            if (c == '\n') {
+                if (rescue.b64 >= 4) {
+                    rescue.answered = true;
+                }
+                rescue.nlip = 0;
+            } else if (nlip_b64(c)) {
+                if (rescue.b64 < UINT8_MAX) {
+                    rescue.b64++;
+                }
+            } else {
+                rescue.nlip = c == 0x06 ? 1 : 0;
+            }
+        } else if (rescue.nlip == 1 && c == 0x09) {
+            rescue.nlip = 2;
+            rescue.b64  = 0;
+        } else {
+            rescue.nlip = c == 0x06 ? 1 : 0;
+        }
+    }
+}
+
+static bool left_rescue_excluded(void) {
+    uint8_t phase = dfu_left_phase();
+    return idle_step != ZSA_IDLE_ACTIVE || nrf_dfu_active || nrf_dfu_keep_awake || phase == ZSA_DFU_PHASE_UPLOAD || phase == ZSA_DFU_PHASE_SETTLE || power_gate == PG_CRITICAL || power_gate == PG_DONE;
+}
+
+static void left_rescue_task(void) {
+    uint32_t now = timer_read32();
+
+    if (ldiag.frames_rx != rescue.frames_seen) {
+        rescue.frames_seen = ldiag.frames_rx;
+        rescue.quiet_ms    = now;
+        rescue.due_ms      = ldiag.left_resets ? ZSA_LEFT_RESCUE_AFTER_RESET_MS : ZSA_LEFT_RESCUE_QUIET_MS;
+        rescue.probing     = false;
+        if (rescue.log_back) {
+            rescue.log_back = false;
+            zsa_log("left: back after reset %u", (unsigned)ldiag.left_resets);
+        }
+        return;
+    }
+    if (left_rescue_excluded()) {
+        rescue.quiet_ms = now;
+        rescue.probing  = false;
+        return;
+    }
+
+    if (rescue.probing) {
+        if (rescue.answered) {
+            rescue.probing  = false;
+            rescue.quiet_ms = now;
+            rescue.due_ms   = ZSA_LEFT_RESCUE_AFTER_RESET_MS;
+            if (!zsa_wireless_left_nrf_reset_kb()) {
+                rescue.no_hook = true;
+                zsa_log("left: MCUboot answered, no reset line");
+                return;
+            }
+            ldiag.left_resets++;
+            rescue.log_back = true;
+            zsa_log("left: MCUboot answered, reset %u", (unsigned)ldiag.left_resets);
+        } else if (timer_elapsed32(rescue.probe_ms) >= ZSA_LEFT_RESCUE_ANSWER_MS) {
+            rescue.probing  = false;
+            rescue.quiet_ms = now;
+            rescue.due_ms   = ZSA_LEFT_RESCUE_REPROBE_MS;
+        }
+        return;
+    }
+
+    if (rescue.no_hook || ldiag.left_resets >= ZSA_LEFT_RESCUE_MAX_RESETS || ldiag.left_probes >= ZSA_LEFT_RESCUE_MAX_PROBES) {
+        return;
+    }
+    if (timer_elapsed32(rescue.quiet_ms) < rescue.due_ms) {
+        return;
+    }
+    ldiag.left_probes++;
+    zsa_log("left: silent, MCUboot probe %u", (unsigned)ldiag.left_probes);
+    rescue.answered = false;
+    rescue.nlip     = 0;
+    rescue.probing  = true;
+    rescue.probe_ms = timer_read32();
+    zsa_uart_transmit(left_rescue_probe, sizeof(left_rescue_probe));
+}
+
 /* Feeds one byte from the nRF to the frame parser. */
 static void uart_rx_byte(uint8_t byte) {
     enum zsa_parse_state state   = rx_parser.state;
@@ -4474,6 +4608,7 @@ static void uart_rx_drain(void) {
             break;
         }
         last_rx_ms = timer_read32();
+        left_rescue_rx(chunk, n);
         for (uint16_t i = 0; i < n; i++) {
             uart_rx_byte(chunk[i]);
         }
@@ -4527,6 +4662,9 @@ void bluetooth_task(void) {
 
     /* Process incoming frames */
     uart_rx_drain();
+
+    /* Restart a left nRF left in MCUboot serial recovery */
+    left_rescue_task();
 
     /* Periodically send LINK_UP until nRF responds */
     if (!link_ready && timer_elapsed32(last_link_up_ms) >= LINK_UP_INTERVAL_MS) {

@@ -336,6 +336,38 @@
 #    define ZSA_STM32_DIAG_SAVE_MS 1000
 #endif
 
+/* ---- Left nRF rescue (see wireless.c) ---- */
+
+/* Active time without a frame from the left nRF before the first MCUboot
+ * probe. Below ZSA_SLEEP_TIMEOUT_MS, so it is reached before an untouched
+ * keyboard goes to Sleep. */
+#ifndef ZSA_LEFT_RESCUE_QUIET_MS
+#    define ZSA_LEFT_RESCUE_QUIET_MS 30000
+#endif
+
+/* Further Active silence before the probe after a reset. */
+#ifndef ZSA_LEFT_RESCUE_AFTER_RESET_MS
+#    define ZSA_LEFT_RESCUE_AFTER_RESET_MS 120000
+#endif
+
+/* Further Active silence before the probe after an unanswered one. */
+#ifndef ZSA_LEFT_RESCUE_REPROBE_MS
+#    define ZSA_LEFT_RESCUE_REPROBE_MS 30000
+#endif
+
+/* How long MCUboot gets to answer a probe. */
+#ifndef ZSA_LEFT_RESCUE_ANSWER_MS
+#    define ZSA_LEFT_RESCUE_ANSWER_MS 1000
+#endif
+
+/* Per STM32 boot. */
+#ifndef ZSA_LEFT_RESCUE_MAX_RESETS
+#    define ZSA_LEFT_RESCUE_MAX_RESETS 2
+#endif
+#ifndef ZSA_LEFT_RESCUE_MAX_PROBES
+#    define ZSA_LEFT_RESCUE_MAX_PROBES 16
+#endif
+
 /* ---- Bench diagnostics (off by default) ---- */
 
 /* ZSA_SCAN_DIAG: main-loop gap and link counters, sent to the left nRF as

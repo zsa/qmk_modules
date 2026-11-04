@@ -97,6 +97,10 @@ void zsa_wireless_vbus_changed(bool present);
  * return on a keyboard that implements it; the default is a no-op. */
 void zsa_wireless_enter_bootloader(void);
 
+/* Weak hook: release the left nRF's MCUboot entry line and pulse its reset.
+ * False (the default) on a keyboard without those lines. */
+bool zsa_wireless_left_nrf_reset_kb(void);
+
 /* State of a driven status LED. RELEASE hands the pin back to whatever else
  * drives it. */
 enum zsa_status_led_state {
