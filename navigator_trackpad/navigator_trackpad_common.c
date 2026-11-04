@@ -279,6 +279,20 @@ bool cirque_gen6_has_motion(void) {
     return data != 0;
 }
 
+// Feed mode written by trackpad_init_step() and expected back by
+// trackpad_verify().
+#define CGEN6_FEED_CONFIG4_MODE_MASK 0x0C
+#define CGEN6_FEED_CONFIG4_PTP 0x04
+
+// The pad reads back in PTP mode. False on a failed read.
+static bool trackpad_feed_is_ptp(void) {
+    uint8_t feed_config4;
+    if (cirque_gen6_read_memory(CGEN6_FEED_CONFIG4, &feed_config4, 1, false) != CGEN6_SUCCESS) {
+        return false;
+    }
+    return (feed_config4 & CGEN6_FEED_CONFIG4_MODE_MASK) == CGEN6_FEED_CONFIG4_PTP;
+}
+
 // Report reading - fills provided report struct on CGEN6_READ_OK.
 cgen6_read_t cirque_gen_6_read_report(cgen6_report_t *report) {
     uint8_t packet[CGEN6_MAX_PACKET_SIZE];
@@ -307,14 +321,19 @@ cgen6_read_t cirque_gen_6_read_report(cgen6_report_t *report) {
         return CGEN6_READ_OK;
     }
     // Mouse/relative mode report. The pad is always configured for PTP, so a
-    // mouse report means it lost its configuration.
+    // mouse report means it lost its configuration, unless it still reads back
+    // in PTP mode: then the report was queued before the mode write (the pad
+    // powers up in its own mode and init writes PTP mode without reading the
+    // queue out afterwards).
     else if (report_id == CGEN6_MOUSE_REPORT_ID) {
-        busdev_report_suspect(navigator_trackpad_dev, BUSDEV_REASON_BAD_REPORT_ID);
         report->buttons     = packet[3];
         report->xDelta      = packet[4];
         report->yDelta      = packet[5];
         report->scrollDelta = packet[6];
         report->panDelta    = packet[7];
+        if (!trackpad_feed_is_ptp()) {
+            busdev_report_suspect(navigator_trackpad_dev, BUSDEV_REASON_BAD_REPORT_ID);
+        }
         return CGEN6_READ_OK;
     }
 
@@ -349,11 +368,6 @@ static void trackpad_dump_info(void) {
     printf("Touchpad Developer ID: %d\n", developerId);
 }
 #endif
-
-// Feed mode written by trackpad_init_step() and expected back by
-// trackpad_verify().
-#define CGEN6_FEED_CONFIG4_MODE_MASK 0x0C
-#define CGEN6_FEED_CONFIG4_PTP 0x04
 
 static busdev_step_t trackpad_init_step(uint8_t addr, uint8_t step, uint16_t *delay_ms) {
     trackpad_addr = addr;
@@ -396,12 +410,7 @@ static busdev_step_t trackpad_init_step(uint8_t addr, uint8_t step, uint16_t *de
 // transaction, and it cannot be lost without the feed mode being lost too.
 static bool trackpad_verify(uint8_t addr) {
     trackpad_addr = addr;
-
-    uint8_t feed_config4;
-    if (cirque_gen6_read_memory(CGEN6_FEED_CONFIG4, &feed_config4, 1, false) != CGEN6_SUCCESS) {
-        return false;
-    }
-    return (feed_config4 & CGEN6_FEED_CONFIG4_MODE_MASK) == CGEN6_FEED_CONFIG4_PTP;
+    return trackpad_feed_is_ptp();
 }
 
 #ifdef COMMUNITY_MODULE_WIRELESS_ENABLE
