@@ -149,7 +149,7 @@ void clear_webhid_effect(void) {
 }
 
 /* Weak default: a board with nothing to report says so, rather than reporting
- * zeroes. Overridden by whoever actually knows (Voyager 2: the wireless
+ * zeroes. Overridden by whoever actually knows (Wireless Voyager: the wireless
  * module, wireless.c). */
 __attribute__((weak)) void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
     oryx_telemetry_reset(tlm);

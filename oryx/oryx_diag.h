@@ -15,7 +15,7 @@ a copy the board fetched over UART: ORYX_DIAG_FLAG_FETCH starts a fetch, and
 age_ms says how long ago each page arrived, so a host that sets the flag,
 waits, and reads again can tell a fresh page from an old one.
 
-The record layouts belong to the board (Voyager 2: struct zsa_stm32_diag in
+The record layouts belong to the board (Wireless Voyager: struct zsa_stm32_diag in
 the wireless module, struct zsa_left_diag in zsa_uart_proto.h). The default
 hook answers version 0: no diagnostics.
 */

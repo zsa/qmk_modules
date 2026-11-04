@@ -65,6 +65,6 @@ static inline void oryx_scan_diag_reset(oryx_scan_diag_t *d) {
 }
 
 /* Weak hook. The oryx module owns the wire format but knows none of the
- * answers; a board that has them (Voyager 2: the wireless module) overrides
+ * answers; a board that has them (Wireless Voyager: the wireless module) overrides
  * this. The default leaves the block zeroed. */
 void oryx_scan_diag_fill(oryx_scan_diag_t *d);

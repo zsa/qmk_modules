@@ -158,7 +158,7 @@ static inline void oryx_telemetry_reset(oryx_telemetry_t *tlm) {
 }
 
 /* Weak hook. The oryx module owns the wire format but knows none of the
- * answers; a board that has them (Voyager 2: the wireless module) overrides
+ * answers; a board that has them (Wireless Voyager: the wireless module) overrides
  * this. The default leaves everything unknown, which is the truth for a board
  * with nothing to report. */
 void oryx_telemetry_fill(oryx_telemetry_t *tlm);

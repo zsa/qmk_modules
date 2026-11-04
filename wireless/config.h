@@ -243,7 +243,7 @@
 /* Keys of each bank, as {row, col} matrix positions: one column of
  * ZSA_BLE_MENU_BANK_KEYS keys per bank, the first being the bank's number key.
  * An entry outside the matrix (e.g. {0xFF, 0xFF}) is unused. Defaults to the
- * columns under keys 1-5 on the Voyager 2 left half. */
+ * columns under keys 1-5 on the Wireless Voyager left half. */
 #ifndef ZSA_BLE_MENU_BANK_KEYS
 #    define ZSA_BLE_MENU_BANK_KEYS 4
 #endif
@@ -310,7 +310,7 @@
 #endif
 
 /* Indicator keys, {row, col}, in the order of enum zsa_diag_key (wireless.h).
- * Defaults to the Voyager 2 left half: keys 1-5, Q-T, A-F and Z-B. */
+ * Defaults to the Wireless Voyager left half: keys 1-5, Q-T, A-F and Z-B. */
 #ifndef ZSA_DIAG_KEYS
 #    define ZSA_DIAG_KEYS                                                  \
         {                                                                  \

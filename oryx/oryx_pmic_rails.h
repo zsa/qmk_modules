@@ -119,7 +119,7 @@ static inline void oryx_pmic_rails_reset(oryx_pmic_rails_t *rails) {
 }
 
 /* Weak hook. The oryx module owns the wire format but knows none of the
- * answers; a board that has them (Voyager 2: the wireless module) overrides
+ * answers; a board that has them (Wireless Voyager: the wireless module) overrides
  * this. The default leaves both blocks absent, which is the truth for a board
  * with no PMIC to read. */
 void oryx_pmic_rails_fill(oryx_pmic_rails_t *rails);
