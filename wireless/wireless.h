@@ -68,6 +68,26 @@ bool zsa_wireless_dfu_active(void);
  * state: the nRF re-sends the level every second. */
 bool zsa_wireless_link_mismatch(void);
 
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+/* Test builds only. Overrides the left nav boost claim regardless of nav
+ * presence and probe windows; ZSA_NAV_BOOST_DEBUG_NONE returns to the normal
+ * claim, resent, with a probe window requested. The nRF still keeps the boost
+ * off on VBUS and on with the TRRS cable. */
+enum {
+    ZSA_NAV_BOOST_DEBUG_NONE,
+    ZSA_NAV_BOOST_DEBUG_ON,
+    ZSA_NAV_BOOST_DEBUG_OFF,
+};
+void    zsa_nav_boost_debug_set(uint8_t mode);
+uint8_t zsa_nav_boost_debug_mode(void);
+/* Last claim sent to the nRF. */
+bool zsa_nav_boost_debug_sent(void);
+/* Claims sent so far (wraps), and timer_read32() when the last one was handed
+ * to the UART. The nRF does not acknowledge CMD_NAV_BOOST. */
+uint8_t  zsa_nav_boost_debug_sends(void);
+uint32_t zsa_nav_boost_debug_sent_ms(void);
+#endif
+
 /* Weak hook: keyboards override this to react to VBUS present/absent
  * (EVT_VBUS_STATE), e.g. to drive their own USB D+ pullup. */
 void zsa_wireless_vbus_changed(bool present);

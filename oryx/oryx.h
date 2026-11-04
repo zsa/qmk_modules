@@ -66,6 +66,16 @@ enum Oryx_Command_Code {
      * Answered with ORYX_EVT_DIAG carrying an oryx_diag_t. Unpaired-safe,
      * like the other queries. */
     ORYX_CMD_GET_DIAG,
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+    /* Test builds only. Trackpad power-measurement action, param[0]: 0 status,
+     * 1 force sleep, 2 cancel force sleep, 3 pause pad access, 4 resume pad
+     * access, 5 short timers, 6 factory timers, 7 hold left boost claim on,
+     * 8 left boost claim normal, 9 hold left boost claim off, 10 start a
+     * power cycle timing (param[1] off time in 10 ms units, 0 = 1 s),
+     * 11 power cycle timing result. Answered with ORYX_EVT_DEBUG_PAD_POWER.
+     * Unpaired-safe. */
+    ORYX_CMD_DEBUG_PAD_POWER = 0xF0,
+#endif
     ORYX_GET_PROTOCOL_VERSION = 0xFE,
 };
 
@@ -99,6 +109,16 @@ enum Oryx_Event_Code {
     /* Answer to ORYX_CMD_GET_DIAG: an oryx_diag_t in bytes 1..31. Binary, so
      * it carries no ORYX_STOP_BIT — a 0xFE inside it is data. */
     ORYX_EVT_DIAG,
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+    /* Answer to ORYX_CMD_DEBUG_PAD_POWER: byte 1 action, byte 2 write status
+     * (0 OK, CGEN6_* error bits, 0x80 pad not up on its real address, 0x81
+     * unknown action), byte 3 paused, byte 4 pad up on its real address,
+     * byte 5 left boost override (0 none, 1 held on, 2 held off), byte 6
+     * last boost claim sent to the nRF. Action 10 status: 0 started, 0x82
+     * busy or paused, 0x83 no nRF link. Action 11: bytes 2..23 as
+     * documented at navigator_trackpad_debug_timing_result(). */
+    ORYX_EVT_DEBUG_PAD_POWER = 0xF0,
+#endif
     ORYX_EVT_GET_PROTOCOL_VERSION = 0XFE,
     ORYX_EVT_ERROR                = 0xFF,
 };

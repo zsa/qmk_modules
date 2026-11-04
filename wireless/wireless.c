@@ -755,6 +755,36 @@ static bool     nav_window_sleep;      /* opened by the Sleep interval */
 static uint32_t nav_sleep_due_ms;      /* next Sleep window, in sleep_clock_ms() time */
 static bool     nav_left_present;
 static uint32_t nav_vbus_probe_ms;     /* last real-address probe on VBUS */
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+static uint8_t  nav_boost_debug;       /* ZSA_NAV_BOOST_DEBUG_*, power tests */
+static uint8_t  nav_boost_debug_sends; /* claims sent, wraps */
+static uint32_t nav_boost_debug_sent_ms; /* when the last claim was sent */
+
+void zsa_nav_boost_debug_set(uint8_t mode) {
+    nav_boost_debug = mode;
+    nav_boost_dirty = true;
+    if (mode == ZSA_NAV_BOOST_DEBUG_NONE) {
+        nav_window_request = true;
+    }
+    zsa_log("power: nav boost debug %u", mode);
+}
+
+uint8_t zsa_nav_boost_debug_mode(void) {
+    return nav_boost_debug;
+}
+
+bool zsa_nav_boost_debug_sent(void) {
+    return nav_boost_sent;
+}
+
+uint8_t zsa_nav_boost_debug_sends(void) {
+    return nav_boost_debug_sends;
+}
+
+uint32_t zsa_nav_boost_debug_sent_ms(void) {
+    return nav_boost_debug_sent_ms;
+}
+#endif
 
 static uint32_t sleep_clock_ms(void);
 
@@ -771,6 +801,10 @@ static void send_nav_boost(bool needed) {
     zsa_wireless_send_frame(ZSA_MSG_CMD_NAV_BOOST, (const uint8_t *)&b, sizeof(b));
     nav_boost_sent  = needed;
     nav_boost_dirty = false;
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+    nav_boost_debug_sent_ms = timer_read32();
+    nav_boost_debug_sends++;
+#endif
 }
 
 static void nav_window_close(void) {
@@ -847,6 +881,11 @@ static void nav_boost_task(void) {
     }
 
     bool needed = present || nav_window_open;
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+    if (nav_boost_debug != ZSA_NAV_BOOST_DEBUG_NONE) {
+        needed = nav_boost_debug == ZSA_NAV_BOOST_DEBUG_ON;
+    }
+#endif
     if (needed != nav_boost_sent || nav_boost_dirty) {
         send_nav_boost(needed);
     }

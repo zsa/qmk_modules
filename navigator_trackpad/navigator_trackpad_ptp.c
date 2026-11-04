@@ -413,6 +413,13 @@ bool navigator_trackpad_ptp_task(void) {
     }
     last_poll_time = now;
 
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+    // Periodic register dump, skipped while a contact is down.
+    if (host_contacts.count == 0 && !prev_finger0_tip) {
+        navigator_trackpad_debug_task();
+    }
+#endif
+
     // Read the report data into local struct.
     //
     // A read that yields no report is one of two things: a failed I2C
@@ -431,7 +438,12 @@ bool navigator_trackpad_ptp_task(void) {
     // and nt_reconcile_contacts emits the release.
     cgen6_report_t sensor_report = {0};
     cgen6_read_t   read          = CGEN6_READ_EMPTY;
-    if (!busdev_is_up(navigator_trackpad_dev)) {
+    bool           pad_up        = busdev_is_up(navigator_trackpad_dev);
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+    // Paused for power measurement: handled as off the bus.
+    pad_up = pad_up && !navigator_trackpad_debug_paused();
+#endif
+    if (!pad_up) {
         // Off the bus: stay off it, but flush anything the host still tracks so
         // no contact is stranded. The zeroed report drives cur_n == 0 below.
         no_data_frames = 0;

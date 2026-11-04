@@ -10,6 +10,9 @@
 #include "oryx_scan_diag.h"
 #include "oryx_diag.h"
 #include "action_util.h"
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+#    include "navigator_trackpad_common.h"
+#endif
 
 #ifdef COMMUNITY_MODULE_AUTOMOUSE_ENABLE
 #    include <automouse.h>
@@ -251,6 +254,28 @@ static void oryx_handle_command(uint8_t *data, uint8_t length) {
             raw_hid_send_oryx(event, RAW_EPSIZE);
             break;
         }
+
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+        case ORYX_CMD_DEBUG_PAD_POWER: {
+            uint8_t event[RAW_EPSIZE] = {0};
+            event[0] = ORYX_EVT_DEBUG_PAD_POWER;
+            event[1] = param[0];
+#    if defined(NAVIGATOR_TRACKPAD_DEBUG_TIMING)
+            if (param[0] == NAVIGATOR_TRACKPAD_DEBUG_TIMING_RESULT) {
+                navigator_trackpad_debug_timing_result(&event[2]);
+                raw_hid_send_oryx(event, RAW_EPSIZE);
+                break;
+            }
+#    endif
+            event[2] = navigator_trackpad_debug_action(param[0], param[1]);
+            event[3] = navigator_trackpad_debug_paused();
+            event[4] = navigator_trackpad_debug_pad_up();
+            event[5] = navigator_trackpad_debug_boost_mode();
+            event[6] = navigator_trackpad_debug_boost_sent();
+            raw_hid_send_oryx(event, RAW_EPSIZE);
+            break;
+        }
+#endif
 
         case ORYX_CMD_PAIRING_INIT:
             session_transport = send_transport;

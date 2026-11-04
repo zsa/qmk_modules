@@ -64,6 +64,25 @@
 #define CGEN6_GPIO_BASE 0x00052000
 #define CGEN6_I2C_DR 0x61010000
 
+// C3 power management registers
+#define CGEN6_POWER_HEADER 0x200A0000
+#define CGEN6_POWER_IDLE_SLEEP_WAIT 0x200A0008 // 16-bit, 100 ms units
+#define CGEN6_POWER_IDLE_SLEEP_TIME 0x200A000A // 16-bit, 100 us units
+#define CGEN6_POWER_DEEP_SLEEP_WAIT 0x200A000C // 16-bit, 100 ms units
+#define CGEN6_POWER_DEEP_SLEEP_TIME 0x200A000E // 16-bit, 100 us units
+#define CGEN6_POWER_SETTINGS 0x200A0010
+#define CGEN6_POWER_CMD 0x200A0408
+
+// CGEN6_POWER_SETTINGS bits
+#define CGEN6_POWER_SETTING_DISABLE_DEEP_SLEEP 0x01
+#define CGEN6_POWER_SETTING_DISABLE_IDLE_SLEEP 0x02
+#define CGEN6_POWER_SETTING_DONT_WAKE_FROM_TOUCH 0x04
+#define CGEN6_POWER_SETTING_DONT_WAKE_FROM_BUTTON 0x08
+
+// CGEN6_POWER_CMD bits
+#define CGEN6_POWER_CMD_FORCE_SLEEP 0x01
+#define CGEN6_POWER_CMD_CANCEL_FORCE_SLEEP 0x02
+
 // CPI configuration
 #define CPI_TICKS 7
 #define DEFAULT_CPI_TICK 4
@@ -191,6 +210,99 @@ cgen6_read_t cirque_gen_6_read_report(cgen6_report_t *report);
 
 // Device initialization
 void navigator_trackpad_device_init(void);
+
+#if defined(NAVIGATOR_TRACKPAD_DEBUG)
+#    ifndef NAVIGATOR_TRACKPAD_DEBUG_DUMP_MS
+#        define NAVIGATOR_TRACKPAD_DEBUG_DUMP_MS 10000
+#    endif
+// Repeats the register dump every NAVIGATOR_TRACKPAD_DEBUG_DUMP_MS while up on
+// NAVIGATOR_TRACKPAD_ADDRESS.
+void navigator_trackpad_debug_task(void);
+
+// Power-measurement actions. Each prints its result to the console.
+// Pause stops all pad traffic (reports, dump, verify, sleep poll) until resumed.
+// Write actions return CGEN6_SUCCESS, CGEN6_* error bits or
+// NAVIGATOR_TRACKPAD_DEBUG_NOT_UP.
+#    define NAVIGATOR_TRACKPAD_DEBUG_NOT_UP 0x80     // not up on NAVIGATOR_TRACKPAD_ADDRESS, nothing written
+#    define NAVIGATOR_TRACKPAD_DEBUG_BAD_ACTION 0x81 // unknown action, nothing done
+#    define NAVIGATOR_TRACKPAD_DEBUG_BUSY 0x82       // timing cycle running or pad access paused
+#    define NAVIGATOR_TRACKPAD_DEBUG_NO_LINK 0x83    // no nRF link, the boost claim cannot be sent
+bool    navigator_trackpad_debug_paused(void);
+void    navigator_trackpad_debug_set_pause(bool paused);
+void    navigator_trackpad_debug_toggle_pause(void);
+bool    navigator_trackpad_debug_pad_up(void);
+uint8_t navigator_trackpad_debug_force_sleep(void);
+uint8_t navigator_trackpad_debug_cancel_sleep(void);
+// Idle wait 1 s.
+uint8_t navigator_trackpad_debug_short_timers(void);
+// Idle wait 100, idle time 300, deep wait 1200, deep time 1000, settings 0x00.
+uint8_t navigator_trackpad_debug_factory_timers(void);
+
+// Actions for navigator_trackpad_debug_action() (Oryx ORYX_CMD_DEBUG_PAD_POWER).
+enum {
+    NAVIGATOR_TRACKPAD_DEBUG_STATUS,
+    NAVIGATOR_TRACKPAD_DEBUG_FORCE_SLEEP,
+    NAVIGATOR_TRACKPAD_DEBUG_CANCEL_SLEEP,
+    NAVIGATOR_TRACKPAD_DEBUG_PAUSE,
+    NAVIGATOR_TRACKPAD_DEBUG_RESUME,
+    NAVIGATOR_TRACKPAD_DEBUG_SHORT_TIMERS,
+    NAVIGATOR_TRACKPAD_DEBUG_FACTORY_TIMERS,
+    NAVIGATOR_TRACKPAD_DEBUG_BOOST_ON,     // left boost claim held on (wireless module)
+    NAVIGATOR_TRACKPAD_DEBUG_BOOST_NORMAL, // left boost claim back to normal
+    NAVIGATOR_TRACKPAD_DEBUG_BOOST_OFF,    // left boost claim held off
+    NAVIGATOR_TRACKPAD_DEBUG_CYCLE_TIMING, // power cycle timing, arg = off time in 10 ms units (0 = 1 s)
+    NAVIGATOR_TRACKPAD_DEBUG_TIMING_RESULT, // last power cycle timing, see below
+};
+// Left boost override (0 none, 1 held on, 2 held off), and the last claim sent
+// to the nRF. 0 without the wireless module.
+uint8_t navigator_trackpad_debug_boost_mode(void);
+bool    navigator_trackpad_debug_boost_sent(void);
+// Runs one action with its argument byte; returns its write status (0 for
+// status, pause, resume, and a started timing cycle).
+uint8_t navigator_trackpad_debug_action(uint8_t action, uint8_t arg);
+
+#    if defined(COMMUNITY_MODULE_WIRELESS_ENABLE)
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING
+// Power cycle timing (action 10): boost claim held off for the off time, then
+// held on for NAVIGATOR_TRACKPAD_DEBUG_TIMING_WINDOW_MS, then back to normal.
+// Times are ms after the claim-on was handed to the UART.
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_WINDOW_MS 1500
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_PING_MS 2
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_NONE 0xFFFF // not seen
+enum {
+    NAVIGATOR_TRACKPAD_DEBUG_TIMING_IDLE,    // never run, or aborted by action 7, 8 or 9
+    NAVIGATOR_TRACKPAD_DEBUG_TIMING_RUNNING,
+    NAVIGATOR_TRACKPAD_DEBUG_TIMING_DONE,    // pad up on 0x58 within the window
+    NAVIGATOR_TRACKPAD_DEBUG_TIMING_TIMEOUT, // pad not up, or a claim never sent
+};
+// Flags byte.
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_FIRST_TIP 0x01  // finger 0 tip in the first PTP report
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_ANY_TIP 0x02    // any finger tip in any PTP report of the window
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_SUP_ACK 0x04    // first ACK came from a supervisor probe, not a ping
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_NO_CLAIM 0x08   // a claim was not sent within 200 ms
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_RAIL_FED 0x10   // VBUS or TRRS cable: the nRF keeps the rail as it is
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_WAS_UP 0x20     // pad already set up on 0x58 at claim-on
+#        define NAVIGATOR_TRACKPAD_DEBUG_TIMING_MOUSE 0x40      // a mouse-mode report was read in the window
+// Action 11 reply, written from event byte 2 (event byte 0 0xF0, byte 1 11);
+// u16 little-endian, ms after claim-on, 0xFFFF not seen:
+//   2      state (NAVIGATOR_TRACKPAD_DEBUG_TIMING_*)
+//   3-4    t_ack: first ACK at 0x58
+//   5-6    t_up: BUSDEV_UP on 0x58
+//   7-8    t_report: first PTP report read by the report path
+//   9-10   init step 0 start (clear, then 50 ms delay)
+//   11-12  init step 1 start (PTP mode)
+//   13-14  init step 2 start (XY config)
+//   15-16  init done (verify follows)
+//   17     flags (NAVIGATOR_TRACKPAD_DEBUG_TIMING_*)
+//   18     init runs started in the window
+//   19     PTP reports read in the window (saturates)
+//   20-21  off time: claim-off sent to claim-on sent
+//   22-23  pings sent before the first ACK
+// Init times are those of the last init run before t_up.
+void navigator_trackpad_debug_timing_result(uint8_t *out);
+void navigator_trackpad_debug_note_report(const cgen6_report_t *report, bool ptp);
+#    endif
+#endif
 
 // CPI management
 uint16_t navigator_trackpad_get_cpi(void);
