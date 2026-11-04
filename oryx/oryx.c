@@ -9,6 +9,7 @@
 #include "oryx_pmic_rails.h"
 #include "oryx_scan_diag.h"
 #include "oryx_diag.h"
+#include "oryx_radio_info.h"
 #include "action_util.h"
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
 #    include "navigator_trackpad_common.h"
@@ -19,6 +20,8 @@
 #endif
 
 ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 1);
+
+_Static_assert(ORYX_CMD_GET_RADIO_INFO == 0x12 && ORYX_EVT_RADIO_INFO == 0x12, "radio info ids are a wire contract");
 
 uint8_t current_layer = 0;
 
@@ -171,6 +174,22 @@ __attribute__((weak)) void oryx_diag_fill(oryx_diag_t *d, uint8_t record, uint8_
     oryx_diag_reset(d);
 }
 
+void oryx_radio_info_send(oryx_transport_t to, const oryx_radio_info_t *info) {
+    uint8_t event[RAW_EPSIZE] = {0};
+    event[0] = ORYX_EVT_RADIO_INFO;
+    /* Binary payload, no ORYX_STOP_BIT. */
+    memcpy(&event[1], info, sizeof(*info));
+    oryx_transport_t prev = send_transport;
+    send_transport        = to;
+    raw_hid_send_oryx(event, RAW_EPSIZE);
+    send_transport = prev;
+}
+
+__attribute__((weak)) void oryx_radio_info_request(oryx_transport_t from) {
+    oryx_radio_info_t info = {.format = ORYX_RADIO_INFO_FORMAT};
+    oryx_radio_info_send(from, &info);
+}
+
 static void oryx_handle_command(uint8_t *data, uint8_t length) {
     uint8_t  command = data[0];
     uint8_t *param   = &data[1];
@@ -254,6 +273,10 @@ static void oryx_handle_command(uint8_t *data, uint8_t length) {
             raw_hid_send_oryx(event, RAW_EPSIZE);
             break;
         }
+
+        case ORYX_CMD_GET_RADIO_INFO:
+            oryx_radio_info_request(send_transport);
+            break;
 
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
         case ORYX_CMD_DEBUG_PAD_POWER: {

@@ -63,6 +63,11 @@ enum zsa_msg_type {
                                        * Answered with one EVT_DIAG. Sent on
                                        * demand only, one page at a time. Not
                                        * in ignition's copy of this header. */
+    ZSA_MSG_QUERY_RADIO_INFO = 0x14,  /* 0 B: the radio firmware each half
+                                       * runs. Answered with one
+                                       * EVT_RADIO_INFO. Sent on demand only.
+                                       * Not in ignition's copy of this
+                                       * header. */
 
     /* STM32 -> nRF: commands (0x20-0x2F) */
     ZSA_MSG_CMD_HIBERNATE    = 0x20,
@@ -296,6 +301,10 @@ enum zsa_msg_type {
                                        * to ignition. */
     ZSA_MSG_EVT_DIAG         = 0xC4,  /* 28 B: struct zsa_diag_page — the answer
                                        * to QUERY_DIAG. Not known to
+                                       * ignition. */
+    ZSA_MSG_EVT_RADIO_INFO   = 0xC5,  /* ZSA_RADIO_INFO_LEN B: struct
+                                       * zsa_radio_info — the answer to
+                                       * QUERY_RADIO_INFO. Not known to
                                        * ignition. */
 };
 
@@ -995,6 +1004,36 @@ _Static_assert(sizeof(struct zsa_diag_query) == ZSA_DIAG_QUERY_SIZE,
                "zsa_diag_query is a wire layout");
 _Static_assert(sizeof(struct zsa_diag_page) == ZSA_DIAG_PAGE_SIZE,
                "zsa_diag_page is a wire layout");
+
+/* ---- Radio firmware (QUERY_RADIO_INFO / EVT_RADIO_INFO) ---- */
+
+#define ZSA_RADIO_INFO_FORMAT 1u
+
+/* zsa_radio_info.flags */
+#define ZSA_RADIO_INFO_F_LEFT_VALID      0x01u /* left version and hash read */
+#define ZSA_RADIO_INFO_F_LEFT_CONFIRMED  0x02u /* MCUboot has the left image confirmed */
+#define ZSA_RADIO_INFO_F_RIGHT_VALID     0x04u /* right_tag is the right's current report */
+#define ZSA_RADIO_INFO_F_RIGHT_CONFIRMED 0x08u /* the right reports its image confirmed */
+
+#define ZSA_RADIO_INFO_HASH_LEN 8u
+
+/* ZSA_MSG_EVT_RADIO_INFO (26 bytes). Hashes are the leading bytes of the
+ * running image's hash TLV, as img_mgmt_read_info() reads it. */
+struct __attribute__((packed)) zsa_radio_info {
+    uint8_t  format;        /* ZSA_RADIO_INFO_FORMAT */
+    uint8_t  flags;         /* ZSA_RADIO_INFO_F_* */
+    uint8_t  left_major;    /* left MCUboot header version, slot 0 */
+    uint8_t  left_minor;
+    uint16_t left_revision;
+    uint32_t left_build_num;
+    uint8_t  left_hash[ZSA_RADIO_INFO_HASH_LEN];
+    uint8_t  right_tag[ZSA_RADIO_INFO_HASH_LEN]; /* zero unless RIGHT_VALID */
+};
+
+#define ZSA_RADIO_INFO_LEN 26u
+
+_Static_assert(sizeof(struct zsa_radio_info) == ZSA_RADIO_INFO_LEN,
+               "zsa_radio_info is a wire layout");
 
 /* zsa_left_diag.threads[] order. */
 enum zsa_diag_thread_id {

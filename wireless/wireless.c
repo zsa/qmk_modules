@@ -28,6 +28,7 @@
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
 #    include "oryx.h"
 #    include "oryx_diag.h"
+#    include "oryx_radio_info.h"
 #endif
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
@@ -430,6 +431,7 @@ static inline void ldiag_inc(uint16_t *counter) {
 }
 
 static void diag_left_page_rx(const uint8_t *payload, uint16_t len);
+static void radio_info_rx(const uint8_t *payload, uint16_t len);
 static void diag_sd_errors_discard(void);
 
 /* ---- Power stage (declared early for use in handle_rx_frame) ---- */
@@ -1220,6 +1222,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
 
         case ZSA_MSG_EVT_DIAG:
             diag_left_page_rx(frame->payload, frame->len);
+            break;
+
+        case ZSA_MSG_EVT_RADIO_INFO:
+            radio_info_rx(frame->payload, frame->len);
             break;
 
         case ZSA_MSG_DFU_ENTER:
@@ -3721,6 +3727,197 @@ void oryx_diag_fill(oryx_diag_t *d, uint8_t record, uint8_t page, uint8_t flags)
 }
 #endif // COMMUNITY_MODULE_ORYX_ENABLE
 
+/* ---- Radio firmware (ORYX_CMD_GET_RADIO_INFO) ----
+ *
+ * One ZSA_MSG_QUERY_RADIO_INFO in flight; its EVT_RADIO_INFO answers every
+ * transport that asked. No reply after RADIO_INFO_TRIES waits, or no link:
+ * the left fields stay 0.
+ *
+ * Wired, the right's radio is off and the left's copy of its tag lapses. When
+ * the left's answer has no right tag and the STM32 owns the right bus, the
+ * right's own confirm mailbox (0x54, twis0.c) is asked in READ mode before
+ * answering, with the sequence ignition's confirm.c uses. */
+
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+#    define RADIO_INFO_REPLY_MS LEFT_DIAG_REPLY_MS
+#    define RADIO_INFO_TRIES    LEFT_DIAG_TRIES
+/* Right mailbox: whole exchange, and STATUS poll interval. */
+#    define RADIO_INFO_RIGHT_MS      250u
+#    define RADIO_INFO_RIGHT_POLL_MS 5u
+
+/* Right mailbox registers (twis0.c, MCUboot's twis21 scheme). */
+#    define RIGHT_MBOX_REG_STATUS            0x00u
+#    define RIGHT_MBOX_REG_LINE_IN_DATA      0x01u
+#    define RIGHT_MBOX_REG_LINE_OUT_DATA     0x02u
+#    define RIGHT_MBOX_REG_LEN_OUT           0x03u
+#    define RIGHT_MBOX_STATUS_LINE_OUT_READY 0x02u
+
+_Static_assert(sizeof(oryx_radio_info_t) == ZSA_RADIO_INFO_LEN, "oryx radio info mirrors the UART one");
+_Static_assert(ORYX_RADIO_INFO_HASH_LEN == ZSA_RADIO_INFO_HASH_LEN, "same hash prefix");
+_Static_assert(ORYX_RADIO_INFO_HASH_LEN <= ZSA_CONFIRM_HASH_LEN, "right_tag is a prefix of the mailbox hash");
+_Static_assert(sizeof(struct zsa_confirm_query) == ZSA_CONFIRM_QUERY_LEN && sizeof(struct zsa_confirm_reply) == ZSA_CONFIRM_REPLY_LEN, "mailbox wire layouts");
+_Static_assert(ORYX_RADIO_INFO_F_LEFT_VALID == ZSA_RADIO_INFO_F_LEFT_VALID && ORYX_RADIO_INFO_F_LEFT_CONFIRMED == ZSA_RADIO_INFO_F_LEFT_CONFIRMED && ORYX_RADIO_INFO_F_RIGHT_VALID == ZSA_RADIO_INFO_F_RIGHT_VALID && ORYX_RADIO_INFO_F_RIGHT_CONFIRMED == ZSA_RADIO_INFO_F_RIGHT_CONFIRMED, "same flag bits");
+
+/* Board-provided (voyager_tng.c), like voyager_right_nrf_read_telemetry(). */
+extern bool voyager_right_nrf_mailbox_write(uint8_t reg, const uint8_t *data, uint16_t len);
+extern bool voyager_right_nrf_mailbox_read(uint8_t reg, uint8_t *out, uint16_t len);
+
+static uint8_t  radio_info_waiting; /* bit per oryx_transport_t */
+static uint8_t  radio_info_tries;
+static uint32_t radio_info_sent_ms;
+
+/* Set while the right mailbox is being read; radio_info_held is the answer. */
+static bool              radio_info_right_busy;
+static bool              radio_info_right_written;
+static uint32_t          radio_info_right_ms;
+static uint32_t          radio_info_poll_ms;
+static oryx_radio_info_t radio_info_held;
+
+static void radio_info_answer(const oryx_radio_info_t *info) {
+    uint8_t waiting       = radio_info_waiting;
+    radio_info_waiting    = 0;
+    radio_info_right_busy = false;
+    for (uint8_t t = ORYX_TRANSPORT_USB; t <= ORYX_TRANSPORT_BLE; t++) {
+        if (waiting & (1u << t)) {
+            oryx_radio_info_send((oryx_transport_t)t, info);
+        }
+    }
+}
+
+/* The left part is settled: answer, or read the right mailbox first. */
+static void radio_info_left_done(const oryx_radio_info_t *info) {
+    if ((info->flags & ORYX_RADIO_INFO_F_RIGHT_VALID) || !zsa_stm32_owns_right_bus()) {
+        radio_info_answer(info);
+        return;
+    }
+    radio_info_held          = *info;
+    radio_info_right_busy    = true;
+    radio_info_right_written = false;
+    radio_info_right_ms      = timer_read32();
+    radio_info_poll_ms       = radio_info_right_ms - RADIO_INFO_RIGHT_POLL_MS;
+}
+
+/* One mailbox step: write a READ query, then poll STATUS for LINE_OUT_READY
+ * and read LEN_OUT and LINE_OUT_DATA. Failed transfers are retried until
+ * RADIO_INFO_RIGHT_MS. True once finished, with or without a right tag. */
+static bool radio_info_right_step(void) {
+    if (!zsa_stm32_owns_right_bus() || timer_elapsed32(radio_info_right_ms) >= RADIO_INFO_RIGHT_MS) {
+        return true;
+    }
+    if (timer_elapsed32(radio_info_poll_ms) < RADIO_INFO_RIGHT_POLL_MS) {
+        return false;
+    }
+    radio_info_poll_ms = timer_read32();
+
+    if (!radio_info_right_written) {
+        /* READ ignores the hash; zero never matches a running image. */
+        struct zsa_confirm_query query = {.mode = ZSA_CONFIRM_MODE_READ};
+        radio_info_right_written       = voyager_right_nrf_mailbox_write(RIGHT_MBOX_REG_LINE_IN_DATA, (const uint8_t *)&query, sizeof(query));
+        return false;
+    }
+
+    uint8_t status;
+    if (!voyager_right_nrf_mailbox_read(RIGHT_MBOX_REG_STATUS, &status, 1) || !(status & RIGHT_MBOX_STATUS_LINE_OUT_READY)) {
+        return false;
+    }
+    uint8_t len_out;
+    if (!voyager_right_nrf_mailbox_read(RIGHT_MBOX_REG_LEN_OUT, &len_out, 1)) {
+        return false;
+    }
+    if (len_out != ZSA_CONFIRM_REPLY_LEN) {
+        return true;
+    }
+    struct zsa_confirm_reply reply;
+    if (!voyager_right_nrf_mailbox_read(RIGHT_MBOX_REG_LINE_OUT_DATA, (uint8_t *)&reply, sizeof(reply))) {
+        return false;
+    }
+
+    /* READ answers ALREADY (confirmed) or RUNNING (not); anything else
+     * carries no usable state. */
+    if (reply.status == ZSA_CONFIRM_ALREADY || reply.status == ZSA_CONFIRM_RUNNING) {
+        memcpy(radio_info_held.right_tag, reply.hash, sizeof(radio_info_held.right_tag));
+        radio_info_held.flags &= (uint8_t)~ORYX_RADIO_INFO_F_RIGHT_CONFIRMED;
+        radio_info_held.flags |= ORYX_RADIO_INFO_F_RIGHT_VALID;
+        if (reply.status == ZSA_CONFIRM_ALREADY) {
+            radio_info_held.flags |= ORYX_RADIO_INFO_F_RIGHT_CONFIRMED;
+        }
+    }
+    return true;
+}
+
+static void radio_info_query_send(void) {
+    send_command(ZSA_MSG_QUERY_RADIO_INFO);
+    radio_info_sent_ms = timer_read32();
+    radio_info_tries++;
+}
+
+/* Strong override of oryx.c's weak hook. */
+void oryx_radio_info_request(oryx_transport_t from) {
+    bool idle = radio_info_waiting == 0;
+    radio_info_waiting |= (uint8_t)(1u << from);
+    if (!idle) {
+        return;
+    }
+    if (!link_ready) {
+        oryx_radio_info_t info = {.format = ORYX_RADIO_INFO_FORMAT};
+        radio_info_left_done(&info);
+        return;
+    }
+    radio_info_tries = 0;
+    radio_info_query_send();
+}
+
+static void radio_info_rx(const uint8_t *payload, uint16_t len) {
+    struct zsa_radio_info r;
+    if (!radio_info_waiting || radio_info_right_busy || len < sizeof(r)) {
+        return;
+    }
+    memcpy(&r, payload, sizeof(r));
+
+    oryx_radio_info_t info = {.format = ORYX_RADIO_INFO_FORMAT};
+    if (r.format == ZSA_RADIO_INFO_FORMAT) {
+        info.flags          = r.flags;
+        info.left_major     = r.left_major;
+        info.left_minor     = r.left_minor;
+        info.left_revision  = r.left_revision;
+        info.left_build_num = r.left_build_num;
+        memcpy(info.left_hash, r.left_hash, sizeof(info.left_hash));
+        if (r.flags & ZSA_RADIO_INFO_F_RIGHT_VALID) {
+            memcpy(info.right_tag, r.right_tag, sizeof(info.right_tag));
+        }
+    }
+    radio_info_left_done(&info);
+}
+
+static void radio_info_task(void) {
+    if (!radio_info_waiting) {
+        return;
+    }
+    if (radio_info_right_busy) {
+        if (radio_info_right_step()) {
+            radio_info_answer(&radio_info_held);
+        }
+        return;
+    }
+    if (timer_elapsed32(radio_info_sent_ms) < RADIO_INFO_REPLY_MS) {
+        return;
+    }
+    if (link_ready && radio_info_tries < RADIO_INFO_TRIES) {
+        radio_info_query_send();
+        return;
+    }
+    oryx_radio_info_t info = {.format = ORYX_RADIO_INFO_FORMAT};
+    radio_info_left_done(&info);
+}
+#else
+static void radio_info_rx(const uint8_t *payload, uint16_t len) {
+    (void)payload;
+    (void)len;
+}
+
+static inline void radio_info_task(void) {}
+#endif // COMMUNITY_MODULE_ORYX_ENABLE
+
 /* ---- Diagnostic view ---- */
 
 const uint8_t zsa_diag_keys[ZSA_DIAG_KEY_COUNT][2] = ZSA_DIAG_KEYS;
@@ -4352,6 +4549,9 @@ void bluetooth_task(void) {
 
     /* Diagnostic view, UART error counts, left record fetch, CCM snapshot */
     diag_task();
+
+    /* Oryx radio info: retry the left query, or answer without it */
+    radio_info_task();
 
     /* Unblank if the nRF stopped refreshing the update state */
     dfu_state_task();
