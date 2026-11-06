@@ -49,7 +49,7 @@ confident "no".
 #define ORYX_TLM_VERSION 1
 
 /* Defined bytes after the `len` byte itself. Grows as fields are appended. */
-#define ORYX_TLM_LEN 27
+#define ORYX_TLM_LEN 28
 
 /* Battery level we could not read. Never 0: that is a flat battery. */
 #define ORYX_TLM_LEVEL_UNKNOWN 0xFF
@@ -102,6 +102,12 @@ confident "no".
 #define ORYX_TLM_TRRS_PLUGGED   1
 #define ORYX_TLM_TRRS_UNKNOWN   0xFF
 
+/* The left nRF's ESB link to the right half. */
+#define ORYX_TLM_ESB_ABSENT   0
+#define ORYX_TLM_ESB_LINKED   1
+#define ORYX_TLM_ESB_MISMATCH 2
+#define ORYX_TLM_ESB_UNKNOWN  0xFF
+
 /* Fills bytes 1..31 of the 32-byte response report, byte 0 being
  * ORYX_EVT_TELEMETRY. */
 typedef struct __attribute__((packed)) {
@@ -135,12 +141,14 @@ typedef struct __attribute__((packed)) {
      * unplugged, or ORYX_TLM_NAV_UNKNOWN. */
     uint8_t nav_bus;
     uint8_t trrs;                 /* ORYX_TLM_TRRS_* */
-    uint8_t reserved[2];          /* zero; room for two more one-byte fields */
+    uint8_t esb_link;             /* ORYX_TLM_ESB_* */
+    uint8_t reserved[1];          /* zero; room for one more one-byte field */
 } oryx_telemetry_t;
 
 _Static_assert(sizeof(oryx_telemetry_t) == RAW_EPSIZE - 1, "telemetry payload must fill the report");
 _Static_assert(offsetof(oryx_telemetry_t, nav_bus) == 27, "nav_bus offset");
-_Static_assert(offsetof(oryx_telemetry_t, trrs) == 28 && ORYX_TLM_LEN == offsetof(oryx_telemetry_t, trrs) - offsetof(oryx_telemetry_t, len), "trrs is the last defined byte");
+_Static_assert(offsetof(oryx_telemetry_t, trrs) == 28, "trrs offset");
+_Static_assert(offsetof(oryx_telemetry_t, esb_link) == 29 && ORYX_TLM_LEN == offsetof(oryx_telemetry_t, esb_link) - offsetof(oryx_telemetry_t, len), "esb_link is the last defined byte");
 
 /* Everything unknown, ready for whoever can actually answer. Not memset(0):
  * zero is a real answer for most of these fields. */
@@ -158,6 +166,7 @@ static inline void oryx_telemetry_reset(oryx_telemetry_t *tlm) {
     tlm->nav_right            = ORYX_TLM_NAV_UNKNOWN;
     tlm->nav_bus              = ORYX_TLM_NAV_UNKNOWN;
     tlm->trrs                 = ORYX_TLM_TRRS_UNKNOWN;
+    tlm->esb_link             = ORYX_TLM_ESB_UNKNOWN;
     tlm->charge_state         = ORYX_TLM_CHG_UNKNOWN;
     tlm->ble_addr_type        = ORYX_TLM_BLE_ADDR_UNKNOWN;
     tlm->ble_slot             = ORYX_TLM_BLE_SLOT_UNKNOWN;

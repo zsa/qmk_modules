@@ -1562,6 +1562,28 @@ static void telemetry_trrs(oryx_telemetry_t *tlm) {
     tlm->trrs = zsa_trrs_plugged() ? ORYX_TLM_TRRS_PLUGGED : ORYX_TLM_TRRS_UNPLUGGED;
 }
 
+/* EVT_LINK_STATE while fresh. The left nRF holds the heartbeat back while the
+ * STM32 sleeps, so a stale one stays unknown. */
+static void telemetry_esb_link(oryx_telemetry_t *tlm) {
+    if (!link_ready || !link_state_seen || timer_elapsed32(last_link_state_ms) >= ZSA_LINK_STATE_STALE_MS) {
+        return;
+    }
+
+    switch (nrf_link_state) {
+        case ZSA_LINK_STATE_ABSENT:
+            tlm->esb_link = ORYX_TLM_ESB_ABSENT;
+            break;
+        case ZSA_LINK_STATE_OK:
+            tlm->esb_link = ORYX_TLM_ESB_LINKED;
+            break;
+        case ZSA_LINK_STATE_MISMATCH:
+            tlm->esb_link = ORYX_TLM_ESB_MISMATCH;
+            break;
+        default:
+            break;
+    }
+}
+
 /* What the charging policy decided and what came of it. Reports what was
  * actually commanded, not what would be commanded now: until the link is up
  * and something has gone out, the answer is that we do not know. */
@@ -1610,6 +1632,7 @@ void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
     telemetry_battery(tlm);
     telemetry_nav(tlm);
     telemetry_trrs(tlm);
+    telemetry_esb_link(tlm);
     telemetry_charging(tlm);
     telemetry_ble_identity(tlm);
 }
