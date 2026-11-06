@@ -268,6 +268,11 @@
 #    define ZSA_BLE_MENU_IDLE_MS 60000
 #endif
 
+/* Delay before the open menu closes once a bank connects; 0 closes at once. */
+#ifndef ZSA_BLE_MENU_CONNECT_CLOSE_MS
+#    define ZSA_BLE_MENU_CONNECT_CLOSE_MS 1000
+#endif
+
 /* Blink period of the connecting and pairing banks. */
 #ifndef ZSA_BLE_MENU_BLINK_MS
 #    define ZSA_BLE_MENU_BLINK_MS 1000

@@ -112,6 +112,7 @@ static inline void watchdog_kick(void) {}
 #endif
 
 static void ble_menu_close(void);
+static void ble_menu_close_soon(void);
 
 /* ---- Link state ---- */
 
@@ -1080,9 +1081,16 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
 
         case ZSA_MSG_EVT_BLE_BANKS:
             if (frame->len >= sizeof(struct zsa_ble_banks)) {
+                const struct zsa_ble_banks prev = nrf_banks;
+                const bool prev_fresh           = banks_fresh();
                 memcpy(&nrf_banks, frame->payload, sizeof(nrf_banks));
                 last_banks_ms = timer_read32();
                 banks_seen    = true;
+                /* A bank becoming connected closes the menu after a delay. */
+                if (prev_fresh && nrf_banks.state == ZSA_BLE_BANK_STATE_CONNECTED &&
+                    (prev.state != ZSA_BLE_BANK_STATE_CONNECTED || prev.active != nrf_banks.active)) {
+                    ble_menu_close_soon();
+                }
             }
             break;
 
@@ -3247,6 +3255,8 @@ static uint8_t  ble_menu_forgot; /* held banks whose forget has fired */
 static uint32_t ble_menu_active_ms; /* last open, press or held bank key */
 static uint32_t ble_menu_press_ms[ZSA_BLE_BANK_COUNT];
 static keypos_t ble_menu_hold_key[ZSA_BLE_BANK_COUNT]; /* key that started each hold */
+static bool     ble_menu_close_pending; /* close armed by a bank connecting */
+static uint32_t ble_menu_close_ms;      /* when the close was armed */
 /* Keys whose press the menu swallowed; their release is swallowed too. */
 static matrix_row_t ble_menu_swallowed[MATRIX_ROWS];
 #ifdef RGB_MATRIX_ENABLE
@@ -3294,10 +3304,11 @@ static void ble_menu_open(void) {
     if (ble_menu_is_open) {
         return;
     }
-    ble_menu_is_open   = true;
-    ble_menu_held      = 0;
-    ble_menu_forgot    = 0;
-    ble_menu_active_ms = timer_read32();
+    ble_menu_is_open       = true;
+    ble_menu_held          = 0;
+    ble_menu_forgot        = 0;
+    ble_menu_close_pending = false;
+    ble_menu_active_ms     = timer_read32();
 #ifdef RGB_MATRIX_ENABLE
     ble_menu_rgb_on     = rgb_on_after_overlay();
     ble_menu_mode_moved = false;
@@ -3309,9 +3320,10 @@ static void ble_menu_close(void) {
     if (!ble_menu_is_open) {
         return;
     }
-    ble_menu_is_open = false;
-    ble_menu_held    = 0;
-    ble_menu_forgot  = 0;
+    ble_menu_is_open       = false;
+    ble_menu_held          = 0;
+    ble_menu_forgot        = 0;
+    ble_menu_close_pending = false;
     /* A bank left pairing stops advertising. */
     for (uint8_t bank = 0; bank < ZSA_BLE_BANK_COUNT; bank++) {
         if (zsa_wireless_ble_bank_view(bank) == ZSA_BLE_BANK_VIEW_PAIRING) {
@@ -3367,15 +3379,29 @@ static void ble_menu_tap(uint8_t bank) {
     }
 }
 
-/* Closes the menu when a USB host appears or after ZSA_BLE_MENU_IDLE_MS
- * without a press or a held bank key. Fires a bank's forget once its hold has
- * lasted ZSA_BLE_FORGET_HOLD_MS. Driven from bluetooth_task() because key
- * events only arrive on edges. */
+/* Arms a close of the open menu ZSA_BLE_MENU_CONNECT_CLOSE_MS from now. */
+static void ble_menu_close_soon(void) {
+    if (!ble_menu_is_open) {
+        return;
+    }
+    ble_menu_close_pending = true;
+    ble_menu_close_ms      = timer_read32();
+}
+
+/* Closes the menu when a USB host appears, ZSA_BLE_MENU_CONNECT_CLOSE_MS after
+ * a bank connects, or after ZSA_BLE_MENU_IDLE_MS without a press or a held
+ * bank key. Fires a bank's forget once its hold has lasted
+ * ZSA_BLE_FORGET_HOLD_MS. Driven from bluetooth_task() because key events only
+ * arrive on edges. */
 static void ble_menu_task(void) {
     if (!ble_menu_is_open) {
         return;
     }
     if (usb_host_present()) {
+        ble_menu_close();
+        return;
+    }
+    if (ble_menu_close_pending && timer_elapsed32(ble_menu_close_ms) >= ZSA_BLE_MENU_CONNECT_CLOSE_MS) {
         ble_menu_close();
         return;
     }
@@ -3439,6 +3465,7 @@ static bool ble_menu_filter(keyrecord_t *record) {
     ble_menu_swallowed[key.row] |= pos;
     ble_menu_active_ms = timer_read32();
     if (bit) {
+        ble_menu_close_pending = false;
         if (!(ble_menu_held & bit)) {
             ble_menu_held |= bit;
             ble_menu_forgot &= (uint8_t)~bit;
