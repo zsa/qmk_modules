@@ -1557,6 +1557,11 @@ static void telemetry_nav(oryx_telemetry_t *tlm) {
     tlm->nav_bus   = nav.bus;
 }
 
+/* Last conclusive expander probe, as matrix.c keeps it. */
+static void telemetry_trrs(oryx_telemetry_t *tlm) {
+    tlm->trrs = zsa_trrs_plugged() ? ORYX_TLM_TRRS_PLUGGED : ORYX_TLM_TRRS_UNPLUGGED;
+}
+
 /* What the charging policy decided and what came of it. Reports what was
  * actually commanded, not what would be commanded now: until the link is up
  * and something has gone out, the answer is that we do not know. */
@@ -1604,6 +1609,7 @@ void oryx_telemetry_fill(oryx_telemetry_t *tlm) {
     oryx_telemetry_reset(tlm);
     telemetry_battery(tlm);
     telemetry_nav(tlm);
+    telemetry_trrs(tlm);
     telemetry_charging(tlm);
     telemetry_ble_identity(tlm);
 }
