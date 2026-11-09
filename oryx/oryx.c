@@ -10,6 +10,7 @@
 #include "oryx_scan_diag.h"
 #include "oryx_diag.h"
 #include "oryx_radio_info.h"
+#include "oryx_host_slots.h"
 #include "action_util.h"
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
 #    include "navigator_trackpad_common.h"
@@ -22,6 +23,7 @@
 ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 1);
 
 _Static_assert(ORYX_CMD_GET_RADIO_INFO == 0x12 && ORYX_EVT_RADIO_INFO == 0x12, "radio info ids are a wire contract");
+_Static_assert(ORYX_CMD_GET_HOST_SLOTS == 0x13 && ORYX_EVT_HOST_SLOTS == 0x13, "host slot ids are a wire contract");
 
 uint8_t current_layer = 0;
 
@@ -190,6 +192,22 @@ __attribute__((weak)) void oryx_radio_info_request(oryx_transport_t from) {
     oryx_radio_info_send(from, &info);
 }
 
+void oryx_host_slot_send(oryx_transport_t to, const oryx_host_slot_t *info) {
+    uint8_t event[RAW_EPSIZE] = {0};
+    event[0] = ORYX_EVT_HOST_SLOTS;
+    /* Binary payload, no ORYX_STOP_BIT. */
+    memcpy(&event[1], info, sizeof(*info));
+    oryx_transport_t prev = send_transport;
+    send_transport        = to;
+    raw_hid_send_oryx(event, RAW_EPSIZE);
+    send_transport = prev;
+}
+
+__attribute__((weak)) void oryx_host_slots_request(oryx_transport_t from, uint8_t slot) {
+    oryx_host_slot_t info = {.slot = slot, .addr_type = ORYX_HOST_SLOT_ADDR_UNKNOWN};
+    oryx_host_slot_send(from, &info);
+}
+
 static void oryx_handle_command(uint8_t *data, uint8_t length) {
     uint8_t  command = data[0];
     uint8_t *param   = &data[1];
@@ -276,6 +294,10 @@ static void oryx_handle_command(uint8_t *data, uint8_t length) {
 
         case ORYX_CMD_GET_RADIO_INFO:
             oryx_radio_info_request(send_transport);
+            break;
+
+        case ORYX_CMD_GET_HOST_SLOTS:
+            oryx_host_slots_request(send_transport, param[0]);
             break;
 
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)

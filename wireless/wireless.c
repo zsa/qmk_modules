@@ -29,6 +29,7 @@
 #    include "oryx.h"
 #    include "oryx_diag.h"
 #    include "oryx_radio_info.h"
+#    include "oryx_host_slots.h"
 #endif
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
@@ -435,6 +436,7 @@ static inline void ldiag_inc(uint16_t *counter) {
 
 static void diag_left_page_rx(const uint8_t *payload, uint16_t len);
 static void radio_info_rx(const uint8_t *payload, uint16_t len);
+static void host_slots_rx(const uint8_t *payload, uint16_t len);
 static void diag_sd_errors_discard(void);
 
 /* ---- Power stage (declared early for use in handle_rx_frame) ---- */
@@ -1236,6 +1238,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
 
         case ZSA_MSG_EVT_RADIO_INFO:
             radio_info_rx(frame->payload, frame->len);
+            break;
+
+        case ZSA_MSG_EVT_HOST_SLOTS:
+            host_slots_rx(frame->payload, frame->len);
             break;
 
         case ZSA_MSG_DFU_ENTER:
@@ -3982,6 +3988,130 @@ static void radio_info_rx(const uint8_t *payload, uint16_t len) {
 static inline void radio_info_task(void) {}
 #endif // COMMUNITY_MODULE_ORYX_ENABLE
 
+/* ---- Bluetooth host slots (ORYX_CMD_GET_HOST_SLOTS) ----
+ *
+ * The left's EVT_HOST_SLOTS is cached; a request answers from a cache younger
+ * than HOST_SLOTS_FRESH_MS, else sends one ZSA_MSG_QUERY_HOST_SLOTS and
+ * answers every slot asked for when it replies. No reply after
+ * HOST_SLOTS_TRIES waits, or no link: slot_count 0. */
+
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+#    define HOST_SLOTS_REPLY_MS LEFT_DIAG_REPLY_MS
+#    define HOST_SLOTS_TRIES    LEFT_DIAG_TRIES
+#    define HOST_SLOTS_FRESH_MS 1000u
+
+_Static_assert(ORYX_HOST_SLOT_F_PAIRED == ZSA_HOST_SLOT_F_PAIRED && ORYX_HOST_SLOT_F_CONNECTED == ZSA_HOST_SLOT_F_CONNECTED, "same flag bits");
+_Static_assert(ORYX_HOST_SLOT_ADDR_UNKNOWN == ZSA_BLE_ADDR_TYPE_UNKNOWN, "same unknown address type");
+_Static_assert(sizeof(((oryx_host_slot_t *)0)->addr) == sizeof(((struct zsa_host_slot_addr *)0)->addr), "same address length");
+
+static struct zsa_host_slots host_slots_cache;
+static bool                  host_slots_cached;
+static uint32_t              host_slots_cached_ms;
+
+/* Slots asked for, a bit per slot, per oryx_transport_t. */
+static uint8_t  host_slots_waiting[ORYX_TRANSPORT_BLE + 1];
+static uint8_t  host_slots_tries;
+static uint32_t host_slots_sent_ms;
+
+static bool host_slots_any_waiting(void) {
+    for (uint8_t t = ORYX_TRANSPORT_USB; t <= ORYX_TRANSPORT_BLE; t++) {
+        if (host_slots_waiting[t]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void host_slot_answer_one(oryx_transport_t to, uint8_t slot, bool known) {
+    oryx_host_slot_t info = {.slot = slot, .addr_type = ORYX_HOST_SLOT_ADDR_UNKNOWN};
+    if (known) {
+        info.slot_count = host_slots_cache.slot_count;
+        if (slot < host_slots_cache.slot_count && slot < ZSA_HOST_SLOTS_MAX) {
+            const struct zsa_host_slot_addr *e = &host_slots_cache.slot[slot];
+            info.flags                         = e->flags;
+            info.addr_type                     = e->addr_type;
+            memcpy(info.addr, e->addr, sizeof(info.addr));
+        }
+    }
+    oryx_host_slot_send(to, &info);
+}
+
+/* Answers every waiting slot, from the cache when known. */
+static void host_slots_answer(bool known) {
+    for (uint8_t t = ORYX_TRANSPORT_USB; t <= ORYX_TRANSPORT_BLE; t++) {
+        uint8_t waiting       = host_slots_waiting[t];
+        host_slots_waiting[t] = 0;
+        for (uint8_t slot = 0; slot < 8; slot++) {
+            if (waiting & (1u << slot)) {
+                host_slot_answer_one((oryx_transport_t)t, slot, known);
+            }
+        }
+    }
+}
+
+static void host_slots_query_send(void) {
+    send_command(ZSA_MSG_QUERY_HOST_SLOTS);
+    host_slots_sent_ms = timer_read32();
+    host_slots_tries++;
+}
+
+/* Strong override of oryx.c's weak hook. */
+void oryx_host_slots_request(oryx_transport_t from, uint8_t slot) {
+    if (host_slots_cached && timer_elapsed32(host_slots_cached_ms) < HOST_SLOTS_FRESH_MS) {
+        host_slot_answer_one(from, slot, true);
+        return;
+    }
+    if (slot >= 8) {
+        host_slot_answer_one(from, slot, false);
+        return;
+    }
+    bool idle = !host_slots_any_waiting();
+    host_slots_waiting[from] |= (uint8_t)(1u << slot);
+    if (!idle) {
+        return;
+    }
+    if (!link_ready) {
+        host_slots_answer(false);
+        return;
+    }
+    host_slots_tries = 0;
+    host_slots_query_send();
+}
+
+static void host_slots_rx(const uint8_t *payload, uint16_t len) {
+    if (len < sizeof(host_slots_cache)) {
+        return;
+    }
+    memcpy(&host_slots_cache, payload, sizeof(host_slots_cache));
+    host_slots_cached    = true;
+    host_slots_cached_ms = timer_read32();
+    if (host_slots_any_waiting()) {
+        host_slots_answer(true);
+    }
+}
+
+static void host_slots_task(void) {
+    if (!host_slots_any_waiting()) {
+        return;
+    }
+    if (timer_elapsed32(host_slots_sent_ms) < HOST_SLOTS_REPLY_MS) {
+        return;
+    }
+    if (link_ready && host_slots_tries < HOST_SLOTS_TRIES) {
+        host_slots_query_send();
+        return;
+    }
+    host_slots_answer(false);
+}
+#else
+static void host_slots_rx(const uint8_t *payload, uint16_t len) {
+    (void)payload;
+    (void)len;
+}
+
+static inline void host_slots_task(void) {}
+#endif // COMMUNITY_MODULE_ORYX_ENABLE
+
 /* ---- Diagnostic view ---- */
 
 const uint8_t zsa_diag_keys[ZSA_DIAG_KEY_COUNT][2] = ZSA_DIAG_KEYS;
@@ -4746,6 +4876,9 @@ void bluetooth_task(void) {
 
     /* Oryx radio info: retry the left query, or answer without it */
     radio_info_task();
+
+    /* Oryx host slots: retry the left query, or answer without it */
+    host_slots_task();
 
     /* Unblank if the nRF stopped refreshing the update state */
     dfu_state_task();

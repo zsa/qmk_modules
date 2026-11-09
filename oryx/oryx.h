@@ -71,6 +71,11 @@ enum Oryx_Command_Code {
      * a short wait for the left nRF. Unpaired-safe, like the other
      * queries. */
     ORYX_CMD_GET_RADIO_INFO,
+    /* Ask for one Bluetooth host slot, param[0] the slot index
+     * (oryx_host_slots.h). Answered with ORYX_EVT_HOST_SLOTS carrying an
+     * oryx_host_slot_t, possibly after a short wait for the left nRF.
+     * Unpaired-safe, like the other queries. */
+    ORYX_CMD_GET_HOST_SLOTS,
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
     /* Test builds only. Trackpad power-measurement action, param[0]: 0 status,
      * 1 force sleep, 2 cancel force sleep, 3 pause pad access, 4 resume pad
@@ -117,6 +122,9 @@ enum Oryx_Event_Code {
     /* Answer to ORYX_CMD_GET_RADIO_INFO: an oryx_radio_info_t in bytes 1..26,
      * zero after. Binary, so it carries no ORYX_STOP_BIT. */
     ORYX_EVT_RADIO_INFO,
+    /* Answer to ORYX_CMD_GET_HOST_SLOTS: an oryx_host_slot_t in bytes 1..10,
+     * zero after. Binary, so it carries no ORYX_STOP_BIT. */
+    ORYX_EVT_HOST_SLOTS,
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
     /* Answer to ORYX_CMD_DEBUG_PAD_POWER: byte 1 action, byte 2 write status
      * (0 OK, CGEN6_* error bits, 0x80 pad not up on its real address, 0x81

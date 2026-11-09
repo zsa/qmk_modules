@@ -68,6 +68,11 @@ enum zsa_msg_type {
                                        * EVT_RADIO_INFO. Sent on demand only.
                                        * Not in ignition's copy of this
                                        * header. */
+    ZSA_MSG_QUERY_HOST_SLOTS = 0x15,  /* 0 B: the board's own address and
+                                       * state for every host slot. Answered
+                                       * with one EVT_HOST_SLOTS. Sent on
+                                       * demand only. Not in ignition's copy of
+                                       * this header. */
 
     /* STM32 -> nRF: commands (0x20-0x2F) */
     ZSA_MSG_CMD_HIBERNATE    = 0x20,
@@ -305,6 +310,10 @@ enum zsa_msg_type {
     ZSA_MSG_EVT_RADIO_INFO   = 0xC5,  /* ZSA_RADIO_INFO_LEN B: struct
                                        * zsa_radio_info — the answer to
                                        * QUERY_RADIO_INFO. Not known to
+                                       * ignition. */
+    ZSA_MSG_EVT_HOST_SLOTS   = 0xC6,  /* ZSA_HOST_SLOTS_LEN B: struct
+                                       * zsa_host_slots — the answer to
+                                       * QUERY_HOST_SLOTS. Not known to
                                        * ignition. */
 };
 
@@ -1034,6 +1043,35 @@ struct __attribute__((packed)) zsa_radio_info {
 
 _Static_assert(sizeof(struct zsa_radio_info) == ZSA_RADIO_INFO_LEN,
                "zsa_radio_info is a wire layout");
+
+/* ---- Host slots (QUERY_HOST_SLOTS / EVT_HOST_SLOTS) ---- */
+
+#define ZSA_HOST_SLOTS_MAX 5u
+
+/* zsa_host_slot_addr.flags */
+#define ZSA_HOST_SLOT_F_PAIRED    0x01u /* the slot holds a host */
+#define ZSA_HOST_SLOT_F_CONNECTED 0x02u /* the slot's host is connected now */
+
+/* One host slot: the board's own address on that slot's identity. */
+struct __attribute__((packed)) zsa_host_slot_addr {
+    uint8_t flags;     /* ZSA_HOST_SLOT_F_* */
+    uint8_t addr_type; /* 0 public, 1 random (bt_addr_le_t.type);
+                        * ZSA_BLE_ADDR_TYPE_UNKNOWN when unknown */
+    uint8_t addr[6];   /* bt_addr_t.val order, least significant byte first */
+};
+
+/* ZSA_MSG_EVT_HOST_SLOTS (41 bytes). Entries from slot_count on are zero. */
+struct __attribute__((packed)) zsa_host_slots {
+    uint8_t slot_count; /* host slots the board keeps */
+    struct zsa_host_slot_addr slot[ZSA_HOST_SLOTS_MAX];
+};
+
+#define ZSA_HOST_SLOTS_LEN 41u
+
+_Static_assert(sizeof(struct zsa_host_slot_addr) == 8u,
+               "zsa_host_slot_addr is a wire layout");
+_Static_assert(sizeof(struct zsa_host_slots) == ZSA_HOST_SLOTS_LEN,
+               "zsa_host_slots is a wire layout");
 
 /* zsa_left_diag.threads[] order. */
 enum zsa_diag_thread_id {
