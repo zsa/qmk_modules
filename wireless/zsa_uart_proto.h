@@ -317,6 +317,40 @@ enum zsa_msg_type {
                                        * ignition. */
 };
 
+/* ---- Freeze record / event log read-back ---- */
+
+#ifndef __packed
+#define __packed __attribute__((packed))
+#endif
+
+/* Blob read-back (freeze record, live event log), 24-byte chunks. */
+#define ZSA_MSG_QUERY_BLOB      0x16  /* STM32 -> nRF: struct zsa_blob_query */
+#define ZSA_MSG_CMD_FREEZE_SEEN 0x3A  /* STM32 -> nRF: no payload; clears the record's unread flag (RAM + flash) */
+#define ZSA_MSG_EVT_BLOB        0xC7  /* nRF -> STM32: struct zsa_blob_reply */
+
+#define ZSA_BLOB_FREEZE 0  /* last stored freeze/fatal record */
+#define ZSA_BLOB_EVENTS 1  /* live event history */
+
+#define ZSA_BLOB_CHUNK 24
+
+#define ZSA_BLOB_OK        0
+#define ZSA_BLOB_NONE      1  /* no such blob (no record stored) */
+#define ZSA_BLOB_BAD_OFFSET 2
+
+struct zsa_blob_query {
+    uint8_t  which;
+    uint16_t offset;
+} __packed;
+
+struct zsa_blob_reply {
+    uint8_t  which;
+    uint8_t  status;
+    uint16_t total_len;
+    uint16_t offset;
+    uint8_t  len;                   /* 0..ZSA_BLOB_CHUNK */
+    uint8_t  data[ZSA_BLOB_CHUNK];  /* only len bytes are sent */
+} __packed;
+
 /* ---- Payload structures ---- */
 
 /* ZSA_MSG_ORYX_TO_HOST / ZSA_MSG_EVT_ORYX_FROM_HOST: one Oryx raw-HID report. */

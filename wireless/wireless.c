@@ -30,6 +30,7 @@
 #    include "oryx_diag.h"
 #    include "oryx_radio_info.h"
 #    include "oryx_host_slots.h"
+#    include "oryx_blob.h"
 #endif
 #ifdef RGB_MATRIX_ENABLE
 #    include "rgb_matrix.h"
@@ -437,6 +438,7 @@ static inline void ldiag_inc(uint16_t *counter) {
 static void diag_left_page_rx(const uint8_t *payload, uint16_t len);
 static void radio_info_rx(const uint8_t *payload, uint16_t len);
 static void host_slots_rx(const uint8_t *payload, uint16_t len);
+static void blob_rx(const uint8_t *payload, uint16_t len);
 static void diag_sd_errors_discard(void);
 
 /* ---- Power stage (declared early for use in handle_rx_frame) ---- */
@@ -1242,6 +1244,10 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
 
         case ZSA_MSG_EVT_HOST_SLOTS:
             host_slots_rx(frame->payload, frame->len);
+            break;
+
+        case ZSA_MSG_EVT_BLOB:
+            blob_rx(frame->payload, frame->len);
             break;
 
         case ZSA_MSG_DFU_ENTER:
@@ -4112,6 +4118,116 @@ static void host_slots_rx(const uint8_t *payload, uint16_t len) {
 static inline void host_slots_task(void) {}
 #endif // COMMUNITY_MODULE_ORYX_ENABLE
 
+/* ---- Left nRF blobs (ORYX_CMD_GET_BLOB, ORYX_CMD_FREEZE_SEEN) ----
+ *
+ * Pass-through, nothing cached: one ZSA_MSG_QUERY_BLOB in flight, and its
+ * EVT_BLOB answers the transport that asked. No reply after BLOB_TRIES waits:
+ * ORYX_BLOB_TIMEOUT. No link: ORYX_BLOB_NO_LINK. A request while one is in
+ * flight: ORYX_BLOB_BUSY. */
+
+_Static_assert(sizeof(struct zsa_blob_query) == 3, "zsa_blob_query is a wire layout");
+_Static_assert(sizeof(struct zsa_blob_reply) == 7 + ZSA_BLOB_CHUNK, "zsa_blob_reply is a wire layout");
+
+#ifdef COMMUNITY_MODULE_ORYX_ENABLE
+#    define BLOB_REPLY_MS LEFT_DIAG_REPLY_MS
+#    define BLOB_TRIES    LEFT_DIAG_TRIES
+/* Reply bytes before data. */
+#    define BLOB_REPLY_HEAD (sizeof(struct zsa_blob_reply) - ZSA_BLOB_CHUNK)
+
+_Static_assert(ORYX_BLOB_CHUNK == ZSA_BLOB_CHUNK, "oryx chunks carry whole UART chunks");
+_Static_assert(ORYX_BLOB_FREEZE == ZSA_BLOB_FREEZE && ORYX_BLOB_EVENTS == ZSA_BLOB_EVENTS, "same blob ids");
+_Static_assert(ORYX_BLOB_OK == ZSA_BLOB_OK && ORYX_BLOB_NONE == ZSA_BLOB_NONE && ORYX_BLOB_BAD_OFFSET == ZSA_BLOB_BAD_OFFSET, "same status codes");
+
+static bool             blob_waiting;
+static oryx_transport_t blob_to;
+static uint8_t          blob_which;
+static uint16_t         blob_offset;
+static uint8_t          blob_tries;
+static uint32_t         blob_sent_ms;
+
+static void blob_answer_status(oryx_transport_t to, uint8_t which, uint16_t offset, uint8_t status) {
+    oryx_blob_t blob = {.which = which, .status = status, .offset = offset};
+    oryx_blob_send(to, &blob);
+}
+
+static void blob_query_send(void) {
+    struct zsa_blob_query q = {.which = blob_which, .offset = blob_offset};
+    zsa_wireless_send_frame(ZSA_MSG_QUERY_BLOB, (const uint8_t *)&q, sizeof(q));
+    blob_sent_ms = timer_read32();
+    blob_tries++;
+}
+
+/* Strong override of oryx.c's weak hook. */
+void oryx_blob_request(oryx_transport_t from, uint8_t which, uint16_t offset) {
+    if (blob_waiting) {
+        blob_answer_status(from, which, offset, ORYX_BLOB_BUSY);
+        return;
+    }
+    if (!link_ready) {
+        blob_answer_status(from, which, offset, ORYX_BLOB_NO_LINK);
+        return;
+    }
+    blob_waiting = true;
+    blob_to      = from;
+    blob_which   = which;
+    blob_offset  = offset;
+    blob_tries   = 0;
+    blob_query_send();
+}
+
+/* Strong override of oryx.c's weak hook. */
+uint8_t oryx_freeze_seen(void) {
+    if (!link_ready) {
+        return ORYX_BLOB_NO_LINK;
+    }
+    send_command(ZSA_MSG_CMD_FREEZE_SEEN);
+    return ORYX_BLOB_OK;
+}
+
+static void blob_rx(const uint8_t *payload, uint16_t len) {
+    struct zsa_blob_reply r = {0};
+    if (!blob_waiting || len < BLOB_REPLY_HEAD) {
+        return;
+    }
+    memcpy(&r, payload, len < sizeof(r) ? len : sizeof(r));
+    if (r.which != blob_which || r.offset != blob_offset || r.len > ZSA_BLOB_CHUNK || len < BLOB_REPLY_HEAD + r.len) {
+        return;
+    }
+    oryx_blob_t blob = {
+        .which     = r.which,
+        .status    = r.status,
+        .total_len = r.total_len,
+        .offset    = r.offset,
+        .len       = r.len,
+    };
+    memcpy(blob.data, r.data, r.len);
+    blob_waiting = false;
+    oryx_blob_send(blob_to, &blob);
+}
+
+static void blob_task(void) {
+    if (!blob_waiting) {
+        return;
+    }
+    if (timer_elapsed32(blob_sent_ms) < BLOB_REPLY_MS) {
+        return;
+    }
+    if (link_ready && blob_tries < BLOB_TRIES) {
+        blob_query_send();
+        return;
+    }
+    blob_waiting = false;
+    blob_answer_status(blob_to, blob_which, blob_offset, link_ready ? ORYX_BLOB_TIMEOUT : ORYX_BLOB_NO_LINK);
+}
+#else
+static void blob_rx(const uint8_t *payload, uint16_t len) {
+    (void)payload;
+    (void)len;
+}
+
+static inline void blob_task(void) {}
+#endif // COMMUNITY_MODULE_ORYX_ENABLE
+
 /* ---- Diagnostic view ---- */
 
 const uint8_t zsa_diag_keys[ZSA_DIAG_KEY_COUNT][2] = ZSA_DIAG_KEYS;
@@ -4879,6 +4995,9 @@ void bluetooth_task(void) {
 
     /* Oryx host slots: retry the left query, or answer without it */
     host_slots_task();
+
+    /* Oryx blob read: retry the left query, or answer without it */
+    blob_task();
 
     /* Unblank if the nRF stopped refreshing the update state */
     dfu_state_task();

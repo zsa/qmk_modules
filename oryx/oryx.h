@@ -76,6 +76,14 @@ enum Oryx_Command_Code {
      * oryx_host_slot_t, possibly after a short wait for the left nRF.
      * Unpaired-safe, like the other queries. */
     ORYX_CMD_GET_HOST_SLOTS,
+    /* Ask for one chunk of a left nRF blob, param[0] the blob, param[1..2]
+     * the offset, little endian (oryx_blob.h). Answered with ORYX_EVT_BLOB
+     * carrying an oryx_blob_t, possibly after a short wait for the left nRF.
+     * Unpaired-safe, like the other queries. */
+    ORYX_CMD_GET_BLOB,
+    /* Clear the left nRF freeze record's unread flag (oryx_blob.h). Answered
+     * at once with ORYX_EVT_FREEZE_SEEN. Unpaired-safe. */
+    ORYX_CMD_FREEZE_SEEN,
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
     /* Test builds only. Trackpad power-measurement action, param[0]: 0 status,
      * 1 force sleep, 2 cancel force sleep, 3 pause pad access, 4 resume pad
@@ -125,6 +133,12 @@ enum Oryx_Event_Code {
     /* Answer to ORYX_CMD_GET_HOST_SLOTS: an oryx_host_slot_t in bytes 1..10,
      * zero after. Binary, so it carries no ORYX_STOP_BIT. */
     ORYX_EVT_HOST_SLOTS,
+    /* Answer to ORYX_CMD_GET_BLOB: an oryx_blob_t in bytes 1..31. Binary, so
+     * it carries no ORYX_STOP_BIT. */
+    ORYX_EVT_BLOB,
+    /* Answer to ORYX_CMD_FREEZE_SEEN: byte 1 ORYX_BLOB_OK or
+     * ORYX_BLOB_NO_LINK, zero after. */
+    ORYX_EVT_FREEZE_SEEN,
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
     /* Answer to ORYX_CMD_DEBUG_PAD_POWER: byte 1 action, byte 2 write status
      * (0 OK, CGEN6_* error bits, 0x80 pad not up on its real address, 0x81

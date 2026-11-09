@@ -11,6 +11,7 @@
 #include "oryx_diag.h"
 #include "oryx_radio_info.h"
 #include "oryx_host_slots.h"
+#include "oryx_blob.h"
 #include "action_util.h"
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
 #    include "navigator_trackpad_common.h"
@@ -24,6 +25,8 @@ ASSERT_COMMUNITY_MODULES_MIN_API_VERSION(1, 1, 1);
 
 _Static_assert(ORYX_CMD_GET_RADIO_INFO == 0x12 && ORYX_EVT_RADIO_INFO == 0x12, "radio info ids are a wire contract");
 _Static_assert(ORYX_CMD_GET_HOST_SLOTS == 0x13 && ORYX_EVT_HOST_SLOTS == 0x13, "host slot ids are a wire contract");
+_Static_assert(ORYX_CMD_GET_BLOB == 0x14 && ORYX_EVT_BLOB == 0x14, "blob ids are a wire contract");
+_Static_assert(ORYX_CMD_FREEZE_SEEN == 0x15 && ORYX_EVT_FREEZE_SEEN == 0x15, "freeze seen ids are a wire contract");
 
 uint8_t current_layer = 0;
 
@@ -208,6 +211,26 @@ __attribute__((weak)) void oryx_host_slots_request(oryx_transport_t from, uint8_
     oryx_host_slot_send(from, &info);
 }
 
+void oryx_blob_send(oryx_transport_t to, const oryx_blob_t *blob) {
+    uint8_t event[RAW_EPSIZE] = {0};
+    event[0] = ORYX_EVT_BLOB;
+    /* Binary payload, no ORYX_STOP_BIT. */
+    memcpy(&event[1], blob, sizeof(*blob));
+    oryx_transport_t prev = send_transport;
+    send_transport        = to;
+    raw_hid_send_oryx(event, RAW_EPSIZE);
+    send_transport = prev;
+}
+
+__attribute__((weak)) void oryx_blob_request(oryx_transport_t from, uint8_t which, uint16_t offset) {
+    oryx_blob_t blob = {.which = which, .status = ORYX_BLOB_NO_LINK, .offset = offset};
+    oryx_blob_send(from, &blob);
+}
+
+__attribute__((weak)) uint8_t oryx_freeze_seen(void) {
+    return ORYX_BLOB_NO_LINK;
+}
+
 static void oryx_handle_command(uint8_t *data, uint8_t length) {
     uint8_t  command = data[0];
     uint8_t *param   = &data[1];
@@ -299,6 +322,18 @@ static void oryx_handle_command(uint8_t *data, uint8_t length) {
         case ORYX_CMD_GET_HOST_SLOTS:
             oryx_host_slots_request(send_transport, param[0]);
             break;
+
+        case ORYX_CMD_GET_BLOB:
+            oryx_blob_request(send_transport, param[0], (uint16_t)(param[1] | (param[2] << 8)));
+            break;
+
+        case ORYX_CMD_FREEZE_SEEN: {
+            uint8_t event[RAW_EPSIZE] = {0};
+            event[0] = ORYX_EVT_FREEZE_SEEN;
+            event[1] = oryx_freeze_seen();
+            raw_hid_send_oryx(event, RAW_EPSIZE);
+            break;
+        }
 
 #if defined(NAVIGATOR_TRACKPAD_DEBUG)
         case ORYX_CMD_DEBUG_PAD_POWER: {
