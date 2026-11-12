@@ -137,6 +137,21 @@
 #    define ZSA_WIRED_LED_VAL_CAP 255
 #endif
 
+/* ---- Right-half VBUS stability (see zsa_charge_stability.h) ---- */
+
+/* Wired, ZSA_CHARGE_UNSTABLE_LOSSES right-half VBUS losses within one
+ * ZSA_CHARGE_UNSTABLE_WINDOW_MS window lower the charge budget of both halves
+ * by ZSA_CHARGE_UNSTABLE_STEP_MA, down to ZSA_PWR_BUDGET_DEFAULT_MA. */
+#ifndef ZSA_CHARGE_UNSTABLE_LOSSES
+#    define ZSA_CHARGE_UNSTABLE_LOSSES 4
+#endif
+#ifndef ZSA_CHARGE_UNSTABLE_WINDOW_MS
+#    define ZSA_CHARGE_UNSTABLE_WINDOW_MS 60000
+#endif
+#ifndef ZSA_CHARGE_UNSTABLE_STEP_MA
+#    define ZSA_CHARGE_UNSTABLE_STEP_MA 500
+#endif
+
 /* ---- BLE status overlay (see status_layer.c) ---- */
 
 /* Battery gauge geometry: six LEDs on the top row of each half, filling

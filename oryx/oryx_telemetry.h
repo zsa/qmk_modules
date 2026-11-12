@@ -18,8 +18,9 @@ ORYX_CMD_GET_TELEMETRY, and it is expected to keep growing.
 ADDING A FIELD
 ===========================================================================
 
-Append it where reserved[] starts, shrink reserved[] by the same size, and
-raise ORYX_TLM_LEN. Leave ORYX_TLM_VERSION alone: `len` is what a host tests,
+The payload is full: charge_issue took the last byte of the report. A new
+field needs a longer report or a second command. Otherwise, append it after
+the last defined field and raise ORYX_TLM_LEN. Leave ORYX_TLM_VERSION alone: `len` is what a host tests,
 so an old host reading a new firmware stops at the fields it knows, and a new
 host reading an old firmware sees a short `len` and calls the fields it did not
 get unknown instead of reading whatever happened to be there. Raise the version
@@ -49,7 +50,7 @@ confident "no".
 #define ORYX_TLM_VERSION 1
 
 /* Defined bytes after the `len` byte itself. Grows as fields are appended. */
-#define ORYX_TLM_LEN 28
+#define ORYX_TLM_LEN 29
 
 /* Battery level we could not read. Never 0: that is a flat battery. */
 #define ORYX_TLM_LEVEL_UNKNOWN 0xFF
@@ -108,6 +109,13 @@ confident "no".
 #define ORYX_TLM_ESB_MISMATCH 2
 #define ORYX_TLM_ESB_UNKNOWN  0xFF
 
+/* Wired: the right half's VBUS kept dropping out, and what was done about it.
+ * Stays set until left VBUS goes away or the source changes. */
+#define ORYX_TLM_CHARGE_ISSUE_NONE     0    /* nothing detected */
+#define ORYX_TLM_CHARGE_ISSUE_REDUCED  1    /* unstable; both halves' charge budget lowered */
+#define ORYX_TLM_CHARGE_ISSUE_AT_FLOOR 2    /* still unstable at the lowest budget */
+#define ORYX_TLM_CHARGE_ISSUE_UNKNOWN  0xFF
+
 /* Fills bytes 1..31 of the 32-byte response report, byte 0 being
  * ORYX_EVT_TELEMETRY. */
 typedef struct __attribute__((packed)) {
@@ -142,13 +150,14 @@ typedef struct __attribute__((packed)) {
     uint8_t nav_bus;
     uint8_t trrs;                 /* ORYX_TLM_TRRS_* */
     uint8_t esb_link;             /* ORYX_TLM_ESB_* */
-    uint8_t reserved[1];          /* zero; room for one more one-byte field */
+    uint8_t charge_issue;         /* ORYX_TLM_CHARGE_ISSUE_* */
 } oryx_telemetry_t;
 
 _Static_assert(sizeof(oryx_telemetry_t) == RAW_EPSIZE - 1, "telemetry payload must fill the report");
 _Static_assert(offsetof(oryx_telemetry_t, nav_bus) == 27, "nav_bus offset");
 _Static_assert(offsetof(oryx_telemetry_t, trrs) == 28, "trrs offset");
-_Static_assert(offsetof(oryx_telemetry_t, esb_link) == 29 && ORYX_TLM_LEN == offsetof(oryx_telemetry_t, esb_link) - offsetof(oryx_telemetry_t, len), "esb_link is the last defined byte");
+_Static_assert(offsetof(oryx_telemetry_t, esb_link) == 29, "esb_link offset");
+_Static_assert(offsetof(oryx_telemetry_t, charge_issue) == 30 && ORYX_TLM_LEN == offsetof(oryx_telemetry_t, charge_issue) - offsetof(oryx_telemetry_t, len), "charge_issue is the last defined byte");
 
 /* Everything unknown, ready for whoever can actually answer. Not memset(0):
  * zero is a real answer for most of these fields. */
@@ -167,6 +176,7 @@ static inline void oryx_telemetry_reset(oryx_telemetry_t *tlm) {
     tlm->nav_bus              = ORYX_TLM_NAV_UNKNOWN;
     tlm->trrs                 = ORYX_TLM_TRRS_UNKNOWN;
     tlm->esb_link             = ORYX_TLM_ESB_UNKNOWN;
+    tlm->charge_issue         = ORYX_TLM_CHARGE_ISSUE_UNKNOWN;
     tlm->charge_state         = ORYX_TLM_CHG_UNKNOWN;
     tlm->ble_addr_type        = ORYX_TLM_BLE_ADDR_UNKNOWN;
     tlm->ble_slot             = ORYX_TLM_BLE_SLOT_UNKNOWN;

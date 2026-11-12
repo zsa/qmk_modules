@@ -25,6 +25,7 @@
 #include "log_tap.h"
 #include "busdev.h"
 #include "zsa_stm32_diag.h"
+#include "zsa_charge_stability.h"
 #ifdef COMMUNITY_MODULE_ORYX_ENABLE
 #    include "oryx.h"
 #    include "oryx_diag.h"
@@ -224,6 +225,17 @@ static struct zsa_nav_link_age nav_link_age; /* the same, aged for nav presence 
  * There is no user setting and no host command for any of this. The rate
  * follows the source, and only the source.
  *
+ * Wired, an unstable right-half VBUS steps it down (zsa_charge_stability.h):
+ * ZSA_CHARGE_UNSTABLE_LOSSES PRESENT -> absent transitions of the right PMIC's
+ * VBUSIN status within ZSA_CHARGE_UNSTABLE_WINDOW_MS, between consecutive
+ * wired telemetry reads, lower the budget used for both halves by
+ * ZSA_CHARGE_UNSTABLE_STEP_MA, never below ZSA_PWR_BUDGET_DEFAULT_MA. Counted
+ * only with left VBUS present, the cable plugged and the STM32 owning the
+ * right bus. A failed read or an unplugged cable breaks the sample chain and
+ * clears the window. Steps and the reported state are cleared when left VBUS
+ * goes away or the source reports a different budget. Reported in telemetry
+ * as charge_issue; power_budget_ma stays what the source advertised.
+ *
  * Bench builds only: defining both ZSA_RIGHT_VBUS_LIMIT_OVERRIDE_MA and
  * ZSA_RIGHT_CHARGE_OVERRIDE_MA (milliamps) replaces the right half's computed
  * pair with those two fixed values. Both must be given; neither alone has any
@@ -233,10 +245,16 @@ static struct zsa_nav_link_age nav_link_age; /* the same, aged for nav presence 
  * decision in this file report "no USB host" — CMD_USB_STATE to the nRF, idle
  * stepping, and the nav HID routing gates — so a cabled board behaves as if it
  * were on a wall charger. The USB stack itself is untouched: the board still
- * enumerates and QMK still routes keyboard HID over USB. */
+ * enumerates and QMK still routes keyboard HID over USB.
+ *
+ * Bench builds only: defining ZSA_BENCH_FAKE_RIGHT_VBUS_LOSS feeds the
+ * stability detector a fake right VBUS PRESENT bit, absent one sample in every
+ * 5 s, in place of the real one. Only usable samples are faked: left VBUS,
+ * cable, bus ownership and read gating are unchanged. */
 static uint16_t nrf_power_budget_ma  = ZSA_PWR_BUDGET_DEFAULT_MA;
 static bool     pwr_budget_seen;      /* any EVT_PWR_BUDGET received yet */
 static uint32_t last_pwr_maintain_ms = 0;
+static struct zsa_charge_stability chg_stab; /* right VBUS stability, budget step-down */
 /* What we last commanded to each half, and whether we have commanded anything
  * yet. Reported as telemetry, so it has to be what went out rather than what we
  * would send. */
@@ -1174,6 +1192,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                 if (!pwr_budget_seen || p->budget_ma != nrf_power_budget_ma) {
                     last_pwr_maintain_ms = 0;
                 }
+                (void)zsa_charge_stability_source(&chg_stab, p->budget_ma);
                 nrf_power_budget_ma = p->budget_ma;
                 pwr_budget_seen     = true;
             }
@@ -1190,6 +1209,7 @@ static void handle_rx_frame(const struct zsa_frame *frame) {
                         vbus_present_ms = timer_read32();
                     } else {
                         usb_configured = false;
+                        zsa_charge_stability_reset(&chg_stab);
                     }
                     /* The PMICs dropped their input limit back to the startup
                      * value when VBUS went away, so whatever we commanded is
@@ -1602,6 +1622,18 @@ static void telemetry_esb_link(oryx_telemetry_t *tlm) {
  * actually commanded, not what would be commanded now: until the link is up
  * and something has gone out, the answer is that we do not know. */
 static void telemetry_charging(oryx_telemetry_t *tlm) {
+    switch (chg_stab.state) {
+        case ZSA_CHARGE_REDUCED:
+            tlm->charge_issue = ORYX_TLM_CHARGE_ISSUE_REDUCED;
+            break;
+        case ZSA_CHARGE_AT_FLOOR:
+            tlm->charge_issue = ORYX_TLM_CHARGE_ISSUE_AT_FLOOR;
+            break;
+        default:
+            tlm->charge_issue = ORYX_TLM_CHARGE_ISSUE_NONE;
+            break;
+    }
+
     if (!link_ready) {
         return;
     }
@@ -1609,7 +1641,7 @@ static void telemetry_charging(oryx_telemetry_t *tlm) {
     tlm->power_budget_ma = nrf_power_budget_ma;
 
     /* The left's pair. The right's is lower and is not reported: the struct has
-     * one pair of fields and 13 reserved bytes, and adding a second pair is a
+     * one pair of fields and no reserved bytes, and adding a second pair is a
      * wire change for later. */
     if (limits_commanded) {
         tlm->charge_limit_ma   = commanded_limits.vbus_limit_ma;
@@ -4498,6 +4530,7 @@ void bluetooth_init(void) {
     last_link_up_ms = timer_read32();
     vbus_wait_ms    = timer_read32();
     power_gate_ms   = timer_read32();
+    zsa_charge_stability_init(&chg_stab, nrf_power_budget_ma);
 #ifdef ZSA_BLE_LOG
     zsa_log_tap_init();
     zsa_log("zsa_wireless: init (ZSA_BLE_LOG=on)");
@@ -4522,7 +4555,7 @@ static void power_budget_task(void) {
     /* Same pair for both halves: the right's LEDs no longer draw from the
      * cable's 5 V rail, so the right-only ceilings in the wire header are not
      * applied. */
-    struct zsa_charge_limits want_left  = zsa_charge_limits_for_budget(nrf_power_budget_ma);
+    struct zsa_charge_limits want_left  = zsa_charge_limits_for_budget(zsa_charge_stability_budget(&chg_stab));
     struct zsa_charge_limits want_right = want_left;
 #if defined(ZSA_RIGHT_VBUS_LIMIT_OVERRIDE_MA) && defined(ZSA_RIGHT_CHARGE_OVERRIDE_MA)
     /* Bench knob: command the right half a fixed pair instead of the policy's. */
@@ -4549,6 +4582,26 @@ static void power_budget_task(void) {
     last_pwr_maintain_ms   = timer_read32();
 }
 
+/* Feeds one wired right read (NULL: failed) to the VBUS stability detector. */
+static void charge_stability_task(const struct zsa_right_telemetry *got) {
+    struct zsa_pmic_rails rails;
+    bool usable = got != NULL && nrf_vbus_present && zsa_trrs_plugged() && zsa_right_telemetry_rails(got, &rails) &&
+                  (rails.flags & ZSA_PMIC_RAILS_PRESENT) && rails.vbusin_status != ZSA_PMIC_RAILS_REG_UNKNOWN;
+    if (!usable) {
+        zsa_charge_stability_break(&chg_stab);
+        return;
+    }
+#ifdef ZSA_BENCH_FAKE_RIGHT_VBUS_LOSS
+    /* Bench knob: right VBUS absent one sample in every 5 s. */
+    bool present = (timer_read32() / 1000) % 5 != 0;
+#else
+    bool present = (rails.vbusin_status & ZSA_PMIC_RAILS_VBUS_PRESENT) != 0;
+#endif
+    if (zsa_charge_stability_sample(&chg_stab, timer_read32(), present)) {
+        last_pwr_maintain_ms = 0;
+    }
+}
+
 /* Refresh the right half's own reading while the STM32 masters its bus. Not
  * attempted otherwise: the right's TWIS slave is only reachable over the TRRS
  * net, and a read while the right owns that net would be two masters. Dropping
@@ -4557,6 +4610,7 @@ static void power_budget_task(void) {
 static void right_telemetry_task(void) {
     if (!zsa_stm32_owns_right_bus()) {
         right_tlm_valid = false;
+        zsa_charge_stability_break(&chg_stab);
         return;
     }
     if (last_right_tlm_ms != 0 && timer_elapsed32(last_right_tlm_ms) < RIGHT_TLM_INTERVAL_MS) {
@@ -4566,6 +4620,7 @@ static void right_telemetry_task(void) {
 
     struct zsa_right_telemetry got;
     right_tlm_valid = voyager_right_nrf_read_telemetry(&got) && zsa_right_telemetry_ok(&got);
+    charge_stability_task(right_tlm_valid ? &got : NULL);
     if (right_tlm_valid) {
         right_tlm = got;
         /* Relay it to the left: wired, the right's radio is off, so this is
