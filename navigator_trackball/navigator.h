@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #ifndef NAVIGATOR_SCROLL_DIVIDER
     #define NAVIGATOR_SCROLL_DIVIDER 10
 #endif
