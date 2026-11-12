@@ -2,7 +2,7 @@
  * zsa_right_telemetry.h -- what the right half says about itself, wired
  *
  * Shared between nRF54 (Zephyr, voyager_right/src/twis0.c) and STM32 (QMK,
- * keyboards/zsa/voyager_tng/voyager_tng.c). No dependencies on either
+ * keyboards/zsa/wireless_voyager/wireless_voyager.c). No dependencies on either
  * framework. Kept byte-identical in both trees, like zsa_uart_proto.h.
  *
  * ===========================================================================

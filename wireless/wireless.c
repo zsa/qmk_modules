@@ -245,7 +245,7 @@ static struct zsa_charge_limits commanded_right_limits; /* right */
 static bool                     limits_commanded;
 #define PWR_BUDGET_MAINTAIN_INTERVAL_MS 5000
 
-/* Board-provided (voyager_tng.c) right-half charge command; extern rather
+/* Board-provided (wireless_voyager.c) right-half charge command; extern rather
  * than including the board header to keep the module decoupled. */
 extern bool voyager_right_nrf_set_charge_limits(uint16_t vbus_limit_ma, uint16_t charge_ma);
 extern bool voyager_right_nrf_ship(void);
@@ -261,7 +261,7 @@ extern bool zsa_trrs_plugged(void);
  * matrix.c. Reported in the scan diagnostics below. */
 extern uint16_t zsa_matrix_right_read_errors(void);
 #endif
-/* Right LED driver, supervised by the keyboard (voyager_tng.c). */
+/* Right LED driver, supervised by the keyboard (wireless_voyager.c). */
 extern void voyager_right_led_resync(void);
 extern bool voyager_right_led_up(void);
 
@@ -272,7 +272,7 @@ extern bool voyager_right_led_up(void);
 static bool left_led_rail_on = true;
 
 /* Confirmed via drivers/led/issi/is31fl3731.c (i2c_addresses[] mirrors the
- * IS31FL3731_I2C_ADDRESS_N chain in order) and voyager_tng.c's
+ * IS31FL3731_I2C_ADDRESS_N chain in order) and wireless_voyager.c's
  * g_is31fl3731_leds[] table: driver 0 is the left half's real chip
  * (IS31FL3731_I2C_ADDRESS_1 / 0x74), driver 1 is the right half
  * (IS31FL3731_I2C_ADDRESS_2 / 0x77) - the left nRF's TWIS emulation when
@@ -327,7 +327,7 @@ static bool     right_tlm_valid;
 static uint32_t last_right_tlm_ms;
 #define RIGHT_TLM_INTERVAL_MS 1000
 
-/* Board-provided (voyager_tng.c), like voyager_right_nrf_set_charge_limits(). */
+/* Board-provided (wireless_voyager.c), like voyager_right_nrf_set_charge_limits(). */
 extern bool voyager_right_nrf_read_telemetry(struct zsa_right_telemetry *out);
 
 /* ---- Scan diagnostics (ZSA_SCAN_DIAG) ---- *
@@ -2229,7 +2229,7 @@ static void dfu_led_task(void) {
 #if defined(MCU_STM32) && defined(STM32F3XX)
 /* ---- STM32 STOP mode ----
  *
- * Left matrix (voyager_tng/matrix.c): strobes B10-B15 drive high, sense inputs
+ * Left matrix (wireless_voyager/matrix.c): strobes B10-B15 drive high, sense inputs
  * A0-A3, A6, A7, B0 are pulled down, so a key press is a rising edge. A0 and B0
  * share EXTI0, which goes to B0 (three keys); the one key on A0 is read at
  * every RTC wakeup instead. USART1 RX (PA10, EXTI10) wakes on the falling edge
@@ -3202,7 +3202,7 @@ static void right_led_slice_task(void) {
  * same dirty check at cycle start as the right mirror. A failed write, a host
  * appearing or a resync abandons the cycle and marks the buffer dirty, so the
  * whole frame is sent again. The PWM page is re-selected before every block:
- * the left chip's busdev verify (led_function_page_ok in voyager_tng.c) walks
+ * the left chip's busdev verify (led_function_page_ok in wireless_voyager.c) walks
  * to the function page and back between passes, and a failed walk back would
  * otherwise send PWM data into the function registers. */
 static void left_led_slice_task(void) {
@@ -3834,7 +3834,7 @@ _Static_assert(ORYX_RADIO_INFO_HASH_LEN <= ZSA_CONFIRM_HASH_LEN, "right_tag is a
 _Static_assert(sizeof(struct zsa_confirm_query) == ZSA_CONFIRM_QUERY_LEN && sizeof(struct zsa_confirm_reply) == ZSA_CONFIRM_REPLY_LEN, "mailbox wire layouts");
 _Static_assert(ORYX_RADIO_INFO_F_LEFT_VALID == ZSA_RADIO_INFO_F_LEFT_VALID && ORYX_RADIO_INFO_F_LEFT_CONFIRMED == ZSA_RADIO_INFO_F_LEFT_CONFIRMED && ORYX_RADIO_INFO_F_RIGHT_VALID == ZSA_RADIO_INFO_F_RIGHT_VALID && ORYX_RADIO_INFO_F_RIGHT_CONFIRMED == ZSA_RADIO_INFO_F_RIGHT_CONFIRMED, "same flag bits");
 
-/* Board-provided (voyager_tng.c), like voyager_right_nrf_read_telemetry(). */
+/* Board-provided (wireless_voyager.c), like voyager_right_nrf_read_telemetry(). */
 extern bool voyager_right_nrf_mailbox_write(uint8_t reg, const uint8_t *data, uint16_t len);
 extern bool voyager_right_nrf_mailbox_read(uint8_t reg, uint8_t *out, uint16_t len);
 
