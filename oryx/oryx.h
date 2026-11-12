@@ -24,8 +24,21 @@ always respond with a Oryx_Event_Code or a Oryx_Error_Code.
 #    define RAW_EPSIZE 32
 #endif
 
-#define ORYX_PROTOCOL_VERSION 0x05
+#define ORYX_PROTOCOL_VERSION 0x06
 #define ORYX_STOP_BIT -2
+
+/*
+ORYX_SET_RGB_LEDS sets several RGB LEDs in one packet, so a host animating the
+board sends one packet per few keys instead of one per key:
+
+    byte 0       ORYX_SET_RGB_LEDS
+    byte 1       count, 1 to ORYX_SET_RGB_LEDS_MAX
+    then count × index, red, green, blue
+
+LEDs past the board's last are skipped. Hosts can check for it with
+ORYX_GET_PROTOCOL_VERSION (0x06 and up) and fall back to ORYX_SET_RGB_LED.
+*/
+#define ORYX_SET_RGB_LEDS_MAX ((RAW_EPSIZE - 2) / 4)
 
 enum Oryx_Command_Code {
     ORYX_CMD_GET_FW_VERSION,
@@ -41,6 +54,7 @@ enum Oryx_Command_Code {
     ORYX_STATUS_LED_CONTROL,
     ORYX_SET_AUTOMOUSE,
     ORYX_GET_AUTOMOUSE,
+    ORYX_SET_RGB_LEDS, // since protocol 0x06; see ORYX_SET_RGB_LEDS_MAX
     ORYX_GET_PROTOCOL_VERSION = 0xFE,
 };
 

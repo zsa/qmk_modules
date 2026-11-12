@@ -177,10 +177,38 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
 
         case ORYX_SET_RGB_LED:
 #if defined(RGB_MATRIX_ENABLE) && !defined(PROTOCOL_LUFA)
-            webhid_leds[param[0]] = (RGB){.r = param[1], .g = param[2], .b = param[3]};
+            // The index comes from the host: one past the board's LEDs
+            // would write past webhid_leds.
+            if (param[0] < RGB_MATRIX_LED_COUNT) {
+                webhid_leds[param[0]] = (RGB){.r = param[1], .g = param[2], .b = param[3]};
+            }
             if (rawhid_state.rgb_control == false) {
                 set_webhid_effect();
             }
+#else
+            oryx_error(ORYX_ERR_RGB_MATRIX_NOT_ENABLED);
+#endif
+            break;
+        case ORYX_SET_RGB_LEDS:
+#if defined(RGB_MATRIX_ENABLE) && !defined(PROTOCOL_LUFA)
+        {
+            uint8_t count = param[0];
+            if (count > ORYX_SET_RGB_LEDS_MAX) {
+                count = ORYX_SET_RGB_LEDS_MAX;
+            }
+            if (length < 2 + 4 * count) {
+                count = length < 2 ? 0 : (length - 2) / 4;
+            }
+            for (uint8_t i = 0; i < count; i++) {
+                uint8_t *led = &param[1 + 4 * i];
+                if (led[0] < RGB_MATRIX_LED_COUNT) {
+                    webhid_leds[led[0]] = (RGB){.r = led[1], .g = led[2], .b = led[3]};
+                }
+            }
+            if (rawhid_state.rgb_control == false) {
+                set_webhid_effect();
+            }
+        }
 #else
             oryx_error(ORYX_ERR_RGB_MATRIX_NOT_ENABLED);
 #endif
