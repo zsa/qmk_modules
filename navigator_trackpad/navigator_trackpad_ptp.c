@@ -284,8 +284,11 @@ static void process_fallback_mouse(cgen6_report_t *sensor_report, bool finger_do
                 float acc_dy = (raw_dy < 0) ? -powf(-raw_dy, TRACKPAD_MOUSE_ACCELERATION) : powf(raw_dy, TRACKPAD_MOUSE_ACCELERATION);
 
                 // Apply sensitivity scaling and accumulate for subpixel precision
-                mouse_state.dx_accum += acc_dx * TRACKPAD_MOUSE_SENSITIVITY;
-                mouse_state.dy_accum += acc_dy * TRACKPAD_MOUSE_SENSITIVITY;
+                float sensitivity = TRACKPAD_MOUSE_SENSITIVITY;
+                if (navigator_trackpad_turbo) sensitivity *= NAVIGATOR_TURBO_MULTIPLIER;
+                if (navigator_trackpad_aim) sensitivity /= NAVIGATOR_AIM_DIVIDER;
+                mouse_state.dx_accum += acc_dx * sensitivity;
+                mouse_state.dy_accum += acc_dy * sensitivity;
 
                 // Extract integer portion for reporting, keep fractional for next frame
                 dx = clamp_to_int8((int32_t)mouse_state.dx_accum);
@@ -430,6 +433,17 @@ bool navigator_trackpad_ptp_task(void) {
     // Slot-0 presence (raw tip) drives the mouse-mode fallback tap detector below.
     bool finger0_present = sensor_report.fingers[0].tip;
 
+    float speed_factor = 1.0f;
+    if (navigator_trackpad_turbo) speed_factor = (float)NAVIGATOR_TURBO_MULTIPLIER;
+    if (navigator_trackpad_aim) speed_factor = 1.0f / (float)NAVIGATOR_AIM_DIVIDER;
+
+    static struct {
+        bool    down;
+        uint8_t id;
+        float   vx, vy;
+        int16_t last_x, last_y;
+    } nt_speed_track[NT_MAX_CONTACTS];
+
     // --- Contact assembly ---
     // Gather currently-down contacts with the sensor's stable per-finger id. The
     // Cirque keeps a finger's id constant even when it moves the contact to a
@@ -451,12 +465,49 @@ bool navigator_trackpad_ptp_task(void) {
             // contacts share the center, so the transform is rigid: their
             // separation (used for two-finger gestures) is preserved.
             NT_ROTATE_POINT(px, py);
+            {
+                uint8_t fid = sensor_report.fingers[ss].id;
+                int8_t  slot = -1, free_slot = -1;
+                for (uint8_t i = 0; i < NT_MAX_CONTACTS; i++) {
+                    if (nt_speed_track[i].down && nt_speed_track[i].id == fid) slot = i;
+                    if (!nt_speed_track[i].down && free_slot < 0) free_slot = i;
+                }
+                if (slot < 0 && free_slot >= 0) {
+                    slot = free_slot;
+                    nt_speed_track[slot].down = true;
+                    nt_speed_track[slot].id   = fid;
+                    nt_speed_track[slot].vx   = px;
+                    nt_speed_track[slot].vy   = py;
+                } else if (slot >= 0) {
+                    nt_speed_track[slot].vx += (float)(px - nt_speed_track[slot].last_x) * speed_factor;
+                    nt_speed_track[slot].vy += (float)(py - nt_speed_track[slot].last_y) * speed_factor;
+                    if (nt_speed_track[slot].vx < 0.0f) nt_speed_track[slot].vx = 0.0f;
+                    if (nt_speed_track[slot].vy < 0.0f) nt_speed_track[slot].vy = 0.0f;
+                    if (nt_speed_track[slot].vx > (float)TRACKPAD_LOGICAL_MAX) nt_speed_track[slot].vx = (float)TRACKPAD_LOGICAL_MAX;
+                    if (nt_speed_track[slot].vy > (float)TRACKPAD_LOGICAL_MAX) nt_speed_track[slot].vy = (float)TRACKPAD_LOGICAL_MAX;
+                }
+                if (slot >= 0) {
+                    nt_speed_track[slot].last_x = px;
+                    nt_speed_track[slot].last_y = py;
+                    px = (uint16_t)(nt_speed_track[slot].vx + 0.5f);
+                    py = (uint16_t)(nt_speed_track[slot].vy + 0.5f);
+                }
+            }
             cur[cur_n].id   = sensor_report.fingers[ss].id;
             cur[cur_n].x    = px;
             cur[cur_n].y    = py;
             cur[cur_n].conf = sensor_report.fingers[ss].confidence;
             cur_n++;
         }
+    }
+
+    for (uint8_t i = 0; i < NT_MAX_CONTACTS; i++) {
+        if (!nt_speed_track[i].down) continue;
+        bool present = false;
+        for (uint8_t c = 0; c < cur_n; c++) {
+            if (cur[c].id == nt_speed_track[i].id) present = true;
+        }
+        if (!present) nt_speed_track[i].down = false;
     }
 
     uint8_t buttons = sensor_report.buttons & BUTTON_PRIMARY;
