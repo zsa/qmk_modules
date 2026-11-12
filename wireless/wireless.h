@@ -126,9 +126,6 @@ bool zsa_wireless_dfu_led_red_owned(void);
 void zsa_wireless_query_ble_status(void);
 void zsa_wireless_query_battery(void);
 void zsa_wireless_cmd_hibernate(void);
-/* Drop the active BLE link or stop advertising, keeping the bond
- * (CMD_BLE_BANK DISCONNECT). Sent by BLE_DISCONNECT. */
-void zsa_wireless_cmd_ble_disconnect(void);
 
 /* ---- Bluetooth bank menu (BLE_MENU) ----
  *

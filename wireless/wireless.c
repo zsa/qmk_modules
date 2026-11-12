@@ -1371,12 +1371,6 @@ static void send_ble_bank(uint8_t op, uint8_t bank) {
     zsa_wireless_send_frame(ZSA_MSG_CMD_BLE_BANK, (const uint8_t *)&cmd, sizeof(cmd));
 }
 
-/* The bank is the active one when known, else 0. */
-void zsa_wireless_cmd_ble_disconnect(void) {
-    uint8_t bank = (banks_fresh() && nrf_banks.active < ZSA_BLE_BANK_COUNT) ? nrf_banks.active : 0;
-    send_ble_bank(ZSA_BLE_BANK_OP_DISCONNECT, bank);
-}
-
 bool zsa_wireless_link_ready(void) {
     return link_ready;
 }
@@ -4470,11 +4464,6 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
     }
 
     switch (keycode) {
-        case BLE_DISCONNECT:
-            if (record->event.pressed) {
-                zsa_wireless_cmd_ble_disconnect();
-            }
-            return false;
         /* No-op with a USB host. */
         case BLE_MENU:
             if (record->event.pressed) {
@@ -4485,10 +4474,6 @@ bool process_record_wireless(uint16_t keycode, keyrecord_t *record) {
             } else {
                 diag_hold_end(record->event.key);
             }
-            return false;
-        /* Legacy, replaced by the bank menu. */
-        case BLE_PAIR_MODE:
-        case BLE_SWITCH_HOST:
             return false;
         /* Powers both halves off. The nRF refuses while USB is connected. On
          * the cable the right is told first, and the left only on its ACK. */
