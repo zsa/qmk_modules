@@ -10,3 +10,6 @@ Available modules:
 - `oryx`: Includes the raw hid protocol to connect keyboards to Oryx's live
   training / Keymapp live view / typ.ing live view
 - `keycolors`: Includes per-layer key color change
+- `layer_dismiss`: Adds `KC_LAYER_DISMISS` (`LY_DSMS`), an assignable key that
+  turns off the layer that delivered it, on release, emitting nothing: the
+  lowering half of a toggle, aimed at whichever layer resolved the keypress

@@ -1,0 +1,11 @@
+{
+    "module_name": "Layer Dismiss",
+    "maintainer": "David Scarpetti",
+    "license": "GPL-2.0-or-later",
+    "keycodes": [
+        {
+            "key": "KC_LAYER_DISMISS",
+            "aliases": ["LY_DSMS"]
+        }
+    ]
+}
