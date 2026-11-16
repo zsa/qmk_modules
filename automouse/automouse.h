@@ -93,6 +93,13 @@
 #    define AUTOMOUSE_ENABLED_TRACKPAD true
 #endif
 
+// Keep the trackpad's mouse layer alive for as long as a finger rests on the
+// pad, so the timeout only starts counting once every finger has lifted.
+// Activation still requires movement past AUTOMOUSE_THRESHOLD_TRACKPAD.
+#ifndef AUTOMOUSE_TRACKPAD_HOLD_WHILE_TOUCHING
+#    define AUTOMOUSE_TRACKPAD_HOLD_WHILE_TOUCHING false
+#endif
+
 #ifndef AUTOMOUSE_DEBOUNCE
 #    define AUTOMOUSE_DEBOUNCE 25
 #endif
@@ -125,3 +132,7 @@ void automouse_toggle_device(automouse_device_t dev);
 // Feed motion from a sensor that bypasses the QMK pointing-device pipeline
 // (e.g. a digitizer/trackpad) so it can activate the mouse layer.
 void automouse_report_motion(int16_t dx, int16_t dy, uint8_t buttons);
+
+// Report whether a finger is on the trackpad. With
+// AUTOMOUSE_TRACKPAD_HOLD_WHILE_TOUCHING, contact holds an active trackpad session open.
+void automouse_report_contact(bool touching);
