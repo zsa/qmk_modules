@@ -1,0 +1,41 @@
+name: Build moonlight examples
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths: ["moonlight/**", ".github/workflows/build_moonlight.yml"]
+  pull_request:
+    paths: ["moonlight/**", ".github/workflows/build_moonlight.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ghcr.io/qmk/qmk_cli:latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [voyager_lamp, moonlander_lamp]
+    steps:
+      - name: Checkout firmware (firmware25)
+        run: |
+          git clone --depth 1 --branch firmware25 \
+            https://github.com/zsa/qmk_firmware.git /qmk_firmware
+          cd /qmk_firmware
+          qmk config user.qmk_home=/qmk_firmware
+          qmk git-submodule
+
+      - name: Checkout this repo as modules/zsa
+        uses: actions/checkout@v4
+        with:
+          path: modules_checkout
+
+      - name: Overlay module checkout
+        run: |
+          rm -rf /qmk_firmware/modules/zsa
+          cp -r "$GITHUB_WORKSPACE/modules_checkout" /qmk_firmware/modules/zsa
+
+      - name: Build example
+        run: |
+          cd /qmk_firmware
+          qmk compile modules/zsa/moonlight/examples/${{ matrix.example }}.json

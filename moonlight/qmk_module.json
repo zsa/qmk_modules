@@ -1,0 +1,29 @@
+{
+    "module_name": "Moonlight",
+    "maintainer": "ZSA",
+    "license": "GPL-2.0-or-later",
+    "features": {
+        "rgb_matrix": true
+    },
+    "keycodes": [
+        { "key": "MOONLIGHT_ON",          "aliases": ["MNL_ON"]  },
+        { "key": "MOONLIGHT_OFF",         "aliases": ["MNL_OFF"] },
+        { "key": "MOONLIGHT_BRIGHTER",    "aliases": ["MNL_BRI"] },
+        { "key": "MOONLIGHT_DIMMER",      "aliases": ["MNL_DIM"] },
+        { "key": "MOONLIGHT_HUE_UP",      "aliases": ["MNL_HUU"] },
+        { "key": "MOONLIGHT_HUE_DOWN",    "aliases": ["MNL_HUD"] },
+        { "key": "MOONLIGHT_ANIM_START",  "aliases": ["MNL_AST"] },
+        { "key": "MOONLIGHT_ANIM_STOP",   "aliases": ["MNL_ASP"] },
+        { "key": "MOONLIGHT_ANIM_NEXT",   "aliases": ["MNL_ANX"] },
+        { "key": "MOONLIGHT_ANIM_FASTER", "aliases": ["MNL_FST"] },
+        { "key": "MOONLIGHT_ANIM_SLOWER", "aliases": ["MNL_SLW"] },
+        { "key": "MOONLIGHT_PRESET_1",    "aliases": ["MNL_P1"]  },
+        { "key": "MOONLIGHT_PRESET_2",    "aliases": ["MNL_P2"]  },
+        { "key": "MOONLIGHT_PRESET_3",    "aliases": ["MNL_P3"]  },
+        { "key": "MOONLIGHT_PRESET_4",    "aliases": ["MNL_P4"]  },
+        { "key": "MOONLIGHT_PRESET_5",    "aliases": ["MNL_P5"]  },
+        { "key": "MOONLIGHT_PRESET_6",    "aliases": ["MNL_P6"]  },
+        { "key": "MOONLIGHT_PRESET_7",    "aliases": ["MNL_P7"]  },
+        { "key": "MOONLIGHT_PRESET_8",    "aliases": ["MNL_P8"]  }
+    ]
+}
