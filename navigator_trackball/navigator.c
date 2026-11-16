@@ -47,15 +47,23 @@ bool navigator_turbo = false;
 bool navigator_aim = false;
 static bool navigator_speed_suppressed = false;
 
+#if defined(_NAVIGATOR_AIM_HAS_LAYERS) || defined(_NAVIGATOR_TURBO_HAS_LAYERS) || defined(_NAVIGATOR_DRAG_SCROLL_HAS_LAYERS)
+// Returns true when the topmost active layer is in the given list.
+static bool navigator_top_layer_in(const uint8_t *layers, uint8_t count) {
+    uint8_t top = get_highest_layer(layer_state | default_layer_state);
+    for (uint8_t i = 0; i < count; i++) {
+        if (layers[i] == top) return true;
+    }
+    return false;
+}
+#endif
+
 #ifdef _NAVIGATOR_AIM_HAS_LAYERS
 static const uint8_t navigator_aim_layers[] = NAVIGATOR_AIM_LAYERS;
 #define _NAVIGATOR_AIM_LAYER_COUNT (sizeof(navigator_aim_layers) / sizeof(navigator_aim_layers[0]))
 
 static bool navigator_aim_layer_active(void) {
-    for (uint8_t i = 0; i < _NAVIGATOR_AIM_LAYER_COUNT; i++) {
-        if (layer_state_is(navigator_aim_layers[i])) return true;
-    }
-    return false;
+    return navigator_top_layer_in(navigator_aim_layers, _NAVIGATOR_AIM_LAYER_COUNT);
 }
 #endif
 
@@ -64,10 +72,7 @@ static const uint8_t navigator_turbo_layers[] = NAVIGATOR_TURBO_LAYERS;
 #define _NAVIGATOR_TURBO_LAYER_COUNT (sizeof(navigator_turbo_layers) / sizeof(navigator_turbo_layers[0]))
 
 static bool navigator_turbo_layer_active(void) {
-    for (uint8_t i = 0; i < _NAVIGATOR_TURBO_LAYER_COUNT; i++) {
-        if (layer_state_is(navigator_turbo_layers[i])) return true;
-    }
-    return false;
+    return navigator_top_layer_in(navigator_turbo_layers, _NAVIGATOR_TURBO_LAYER_COUNT);
 }
 #endif
 
@@ -76,10 +81,7 @@ static const uint8_t navigator_drag_scroll_layers[] = NAVIGATOR_DRAG_SCROLL_LAYE
 #define _NAVIGATOR_DRAG_SCROLL_LAYER_COUNT (sizeof(navigator_drag_scroll_layers) / sizeof(navigator_drag_scroll_layers[0]))
 
 static bool navigator_drag_scroll_layer_active(void) {
-    for (uint8_t i = 0; i < _NAVIGATOR_DRAG_SCROLL_LAYER_COUNT; i++) {
-        if (layer_state_is(navigator_drag_scroll_layers[i])) return true;
-    }
-    return false;
+    return navigator_top_layer_in(navigator_drag_scroll_layers, _NAVIGATOR_DRAG_SCROLL_LAYER_COUNT);
 }
 #endif
 
@@ -123,8 +125,8 @@ report_mouse_t pointing_device_task_navigator_trackball(report_mouse_t mouse_rep
         mouse_report.y /= NAVIGATOR_AIM_DIVIDER;
     }
     // Drag scroll converts trackball motion into scroll events. It can be
-    // driven by the DRAG_SCROLL/TOGGLE_SCROLL keycodes or by activating one
-    // of the configured drag scroll layers.
+    // driven by the DRAG_SCROLL/TOGGLE_SCROLL keycodes or by the topmost
+    // active layer being one of the configured drag scroll layers.
     bool scroll_active = set_scrolling;
 #ifdef _NAVIGATOR_DRAG_SCROLL_HAS_LAYERS
     scroll_active = scroll_active || navigator_drag_scroll_layer_active();
