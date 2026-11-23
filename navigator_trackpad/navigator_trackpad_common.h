@@ -174,6 +174,8 @@ void     navigator_trackpad_set_cpi(uint16_t cpi);
 
 // Shared globals
 extern bool           trackpad_init;
+extern bool           navigator_trackpad_turbo;
+extern bool           navigator_trackpad_aim;
 
 // Helper functions
 uint8_t cirque_gen6_finger_count(cgen6_report_t *report);
