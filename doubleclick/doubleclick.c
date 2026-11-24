@@ -11,6 +11,10 @@ static uint16_t double_click_timer = 0;
 #    define MOUSE_DOUBLECLICK_INTERVAL_MS 200
 #endif
 
+#ifndef KC_MS_BTN1
+#    define KC_MS_BTN1 QK_MOUSE_BUTTON_1
+#endif
+
 bool process_record_doubleclick(uint16_t keycode, keyrecord_t *record) {
     switch (keycode) {
         case KC_MS_DBL_CLICK:
