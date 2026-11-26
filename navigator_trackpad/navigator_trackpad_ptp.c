@@ -542,6 +542,7 @@ bool navigator_trackpad_ptp_task(void) {
         static int16_t  am_prev_id = -1;
         static uint16_t am_prev_x  = 0;
         static uint16_t am_prev_y  = 0;
+        automouse_report_contact(cur_n > 0);
         if (cur_n > 0) {
             if (cur[0].id == am_prev_id) {
                 automouse_report_motion((int16_t)cur[0].x - (int16_t)am_prev_x,

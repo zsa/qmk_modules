@@ -276,6 +276,16 @@ void automouse_report_motion(int16_t dx, int16_t dy, uint8_t buttons) {
     automouse_accumulate(AUTOMOUSE_DEVICE_TRACKPAD, dx, dy, 0, 0, buttons);
 }
 
+void automouse_report_contact(bool touching) {
+    if (!AUTOMOUSE_TRACKPAD_HOLD_WHILE_TOUCHING || !touching) {
+        return;
+    }
+    if (state.enabled[AUTOMOUSE_DEVICE_TRACKPAD] && state.is_active &&
+        state.active_device == AUTOMOUSE_DEVICE_TRACKPAD) {
+        state.last_activity = timer_read();
+    }
+}
+
 bool process_record_automouse(uint16_t keycode, keyrecord_t *record) {
     if (keycode == KC_AUTOMOUSE_TOGGLE) {
         if (record->event.pressed) {
